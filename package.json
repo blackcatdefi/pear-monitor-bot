@@ -1,0 +1,19 @@
+{
+  "name": "pear-monitor-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "Telegram bot to monitor Pear Protocol positions",
+  "dependencies": {
+    "axios": "^1.14.0",
+    "dotenv": "^17.3.1",
+    "ethers": "^6.16.0",
+    "node-telegram-bot-api": "^0.67.0"
+  }
+}

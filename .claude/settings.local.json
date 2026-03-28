@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:docs.pearprotocol.io)",
+      "WebFetch(domain:github.com)",
+      "Bash(npm init:*)",
+      "Bash(npm install:*)",
+      "Bash(node index.js)",
+      "Bash(taskkill //F //IM \"node.exe\")",
+      "WebFetch(domain:hyperliquid.gitbook.io)",
+      "WebFetch(domain:docs.chainstack.com)",
+      "WebFetch(domain:www.quicknode.com)",
+      "Bash(node -e \":*)"
+    ]
+  }
+}
