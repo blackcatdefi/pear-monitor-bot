@@ -11,7 +11,12 @@
       "WebFetch(domain:hyperliquid.gitbook.io)",
       "WebFetch(domain:docs.chainstack.com)",
       "WebFetch(domain:www.quicknode.com)",
-      "Bash(node -e \":*)"
+      "Bash(node -e \":*)",
+      "Bash(gh repo:*)",
+      "Bash(where gh:*)",
+      "Bash(winget install:*)",
+      "Bash(export PATH=\"$PATH:/c/Program Files/GitHub CLI\")",
+      "Bash(\"/c/Program Files/GitHub CLI/gh.exe\" auth status)"
     ]
   }
 }
