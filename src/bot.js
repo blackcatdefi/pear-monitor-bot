@@ -1,15 +1,19 @@
 const TelegramBot = require('node-telegram-bot-api');
-const { loadWallets, addWallet, removeWallet, shortenAddress } = require('./store');
+const { getWallets, addWallet, removeWallet, shortenAddress } = require('./store');
 
-function createBot(token, chatId, hlApi, monitor) {
+function createBot(token, hlApi, monitor) {
   const bot = new TelegramBot(token, { polling: true });
-  const authorizedChat = String(chatId);
 
-  function isAuthorized(msg) {
-    return String(msg.chat.id) === authorizedChat;
-  }
+  // Register bot commands menu
+  bot.setMyCommands([
+    { command: 'start', description: '🍐 Get started' },
+    { command: 'menu', description: '🍐 Open main menu' },
+    { command: 'positions', description: '📊 View open positions' },
+    { command: 'balance', description: '💰 Check available funds' },
+    { command: 'wallets', description: '📋 List monitored wallets' },
+    { command: 'check', description: '🔍 Force check now' },
+  ]);
 
-  // Inline keyboard for main menu
   function mainMenu() {
     return {
       reply_markup: {
@@ -23,18 +27,8 @@ function createBot(token, chatId, hlApi, monitor) {
     };
   }
 
-  // Register bot commands menu (the button next to the text field)
-  bot.setMyCommands([
-    { command: 'menu', description: '🍐 Open main menu' },
-    { command: 'positions', description: '📊 View open positions' },
-    { command: 'balance', description: '💰 Check available funds' },
-    { command: 'wallets', description: '📋 List monitored wallets' },
-    { command: 'check', description: '🔍 Force check now' },
-  ]);
-
   // /start and /menu
   bot.onText(/\/(start|menu)/, (msg) => {
-    if (!isAuthorized(msg)) return;
     bot.sendMessage(msg.chat.id, [
       '🍐 *Pear Protocol Monitor*',
       '',
@@ -44,16 +38,14 @@ function createBot(token, chatId, hlApi, monitor) {
       '🛑 Your *Stop Loss* triggers',
       '💰 You have *funds available* to trade',
       '',
-      'What would you like to do?',
+      'Tap a button below to get started!',
     ].join('\n'), mainMenu());
   });
 
-  // State for waiting user input
   const waitingFor = {};
 
   // Handle button presses
   bot.on('callback_query', async (query) => {
-    if (String(query.message.chat.id) !== authorizedChat) return;
     const chatId = query.message.chat.id;
     await bot.answerCallbackQuery(query.id);
 
@@ -75,7 +67,7 @@ function createBot(token, chatId, hlApi, monitor) {
         bot.sendMessage(chatId, '📝 Send me the wallet address to monitor:\n\n`0x...`', { parse_mode: 'Markdown' });
         break;
       case 'remove_wallet': {
-        const wallets = loadWallets();
+        const wallets = getWallets(chatId);
         if (wallets.length === 0) {
           bot.sendMessage(chatId, 'No wallets to remove.');
           break;
@@ -95,37 +87,22 @@ function createBot(token, chatId, hlApi, monitor) {
         break;
     }
 
-    // Handle remove wallet confirmation
     if (query.data.startsWith('rm_0x')) {
       const addr = query.data.slice(3);
-      removeWallet(addr);
-      bot.sendMessage(chatId, `✅ Wallet removed.`, mainMenu());
+      removeWallet(chatId, addr);
+      bot.sendMessage(chatId, '✅ Wallet removed.', mainMenu());
     }
   });
 
-  // Shortcut commands from the menu button
-  bot.onText(/\/positions/, async (msg) => {
-    if (!isAuthorized(msg)) return;
-    await handleStatus(msg.chat.id);
-  });
-  bot.onText(/\/balance/, async (msg) => {
-    if (!isAuthorized(msg)) return;
-    await handleBalance(msg.chat.id);
-  });
-  bot.onText(/\/wallets/, (msg) => {
-    if (!isAuthorized(msg)) return;
-    handleWallets(msg.chat.id);
-  });
-  bot.onText(/\/check/, async (msg) => {
-    if (!isAuthorized(msg)) return;
-    await handleCheck(msg.chat.id);
-  });
+  // Shortcut commands
+  bot.onText(/\/positions/, async (msg) => { await handleStatus(msg.chat.id); });
+  bot.onText(/\/balance/, async (msg) => { await handleBalance(msg.chat.id); });
+  bot.onText(/\/wallets/, (msg) => { handleWallets(msg.chat.id); });
+  bot.onText(/\/check/, async (msg) => { await handleCheck(msg.chat.id); });
 
-  // Handle text messages (for add wallet flow)
+  // Handle text messages (add wallet flow)
   bot.on('message', async (msg) => {
-    if (!isAuthorized(msg)) return;
-    if (msg.text?.startsWith('/')) return; // Ignore commands
-
+    if (msg.text?.startsWith('/')) return;
     const chatId = msg.chat.id;
 
     if (waitingFor[chatId] === 'add_wallet') {
@@ -134,14 +111,11 @@ function createBot(token, chatId, hlApi, monitor) {
         bot.sendMessage(chatId, '❌ Invalid address. Send a valid wallet like:\n`0x1234...abcd`', { parse_mode: 'Markdown' });
         return;
       }
-
       delete waitingFor[chatId];
       waitingFor[chatId] = { step: 'add_label', address: text };
-      bot.sendMessage(chatId, `Got it! Now send a *name* for this wallet (or tap Skip):`, {
+      bot.sendMessage(chatId, 'Got it! Now send a *name* for this wallet (or tap Skip):', {
         parse_mode: 'Markdown',
-        reply_markup: {
-          inline_keyboard: [[{ text: '⏭️ Skip', callback_data: 'skip_label' }]]
-        }
+        reply_markup: { inline_keyboard: [[{ text: '⏭️ Skip', callback_data: 'skip_label' }]] }
       });
       return;
     }
@@ -155,7 +129,6 @@ function createBot(token, chatId, hlApi, monitor) {
     }
   });
 
-  // Handle skip label button
   bot.on('callback_query', async (query) => {
     if (query.data === 'skip_label') {
       const chatId = query.message.chat.id;
@@ -174,11 +147,11 @@ function createBot(token, chatId, hlApi, monitor) {
 
     if (!allStates || allStates.length === 0) {
       bot.sendMessage(chatId, '⚠️ Wallet not found on Hyperliquid yet. Added anyway — it will be monitored once active.', mainMenu());
-      addWallet(address, label);
+      addWallet(chatId, address, label);
       return;
     }
 
-    addWallet(address, label);
+    addWallet(chatId, address, label);
     const agg = hlApi.aggregateBalances(allStates);
     const positions = hlApi.aggregatePositions(allStates);
 
@@ -188,16 +161,14 @@ function createBot(token, chatId, hlApi, monitor) {
       `💵 Account: $${agg.totalAccountValue.toFixed(2)}`,
       `📊 Open positions: ${positions.length} (across ${allStates.length} market(s))`,
       ``,
-      `Monitoring started.`
+      `Monitoring started. You'll get notified automatically!`
     ].join('\n'), mainMenu());
   }
 
-  // --- Command handlers ---
-
   async function handleStatus(chatId) {
-    const wallets = loadWallets();
+    const wallets = getWallets(chatId);
     if (wallets.length === 0) {
-      bot.sendMessage(chatId, 'No wallets yet. Add one first!', mainMenu());
+      bot.sendMessage(chatId, 'No wallets yet. Tap ➕ Add Wallet to get started!', mainMenu());
       return;
     }
 
@@ -209,7 +180,6 @@ function createBot(token, chatId, hlApi, monitor) {
       }
 
       const positions = hlApi.aggregatePositions(allStates);
-
       if (positions.length === 0) {
         bot.sendMessage(chatId, `📍 *${wallet.label}*: No open positions`, { parse_mode: 'Markdown' });
         continue;
@@ -238,9 +208,9 @@ function createBot(token, chatId, hlApi, monitor) {
   }
 
   async function handleBalance(chatId) {
-    const wallets = loadWallets();
+    const wallets = getWallets(chatId);
     if (wallets.length === 0) {
-      bot.sendMessage(chatId, 'No wallets yet. Add one first!', mainMenu());
+      bot.sendMessage(chatId, 'No wallets yet. Tap ➕ Add Wallet to get started!', mainMenu());
       return;
     }
 
@@ -253,17 +223,14 @@ function createBot(token, chatId, hlApi, monitor) {
 
       const agg = hlApi.aggregateBalances(allStates);
       let text = [
-        `📍 *${wallet.label}*`,
-        ``,
+        `📍 *${wallet.label}*`, ``,
         `💵 Available: $${agg.totalWithdrawable.toFixed(2)}`,
         `📊 Account value: $${agg.totalAccountValue.toFixed(2)}`,
         `📈 Margin used: $${agg.totalMarginUsed.toFixed(2)}`,
       ];
 
-      // Show per-dex breakdown if there are HIP-3 balances
       if (agg.perDex.length > 1) {
-        text.push('');
-        text.push('*Breakdown:*');
+        text.push('', '*Breakdown:*');
         for (const d of agg.perDex) {
           text.push(`  ${d.dex}: $${d.accountValue.toFixed(2)} (margin: $${d.totalMarginUsed.toFixed(2)})`);
         }
@@ -273,10 +240,10 @@ function createBot(token, chatId, hlApi, monitor) {
     }
   }
 
-  async function handleWallets(chatId) {
-    const wallets = loadWallets();
+  function handleWallets(chatId) {
+    const wallets = getWallets(chatId);
     if (wallets.length === 0) {
-      bot.sendMessage(chatId, 'No wallets yet.', mainMenu());
+      bot.sendMessage(chatId, 'No wallets yet. Tap ➕ Add Wallet!', mainMenu());
       return;
     }
     const list = wallets.map((w, i) => `${i + 1}. *${w.label}*\n   \`${w.address}\``).join('\n\n');
@@ -285,19 +252,29 @@ function createBot(token, chatId, hlApi, monitor) {
 
   async function handleCheck(chatId) {
     bot.sendMessage(chatId, '🔍 Checking all wallets...');
-    await monitor.poll(false);
+    // Run poll just for this user
+    const wallets = getWallets(chatId);
+    const { loadState, saveState } = require('./store');
+    const state = loadState(chatId);
+    for (const wallet of wallets) {
+      try {
+        await monitor.checkWallet(chatId, wallet, state, false);
+      } catch (e) {
+        console.error(`Check error: ${e.message}`);
+      }
+    }
+    saveState(chatId, state);
     bot.sendMessage(chatId, '✅ Done!', mainMenu());
   }
 
-  // Notification function
-  async function sendNotification(message) {
+  async function sendNotification(chatId, message) {
     try {
-      await bot.sendMessage(authorizedChat, message, { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
     } catch {
       try {
-        await bot.sendMessage(authorizedChat, message);
+        await bot.sendMessage(chatId, message);
       } catch (e) {
-        console.error('Failed to send notification:', e.message);
+        console.error(`Failed to send to ${chatId}:`, e.message);
       }
     }
   }

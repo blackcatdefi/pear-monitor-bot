@@ -2,58 +2,84 @@ const fs = require('fs');
 const path = require('path');
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
-const WALLETS_FILE = path.join(DATA_DIR, 'wallets.json');
-const STATE_FILE = path.join(DATA_DIR, 'state.json');
 
 function ensureDataDir() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-function loadWallets() {
+function userFile(chatId) {
+  return path.join(DATA_DIR, `user_${chatId}.json`);
+}
+
+function stateFile(chatId) {
+  return path.join(DATA_DIR, `state_${chatId}.json`);
+}
+
+function loadUser(chatId) {
   ensureDataDir();
-  if (!fs.existsSync(WALLETS_FILE)) return [];
-  return JSON.parse(fs.readFileSync(WALLETS_FILE, 'utf8'));
+  const f = userFile(chatId);
+  if (!fs.existsSync(f)) return { wallets: [] };
+  return JSON.parse(fs.readFileSync(f, 'utf8'));
 }
 
-function saveWallets(wallets) {
+function saveUser(chatId, data) {
   ensureDataDir();
-  fs.writeFileSync(WALLETS_FILE, JSON.stringify(wallets, null, 2));
+  fs.writeFileSync(userFile(chatId), JSON.stringify(data, null, 2));
 }
 
-function addWallet(address, label) {
-  const wallets = loadWallets();
-  const existing = wallets.find(w => w.address.toLowerCase() === address.toLowerCase());
+function getWallets(chatId) {
+  return loadUser(chatId).wallets || [];
+}
+
+function addWallet(chatId, address, label) {
+  const user = loadUser(chatId);
+  if (!user.wallets) user.wallets = [];
+  const existing = user.wallets.find(w => w.address.toLowerCase() === address.toLowerCase());
   if (existing) {
     existing.label = label || existing.label;
   } else {
-    wallets.push({ address: address.toLowerCase(), label: label || shortenAddress(address) });
+    user.wallets.push({ address: address.toLowerCase(), label: label || shortenAddress(address) });
   }
-  saveWallets(wallets);
-  return wallets;
+  saveUser(chatId, user);
+  return user.wallets;
 }
 
-function removeWallet(address) {
-  let wallets = loadWallets();
-  wallets = wallets.filter(w => w.address.toLowerCase() !== address.toLowerCase());
-  saveWallets(wallets);
-  return wallets;
+function removeWallet(chatId, address) {
+  const user = loadUser(chatId);
+  user.wallets = (user.wallets || []).filter(w => w.address.toLowerCase() !== address.toLowerCase());
+  saveUser(chatId, user);
+  return user.wallets;
 }
 
 function shortenAddress(addr) {
   return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
 }
 
-function loadState() {
+function loadState(chatId) {
   ensureDataDir();
-  if (!fs.existsSync(STATE_FILE)) return {};
-  return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+  const f = stateFile(chatId);
+  if (!fs.existsSync(f)) return {};
+  return JSON.parse(fs.readFileSync(f, 'utf8'));
 }
 
-function saveState(state) {
+function saveState(chatId, state) {
   ensureDataDir();
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  fs.writeFileSync(stateFile(chatId), JSON.stringify(state, null, 2));
 }
 
-module.exports = { loadWallets, saveWallets, addWallet, removeWallet, loadState, saveState, shortenAddress };
+// Get all active chat IDs (users who have wallets)
+function getAllChatIds() {
+  ensureDataDir();
+  const files = fs.readdirSync(DATA_DIR).filter(f => f.startsWith('user_') && f.endsWith('.json'));
+  const chatIds = [];
+  for (const f of files) {
+    const chatId = f.replace('user_', '').replace('.json', '');
+    const user = loadUser(chatId);
+    if (user.wallets && user.wallets.length > 0) {
+      chatIds.push(chatId);
+    }
+  }
+  return chatIds;
+}
+
+module.exports = { getWallets, addWallet, removeWallet, loadState, saveState, shortenAddress, getAllChatIds };
