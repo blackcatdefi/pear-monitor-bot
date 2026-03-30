@@ -1,7 +1,9 @@
 const fs = require('fs');
 const path = require('path');
 
-const DATA_DIR = path.join(__dirname, '..', 'data');
+// Use persistent volume on Railway, fallback to local data/
+const VOLUME = process.env.RAILWAY_VOLUME_MOUNT_PATH;
+const DATA_DIR = VOLUME ? path.join(VOLUME, 'data') : path.join(__dirname, '..', 'data');
 
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });

@@ -27,9 +27,12 @@ function createBot(token, hlApi, monitor) {
     };
   }
 
-  // /start and /menu
+  // /start and /menu - NEVER deletes user data
   bot.onText(/\/(start|menu)/, (msg) => {
-    bot.sendMessage(msg.chat.id, [
+    const chatId = msg.chat.id;
+    const wallets = getWallets(chatId);
+
+    const lines = [
       '🍐 *Pear Protocol Monitor*',
       '',
       'I watch your positions on Pear/Hyperliquid and notify you when:',
@@ -37,9 +40,15 @@ function createBot(token, hlApi, monitor) {
       '🎯 Your *Take Profit* hits',
       '🛑 Your *Stop Loss* triggers',
       '💰 You have *funds available* to trade',
-      '',
-      'Tap a button below to get started!',
-    ].join('\n'), mainMenu());
+    ];
+
+    if (wallets.length > 0) {
+      lines.push('', `✅ You have *${wallets.length} wallet(s)* being monitored.`);
+    } else {
+      lines.push('', 'Tap ➕ *Add Wallet* to get started!');
+    }
+
+    bot.sendMessage(chatId, lines.join('\n'), mainMenu());
   });
 
   const waitingFor = {};
