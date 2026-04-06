@@ -5,6 +5,7 @@ class HyperliquidApi {
     this.apiUrl = apiUrl;
     this.dexCache = null;
     this.dexCacheTime = 0;
+    this.dexNameMap = {}; // short name -> fullName
   }
 
   async post(body) {
@@ -22,6 +23,13 @@ class HyperliquidApi {
       const data = await this.post({ type: 'perpDexs' });
       this.dexCache = data;
       this.dexCacheTime = Date.now();
+      // Build name mapping
+      this.dexNameMap = {};
+      for (const d of data) {
+        if (d && d.name && d.fullName) {
+          this.dexNameMap[d.name] = d.fullName;
+        }
+      }
       return data;
     } catch (error) {
       console.error('Failed to get perp dexs:', error.message);
@@ -119,13 +127,19 @@ class HyperliquidApi {
         const orders = await this.getFrontendOpenOrders(walletAddress, dex.name);
         if (orders) {
           for (const o of orders) {
-            if (o.isTrigger && o.isPositionTpsl) allOrders.push({ ...o, dex: dex.name });
+            if (o.isTrigger && o.isPositionTpsl) allOrders.push({ ...o, dex: dex.name, dexDisplay: this.getDexDisplayName(dex.name) });
           }
         }
       }
     }
 
     return allOrders;
+  }
+
+  // Get display name for a DEX (full name or short name fallback)
+  getDexDisplayName(dexName) {
+    if (!dexName || dexName === 'Native') return 'Native';
+    return this.dexNameMap[dexName] || dexName;
   }
 
   sleep(ms) {
@@ -177,7 +191,7 @@ class HyperliquidApi {
       totalMarginUsed += bal.totalMarginUsed;
       totalWithdrawable += bal.withdrawable;
       if (bal.accountValue > 0.01 || bal.totalMarginUsed > 0.01) {
-        perDex.push({ dex: dex || 'Native', ...bal });
+        perDex.push({ dex: dex || 'Native', dexDisplay: this.getDexDisplayName(dex), ...bal });
       }
     }
 
@@ -190,7 +204,7 @@ class HyperliquidApi {
     for (const { dex, state } of allStates) {
       const positions = this.getPositions(state);
       for (const pos of positions) {
-        all.push({ ...pos, dex: dex || 'Native' });
+        all.push({ ...pos, dex: dex || 'Native', dexDisplay: this.getDexDisplayName(dex) });
       }
     }
     return all;

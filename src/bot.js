@@ -200,7 +200,7 @@ function createBot(token, hlApi, monitor) {
         const pnlStr = pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`;
         const pnlEmoji = pnl >= 0 ? '🟢' : '🔴';
         const roe = (pos.returnOnEquity * 100).toFixed(1);
-        const dexTag = pos.dex !== 'Native' ? ` _(${pos.dex})_` : '';
+        const dexTag = pos.dex !== 'Native' ? ` _(${pos.dexDisplay || pos.dex})_` : '';
 
         text += [
           `🪙 *${pos.coin}*${dexTag} ${pos.side}`,
@@ -241,7 +241,7 @@ function createBot(token, hlApi, monitor) {
       if (agg.perDex.length > 1) {
         text.push('', '*Breakdown:*');
         for (const d of agg.perDex) {
-          text.push(`  ${d.dex}: $${d.accountValue.toFixed(2)} (margin: $${d.totalMarginUsed.toFixed(2)})`);
+          text.push(`  ${d.dexDisplay || d.dex}: $${d.accountValue.toFixed(2)} (margin: $${d.totalMarginUsed.toFixed(2)})`);
         }
       }
 

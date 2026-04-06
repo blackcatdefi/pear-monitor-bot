@@ -62,12 +62,12 @@ class PositionMonitor {
       const key = `${pos.coin}`;
       if (!ws.positions[key]) {
         ws.positions[key] = {
-          coin: pos.coin, dex: pos.dex, side: pos.side,
-          size: pos.size, entryPrice: pos.entryPrice,
+          coin: pos.coin, dex: pos.dex, dexDisplay: pos.dexDisplay || pos.dex,
+          side: pos.side, size: pos.size, entryPrice: pos.entryPrice,
           openedAt: new Date().toISOString()
         };
         if (!silent) {
-          const dexTag = pos.dex !== 'Native' ? ` _(${pos.dex})_` : '';
+          const dexTag = pos.dex !== 'Native' ? ` _(${pos.dexDisplay || pos.dex})_` : '';
           await this.notify(chatId, [
             `📈 *New position opened*`, ``,
             `📍 Wallet: ${label}`,
@@ -107,7 +107,7 @@ class PositionMonitor {
             const pnlStr = closedPnl >= 0 ? `+$${closedPnl.toFixed(2)}` : `-$${Math.abs(closedPnl).toFixed(2)}`;
             const pnlEmoji = closedPnl >= 0 ? '🟢' : '🔴';
             const oldPos = ws.positions[posKey];
-            const dexTag = oldOrder.dex !== 'Native' ? ` _(${oldOrder.dex})_` : '';
+            const dexTag = oldOrder.dex !== 'Native' ? ` _(${oldOrder.dexDisplay || oldOrder.dex})_` : '';
             const typeLabel = isTP ? '🎯 *TAKE PROFIT hit!*' : '🛑 *STOP LOSS triggered!*';
 
             await this.notify(chatId, [
@@ -128,7 +128,7 @@ class PositionMonitor {
     ws.triggerOrders = {};
     for (const o of currentTriggers) {
       ws.triggerOrders[String(o.oid)] = {
-        oid: o.oid, coin: o.coin, dex: o.dex,
+        oid: o.oid, coin: o.coin, dex: o.dex, dexDisplay: o.dexDisplay || o.dex,
         orderType: o.orderType, triggerPx: o.triggerPx,
         triggerCondition: o.triggerCondition, side: o.side,
       };
@@ -182,7 +182,7 @@ class PositionMonitor {
 
     const pnlStr = closedPnl >= 0 ? `+$${closedPnl.toFixed(2)}` : `-$${Math.abs(closedPnl).toFixed(2)}`;
     const pnlEmoji = closedPnl >= 0 ? '🟢' : '🔴';
-    const dexTag = oldPos.dex && oldPos.dex !== 'Native' ? ` _(${oldPos.dex})_` : '';
+    const dexTag = oldPos.dex && oldPos.dex !== 'Native' ? ` _(${oldPos.dexDisplay || oldPos.dex})_` : '';
 
     await this.notify(chatId, [
       `📋 *Position closed*`, ``,
