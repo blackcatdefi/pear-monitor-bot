@@ -100,6 +100,10 @@ class PositionMonitor {
               .sort((a, b) => b.time - a.time)[0];
 
             const closedPnl = recentFill ? parseFloat(recentFill.closedPnl || 0) : 0;
+
+            // Skip alert if PnL is less than $1 to avoid false/dust alerts
+            if (Math.abs(closedPnl) < 1) continue;
+
             const pnlStr = closedPnl >= 0 ? `+$${closedPnl.toFixed(2)}` : `-$${Math.abs(closedPnl).toFixed(2)}`;
             const pnlEmoji = closedPnl >= 0 ? '🟢' : '🔴';
             const oldPos = ws.positions[posKey];
