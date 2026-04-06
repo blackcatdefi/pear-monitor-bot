@@ -31,6 +31,11 @@ PnL comes from `getUserFills()` → `recentFill.closedPnl`.
 - **Fix:** `src/monitor.js` line ~102: `if (Math.abs(closedPnl) < 1) continue;`
 - Alerts only fire if |closedPnl| >= $1 (gain or loss)
 
+## How Claude Should Work on This Project
+- **Siempre completar el ciclo entero:** fix → commit → push → crear PR → mergear a master. Sin esperar confirmación del usuario.
+- Railway redeploya automaticamente al detectar cambios en master.
+- No dejar pasos pendientes para el usuario. Si algo se puede hacer, hacerlo.
+
 ## Deployment
 - Hosted on Railway (`railway.json`, `Dockerfile`)
 - Persistent data via Railway volume mounted at data directory
