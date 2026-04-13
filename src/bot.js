@@ -1,7 +1,11 @@
 const TelegramBot = require('node-telegram-bot-api');
-const { getWallets, addWallet, removeWallet, shortenAddress } = require('./store');
+const {
+  getWallets, addWallet, removeWallet,
+  getBorrowWallets, addBorrowWallet, removeBorrowWallet,
+  shortenAddress,
+} = require('./store');
 
-function createBot(token, hlApi, monitor) {
+function createBot(token, hlApi, monitor, hlendApi = null) {
   const bot = new TelegramBot(token, { polling: true });
 
   // Register bot commands menu
@@ -12,6 +16,7 @@ function createBot(token, hlApi, monitor) {
     { command: 'balance', description: '💰 Check available funds' },
     { command: 'wallets', description: '📋 List monitored wallets' },
     { command: 'check', description: '🔍 Force check now' },
+    { command: 'borrow', description: '🏦 HyperLend Borrow Available' },
   ]);
 
   function mainMenu() {
@@ -21,6 +26,21 @@ function createBot(token, hlApi, monitor) {
           [{ text: '📊 Positions', callback_data: 'status' }, { text: '💰 Balance', callback_data: 'balance' }],
           [{ text: '📋 My Wallets', callback_data: 'wallets' }, { text: '🔍 Check Now', callback_data: 'check' }],
           [{ text: '➕ Add Wallet', callback_data: 'add_wallet' }, { text: '➖ Remove Wallet', callback_data: 'remove_wallet' }],
+          [{ text: '🏦 HyperLend Borrow Available', callback_data: 'borrow_menu' }],
+        ]
+      },
+      parse_mode: 'Markdown'
+    };
+  }
+
+  function borrowMenu() {
+    return {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '💸 Check Borrow Power', callback_data: 'borrow_status' }],
+          [{ text: '➕ Add Borrow Wallet', callback_data: 'borrow_add' }, { text: '➖ Remove Borrow Wallet', callback_data: 'borrow_remove' }],
+          [{ text: '📋 My Borrow Wallets', callback_data: 'borrow_list' }],
+          [{ text: '◀️ Back', callback_data: 'menu' }],
         ]
       },
       parse_mode: 'Markdown'
@@ -40,6 +60,7 @@ function createBot(token, hlApi, monitor) {
       '🎯 Your *Take Profit* hits',
       '🛑 Your *Stop Loss* triggers',
       '💰 You have *funds available* to trade',
+      '🏦 You have *borrow available* on HyperLend',
     ];
 
     if (wallets.length > 0) {
@@ -94,12 +115,53 @@ function createBot(token, hlApi, monitor) {
       case 'menu':
         bot.sendMessage(chatId, '🍐 *Main Menu*', mainMenu());
         break;
+      case 'borrow_menu':
+        bot.sendMessage(chatId, [
+          '🏦 *HyperLend Borrow Available*',
+          '',
+          'Add your HyperEVM wallet and I\'ll alert you whenever you have',
+          `≥ $${monitor.minBorrowAvailable} available to borrow on HyperLend.`,
+        ].join('\n'), borrowMenu());
+        break;
+      case 'borrow_status':
+        await handleBorrowStatus(chatId);
+        break;
+      case 'borrow_list':
+        handleBorrowList(chatId);
+        break;
+      case 'borrow_add':
+        if (!hlendApi) {
+          bot.sendMessage(chatId, '⚠️ HyperLend monitoring is not enabled on this server.', borrowMenu());
+          break;
+        }
+        waitingFor[chatId] = 'add_borrow_wallet';
+        bot.sendMessage(chatId, '📝 Send me the HyperEVM wallet address:\n\n`0x...`', { parse_mode: 'Markdown' });
+        break;
+      case 'borrow_remove': {
+        const bw = getBorrowWallets(chatId);
+        if (bw.length === 0) { bot.sendMessage(chatId, 'No borrow wallets to remove.', borrowMenu()); break; }
+        const buttons = bw.map(w => ([{
+          text: `❌ ${w.label} (${shortenAddress(w.address)})`,
+          callback_data: `brm_${w.address}`
+        }]));
+        buttons.push([{ text: '◀️ Back', callback_data: 'borrow_menu' }]);
+        bot.sendMessage(chatId, 'Tap a borrow wallet to remove:', {
+          reply_markup: { inline_keyboard: buttons }
+        });
+        break;
+      }
     }
 
     if (query.data.startsWith('rm_0x')) {
       const addr = query.data.slice(3);
       removeWallet(chatId, addr);
       bot.sendMessage(chatId, '✅ Wallet removed.', mainMenu());
+    }
+
+    if (query.data.startsWith('brm_0x')) {
+      const addr = query.data.slice(4);
+      removeBorrowWallet(chatId, addr);
+      bot.sendMessage(chatId, '✅ Borrow wallet removed.', borrowMenu());
     }
   });
 
@@ -108,6 +170,14 @@ function createBot(token, hlApi, monitor) {
   bot.onText(/\/balance/, async (msg) => { await handleBalance(msg.chat.id); });
   bot.onText(/\/wallets/, (msg) => { handleWallets(msg.chat.id); });
   bot.onText(/\/check/, async (msg) => { await handleCheck(msg.chat.id); });
+  bot.onText(/\/borrow/, (msg) => {
+    bot.sendMessage(msg.chat.id, [
+      '🏦 *HyperLend Borrow Available*',
+      '',
+      'Add your HyperEVM wallet and I\'ll alert you whenever you have',
+      `≥ $${monitor.minBorrowAvailable} available to borrow on HyperLend.`,
+    ].join('\n'), borrowMenu());
+  });
 
   // Handle text messages (add wallet flow)
   bot.on('message', async (msg) => {
@@ -136,6 +206,29 @@ function createBot(token, hlApi, monitor) {
       await finishAddWallet(chatId, address, label);
       return;
     }
+
+    if (waitingFor[chatId] === 'add_borrow_wallet') {
+      const text = msg.text?.trim();
+      if (!text || !/^0x[a-fA-F0-9]{40}$/.test(text)) {
+        bot.sendMessage(chatId, '❌ Invalid address. Send a valid wallet like:\n`0x1234...abcd`', { parse_mode: 'Markdown' });
+        return;
+      }
+      delete waitingFor[chatId];
+      waitingFor[chatId] = { step: 'add_borrow_label', address: text };
+      bot.sendMessage(chatId, 'Got it! Now send a *name* for this borrow wallet (or tap Skip):', {
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: [[{ text: '⏭️ Skip', callback_data: 'skip_borrow_label' }]] }
+      });
+      return;
+    }
+
+    if (waitingFor[chatId]?.step === 'add_borrow_label') {
+      const { address } = waitingFor[chatId];
+      const label = msg.text?.trim() || shortenAddress(address);
+      delete waitingFor[chatId];
+      await finishAddBorrowWallet(chatId, address, label);
+      return;
+    }
   });
 
   bot.on('callback_query', async (query) => {
@@ -148,7 +241,80 @@ function createBot(token, hlApi, monitor) {
         await finishAddWallet(chatId, address, shortenAddress(address));
       }
     }
+    if (query.data === 'skip_borrow_label') {
+      const chatId = query.message.chat.id;
+      await bot.answerCallbackQuery(query.id);
+      if (waitingFor[chatId]?.step === 'add_borrow_label') {
+        const { address } = waitingFor[chatId];
+        delete waitingFor[chatId];
+        await finishAddBorrowWallet(chatId, address, shortenAddress(address));
+      }
+    }
   });
+
+  async function finishAddBorrowWallet(chatId, address, label) {
+    if (!hlendApi) {
+      bot.sendMessage(chatId, '⚠️ HyperLend monitoring is not enabled on this server.', mainMenu());
+      return;
+    }
+    bot.sendMessage(chatId, '🔄 Verifying on HyperLend...');
+    try {
+      const data = await hlendApi.getAccountData(address);
+      addBorrowWallet(chatId, address, label);
+      const hf = data.healthFactor === Infinity ? '∞' : data.healthFactor.toFixed(2);
+      bot.sendMessage(chatId, [
+        `✅ *${label}* added to HyperLend monitoring!`, ``,
+        `🔒 Collateral: $${data.totalCollateralUsd.toFixed(2)}`,
+        `💳 Debt: $${data.totalDebtUsd.toFixed(2)}`,
+        `💸 Available to borrow: $${data.availableBorrowsUsd.toFixed(2)}`,
+        `❤️ Health factor: ${hf}`,
+        ``,
+        `I'll alert you whenever available borrow crosses ≥ $${monitor.minBorrowAvailable}.`,
+      ].join('\n'), borrowMenu());
+    } catch (e) {
+      console.error('HyperLend verify error:', e.message);
+      addBorrowWallet(chatId, address, label);
+      bot.sendMessage(chatId, `⚠️ Couldn't reach HyperLend right now, but *${label}* was saved and will be monitored.`, borrowMenu());
+    }
+  }
+
+  async function handleBorrowStatus(chatId) {
+    const wallets = getBorrowWallets(chatId);
+    if (wallets.length === 0) {
+      bot.sendMessage(chatId, 'No borrow wallets yet. Tap ➕ Add Borrow Wallet!', borrowMenu());
+      return;
+    }
+    if (!hlendApi) {
+      bot.sendMessage(chatId, '⚠️ HyperLend monitoring is not enabled on this server.', borrowMenu());
+      return;
+    }
+    for (const wallet of wallets) {
+      try {
+        const data = await hlendApi.getAccountData(wallet.address);
+        const hf = data.healthFactor === Infinity ? '∞' : data.healthFactor.toFixed(2);
+        await bot.sendMessage(chatId, [
+          `🏦 *${wallet.label}* — HyperLend`, ``,
+          `💸 Available to borrow: *$${data.availableBorrowsUsd.toFixed(2)}*`,
+          `🔒 Collateral: $${data.totalCollateralUsd.toFixed(2)}`,
+          `💳 Debt: $${data.totalDebtUsd.toFixed(2)}`,
+          `❤️ Health factor: ${hf}`,
+          `📐 LTV: ${(data.ltv * 100).toFixed(1)}%`,
+        ].join('\n'), { parse_mode: 'Markdown' });
+      } catch (e) {
+        await bot.sendMessage(chatId, `📍 *${wallet.label}*: Error fetching HyperLend data (${e.message})`, { parse_mode: 'Markdown' });
+      }
+    }
+  }
+
+  function handleBorrowList(chatId) {
+    const wallets = getBorrowWallets(chatId);
+    if (wallets.length === 0) {
+      bot.sendMessage(chatId, 'No borrow wallets yet. Tap ➕ Add Borrow Wallet!', borrowMenu());
+      return;
+    }
+    const list = wallets.map((w, i) => `${i + 1}. *${w.label}*\n   \`${w.address}\``).join('\n\n');
+    bot.sendMessage(chatId, `🏦 *HyperLend borrow wallets:*\n\n${list}`, { parse_mode: 'Markdown' });
+  }
 
   async function finishAddWallet(chatId, address, label) {
     bot.sendMessage(chatId, '🔄 Verifying wallet...');
