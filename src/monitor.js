@@ -7,7 +7,7 @@ class PositionMonitor {
     this.notify = notifyFn; // async (chatId, message) => {}
     this.interval = null;
     this.minAvailableBalance = 10;
-    this.minBorrowAvailable = 10; // HyperLend: alert when >= $10 borrowable
+    this.minBorrowAvailable = 50; // HyperLend: alert when >= $50 borrowable
   }
 
   async start(intervalSeconds = 30) {
