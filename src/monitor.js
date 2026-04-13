@@ -1,11 +1,13 @@
-const { getAllChatIds, getWallets, loadState, saveState, shortenAddress } = require('./store');
+const { getAllChatIds, getWallets, getBorrowWallets, loadState, saveState, shortenAddress } = require('./store');
 
 class PositionMonitor {
-  constructor(hlApi, notifyFn) {
+  constructor(hlApi, notifyFn, hlendApi = null) {
     this.hlApi = hlApi;
+    this.hlendApi = hlendApi;
     this.notify = notifyFn; // async (chatId, message) => {}
     this.interval = null;
     this.minAvailableBalance = 10;
+    this.minBorrowAvailable = 10; // HyperLend: alert when >= $10 borrowable
   }
 
   async start(intervalSeconds = 30) {
@@ -37,8 +39,46 @@ class PositionMonitor {
         }
       }
 
+      // HyperLend borrow wallets
+      if (this.hlendApi) {
+        const borrowWallets = getBorrowWallets(chatId);
+        for (const wallet of borrowWallets) {
+          try {
+            await this.checkBorrowWallet(chatId, wallet, state, silent);
+          } catch (error) {
+            console.error(`Error checking HyperLend wallet ${wallet.label} for chat ${chatId}:`, error.message);
+          }
+        }
+      }
+
       saveState(chatId, state);
     }
+  }
+
+  async checkBorrowWallet(chatId, wallet, state, silent) {
+    const addr = wallet.address;
+    const label = wallet.label || shortenAddress(addr);
+
+    if (!state.borrow) state.borrow = {};
+    if (!state.borrow[addr]) state.borrow[addr] = { hadBorrowAvailable: null };
+    const bs = state.borrow[addr];
+
+    const data = await this.hlendApi.getAccountData(addr);
+    const available = data.availableBorrowsUsd;
+
+    const crossedThreshold = available >= this.minBorrowAvailable && bs.hadBorrowAvailable === false;
+    if (crossedThreshold && !silent) {
+      const hf = data.healthFactor === Infinity ? '∞' : data.healthFactor.toFixed(2);
+      await this.notify(chatId, [
+        `🏦 *HyperLend — Borrow Available!*`, ``,
+        `📍 Wallet: ${label}`,
+        `💸 Available to borrow: $${available.toFixed(2)}`,
+        `🔒 Collateral: $${data.totalCollateralUsd.toFixed(2)}`,
+        `💳 Current debt: $${data.totalDebtUsd.toFixed(2)}`,
+        `❤️ Health factor: ${hf}`,
+      ].join('\n'));
+    }
+    bs.hadBorrowAvailable = available >= this.minBorrowAvailable;
   }
 
   async checkWallet(chatId, wallet, state, silent) {
