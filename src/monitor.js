@@ -6,7 +6,7 @@ class PositionMonitor {
     this.hlendApi = hlendApi;
     this.notify = notifyFn; // async (chatId, message) => {}
     this.interval = null;
-    this.minAvailableBalance = 10;
+    this.minAvailableBalance = 50;
     this.minBorrowAvailable = 50; // HyperLend: alert when >= $50 borrowable
   }
 
@@ -141,8 +141,8 @@ class PositionMonitor {
 
             const closedPnl = recentFill ? parseFloat(recentFill.closedPnl || 0) : 0;
 
-            // Skip alert if PnL is less than $1 to avoid false/dust alerts
-            if (Math.abs(closedPnl) < 1) continue;
+            // Skip alert if PnL is less than $50 to avoid false/dust alerts
+            if (Math.abs(closedPnl) < 50) continue;
 
             const pnlStr = closedPnl >= 0 ? `+$${closedPnl.toFixed(2)}` : `-$${Math.abs(closedPnl).toFixed(2)}`;
             const pnlEmoji = closedPnl >= 0 ? '🟢' : '🔴';
