@@ -19,7 +19,7 @@ Telegram bot that monitors Hyperliquid positions for multiple wallets and sends 
 - `src/store.js` — JSON file persistence in `data/` directory (wallets + borrowWallets)
 
 ## Key Configuration (src/monitor.js)
-- `this.minAvailableBalance = 10` — Minimum $10 balance to trigger "funds available" alert
+- `this.minAvailableBalance = 50` — Minimum $50 balance to trigger "funds available" alert
 - `this.minBorrowAvailable = 50` — Minimum $50 borrowable on HyperLend to trigger alert
 - `POLL_INTERVAL` env var — Seconds between polling cycles (default 30s)
 - `HYPEREVM_RPC_URL` env var — HyperEVM RPC (default `https://rpc.hyperliquid.xyz/evm`, chainId 999)
@@ -30,11 +30,11 @@ TP/SL alerts fire when a trigger order disappears from `getAllTriggerOrders()`.
 PnL comes from `getUserFills()` → `recentFill.closedPnl`.
 
 ## Rules & Decisions Made
-### Minimum PnL threshold for TP/SL alerts = $1
-- **Date:** 2026-04-06
-- **Reason:** Bot was sending false/dust alerts with PnL: $0.00 (partial closes on tiny positions)
-- **Fix:** `src/monitor.js` line ~102: `if (Math.abs(closedPnl) < 1) continue;`
-- Alerts only fire if |closedPnl| >= $1 (gain or loss)
+### Minimum PnL threshold for TP/SL alerts = $50
+- **Date:** 2026-04-14
+- **Reason:** Bot enviaba falsas alertas con PnL: $0.00 o muy pequeño (partial closes en posiciones chicas)
+- **Fix:** `src/monitor.js` line ~105: `if (Math.abs(closedPnl) < 50) continue;`
+- Alerts only fire if |closedPnl| >= $50 (gain or loss)
 
 ### HyperLend Borrow Available feature added
 - **Date:** 2026-04-13
@@ -82,6 +82,7 @@ Reglas:
 ## Historial de interacciones
 - **2026-04-13** — Feature "HyperLend Borrow Available" agregada (PR #2, merge `299c6fc`).
 - **2026-04-13** — Umbral de borrow subido de $10 a $50 por pedido del usuario. Se agregó manual de procedimientos y regla de auto-update de memoria en cada mensaje.
+- **2026-04-14** — Umbral TP/SL subido de $1 a $50. Umbral fondos disponibles subido de $10 a $50. Ambos por pedido del usuario para eliminar falsas alertas.
 
 ## Deployment
 - Hosted on Railway (`railway.json`, `Dockerfile`)
