@@ -83,6 +83,20 @@ Reglas:
 - **2026-04-13** — Feature "HyperLend Borrow Available" agregada (PR #2, merge `299c6fc`).
 - **2026-04-13** — Umbral de borrow subido de $10 a $50 por pedido del usuario. Se agregó manual de procedimientos y regla de auto-update de memoria en cada mensaje.
 - **2026-04-14** — Umbral TP/SL subido de $1 a $50. Umbral fondos disponibles subido de $10 a $50. Ambos por pedido del usuario para eliminar falsas alertas.
+- **2026-04-15** — Nuevo sub-proyecto **Fondo Black Cat bot** (Python) agregado en `fondo-blackcat-bot/`. Es un bot INDEPENDIENTE del pear-monitor-bot. Genera reportes de inteligencia crypto/macro: posiciones HyperLiquid (5 wallets), HyperLend HF on-chain, market data (CoinGecko/DefiLlama/F&G/CoinGlass), unlocks, 24 canales de Telegram via Telethon, síntesis con Claude (Anthropic API). Comandos: `/reporte`, `/posiciones`, `/hf`, `/mercado`, `/unlocks`, `/tesis`, `/alertas`. Alertas cada 5 min. Reporte diario 13:00 UTC. Deploy Railway separado (Root Directory=`fondo-blackcat-bot`).
+
+## Sub-proyecto: Fondo Black Cat bot (`fondo-blackcat-bot/`)
+- Python 3 con python-telegram-bot + telethon + anthropic + web3 + apscheduler.
+- Solo responde al `TELEGRAM_CHAT_ID` autorizado (ignore silencioso al resto).
+- Wallets del fondo en `config.py:FUND_WALLETS` (5 wallets, todas del fundador).
+- HyperLend via `getUserAccountData()` sobre pool `0x00A89d7a5A02160f20150EbEA7a2b5E4879A1A8b` en HyperEVM (chainId 999).
+- Telethon StringSession: generar una vez localmente con `scripts/generate_session.py` y pegar como env var `TELETHON_SESSION`.
+- Reglas críticas del reporte (ya en SYSTEM_PROMPT de `modules/analysis.py`):
+  - PnL a nivel basket cross, no por posición.
+  - Margin usage -200% = normal.
+  - Ceasefire signal = alerta prioritaria.
+  - Sin relleno, sin "buenos días", siempre con números.
+- Syntax check Python: `python3 -c "import ast; [ast.parse(p.read_text()) for p in pathlib.Path('fondo-blackcat-bot').rglob('*.py')]"`. Lint real corre en Railway al deploy.
 
 ## Deployment
 - Hosted on Railway (`railway.json`, `Dockerfile`)
