@@ -83,6 +83,18 @@ Reglas:
 - **2026-04-13** — Feature "HyperLend Borrow Available" agregada (PR #2, merge `299c6fc`).
 - **2026-04-13** — Umbral de borrow subido de $10 a $50 por pedido del usuario. Se agregó manual de procedimientos y regla de auto-update de memoria en cada mensaje.
 - **2026-04-14** — Umbral TP/SL subido de $1 a $50. Umbral fondos disponibles subido de $10 a $50. Ambos por pedido del usuario para eliminar falsas alertas.
+- **2026-04-15** — Build completo del bot "Fondo Black Cat" en Python (carpeta `fondo-blackcat-bot/`). Proyecto separado del monitor Node.js: analista con 5 wallets en HyperLiquid, HyperLend on-chain, market data (CoinGecko/F&G/CoinGlass/DefiLlama), unlocks, Telethon intel (24 canales en 3 tiers), reporte con Claude Sonnet 4.5, alertas cada 5 min. Comandos: `/reporte`, `/posiciones`, `/hf`, `/tesis`, `/alertas`.
+
+## Sub-proyecto: Fondo Black Cat Bot (`fondo-blackcat-bot/`)
+- **Stack:** Python 3 (python-telegram-bot 21, Telethon 1.36, anthropic 0.39, web3 7, apscheduler).
+- **Deploy:** Railway worker independiente (Procfile + railway.toml). Root dir `fondo-blackcat-bot/`.
+- **Seguridad:** solo responde al `TELEGRAM_CHAT_ID` configurado; resto se ignora silenciosamente.
+- **Wallets del fondo** (hardcoded en `config.py`): 4 Alt Short Bleed + 1 DreamCash/WAR TRADE.
+- **HyperLend wallet** (colateral kHYPE / debt USDH): `0xCDdF...e27e`.
+- **Umbrales:** HF warning 1.20, crítico 1.10. Liq distance 10%. HYPE warn $34, crítico $30. BTC warn $62K.
+- **Tesis embebida en `templates/daily_report.py`:** Dalio Stage 6, WAR TRADE, Flywheel HyperLend, HYPE "House of All Finances".
+- **Canales Intel:** Tier 1 (6 canales, 200 msgs), Tier 2 (6 canales, 50 msgs), Tier 3 (12 canales, 20 msgs).
+- **Telethon session:** usar `StringSession` → env var `TELETHON_SESSION` (generar localmente una vez).
 
 ## Deployment
 - Hosted on Railway (`railway.json`, `Dockerfile`)
