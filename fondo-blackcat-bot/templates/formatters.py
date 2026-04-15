@@ -34,6 +34,8 @@ def format_quick_positions(wallets: list[dict[str, Any]], hyperlend: dict[str, A
     lines.append(f"📊 Snapshot Fondo Black Cat — {now}")
     lines.append("")
     lines.append("PORTFOLIO HYPERLIQUID")
+    total_eq = 0.0
+    total_upnl = 0.0
     for w in wallets:
         if w.get("status") != "ok":
             label = w.get("label", "?")
@@ -42,8 +44,12 @@ def format_quick_positions(wallets: list[dict[str, Any]], hyperlend: dict[str, A
             continue
         d = w["data"]
         short = d["wallet"][:6] + "…" + d["wallet"][-4:]
-        eq = _fmt_usd(d.get("account_value"))
-        upnl = _fmt_usd(d.get("unrealized_pnl_total"))
+        eq_val = d.get("account_value") or 0.0
+        upnl_val = d.get("unrealized_pnl_total") or 0.0
+        total_eq += eq_val
+        total_upnl += upnl_val
+        eq = _fmt_usd(eq_val)
+        upnl = _fmt_usd(upnl_val)
         ntl = _fmt_usd(d.get("total_ntl_pos"))
         positions = d.get("positions") or []
         if positions:
@@ -53,6 +59,7 @@ def format_quick_positions(wallets: list[dict[str, Any]], hyperlend: dict[str, A
         lines.append(f"  • {d['label']} {short}")
         lines.append(f"    Equity: {eq} | UPnL: {upnl} | Notional: {ntl}")
         lines.append(f"    {pos_summary}")
+    lines.append(f"  TOTAL: Equity {_fmt_usd(total_eq)} | UPnL {_fmt_usd(total_upnl)}")
     lines.append("")
     lines.append("HYPERLEND")
     if hyperlend.get("status") == "ok":
