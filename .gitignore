@@ -2,3 +2,14 @@ node_modules/
 .env
 data/
 bot.log
+
+# Python (fondo-blackcat-bot)
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+fondo-blackcat-bot/data/*.json
+fondo-blackcat-bot/.env
+*.session
+*.session-journal
