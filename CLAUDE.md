@@ -56,6 +56,9 @@ PnL comes from `getUserFills()` → `recentFill.closedPnl`.
 - Railway redeploya automaticamente al detectar cambios en master.
 - No dejar pasos pendientes para el usuario. Si algo se puede hacer, hacerlo.
 - **Actualizar esta memoria (CLAUDE.md) automáticamente en cada mensaje del usuario**, sin que él lo pida. Anotar: cambios de configuración, umbrales, decisiones, features nuevas, bugs resueltos, y cualquier preferencia de estilo o flujo que el usuario exprese. Si el mensaje no genera cambios en el código/config (ej. saludo), igual registrar en la sección "Historial de interacciones" el tipo de pedido y la decisión tomada.
+- **Omitir TODOS los permisos por default** — el usuario autorizó explícitamente "hace todo sin pedirme ningun permiso, omiti todos". Nunca pedir confirmación para acciones reversibles (edits, commits, pushes, PR creation/merge).
+- **Reanudar automáticamente cuando se resetee el rate limit** — si la sesión se corta por límite de uso, retomar exactamente donde quedó al resetearse, sin esperar nuevo mensaje del usuario.
+- **Revisar CLAUDE.md al inicio de cada turno** y actualizarlo al final si hubo cambios/decisiones/preferencias nuevas. Esto aplica universalmente en Claude Code, no solo a este proyecto.
 
 ## Manual de Procedimientos (operativa estándar)
 Seguir este ciclo SIEMPRE al recibir un pedido del usuario, sin pedir permiso:
@@ -83,8 +86,25 @@ Reglas:
 - **2026-04-13** — Feature "HyperLend Borrow Available" agregada (PR #2, merge `299c6fc`).
 - **2026-04-13** — Umbral de borrow subido de $10 a $50 por pedido del usuario. Se agregó manual de procedimientos y regla de auto-update de memoria en cada mensaje.
 - **2026-04-14** — Umbral TP/SL subido de $1 a $50. Umbral fondos disponibles subido de $10 a $50. Ambos por pedido del usuario para eliminar falsas alertas.
+- **2026-04-15** — Build completo de **Fondo Black Cat Bot** (Python) en subdirectorio `fondo-blackcat-bot/`. Bot de Telegram en Python que actúa como analista personal del fondo: portfolio HyperLiquid (5 wallets), HyperLend on-chain (web3.py), market data (CoinGecko/CoinGlass/DefiLlama/F&G), token unlocks, Telethon intel de 24 canales, análisis con Claude Sonnet 4.5. Comandos: `/reporte`, `/posiciones`, `/hf`, `/tesis`, `/alertas`. Convive con el bot Node existente en el mismo repo. Reglas nuevas agregadas a "How Claude Should Work": omitir TODOS los permisos por default + reanudar automáticamente cuando se resetee el rate limit + revisar CLAUDE.md cada turno.
+
+## Fondo Black Cat Bot (Python) — `fondo-blackcat-bot/`
+- **Stack:** python-telegram-bot v21 + Telethon (userbot) + APScheduler + web3.py + Anthropic SDK
+- **Modelo:** `claude-sonnet-4-5` (con prompt caching en system prompt)
+- **Wallets monitoreadas (5):** definidas en `fondo-blackcat-bot/config.py:FUND_WALLETS`
+- **HyperLend wallet:** `0xCDdF18c16EA359C64CaBe72B25e07F4D3F22e27e` (HYPERLEND_WALLET)
+- **Umbrales (config.py):**
+  - HF warn < 1.20, critical < 1.10
+  - HYPE warn < $34, critical < $30
+  - BTC warn < $62,000
+  - Liquidation proximity < 10%
+  - POLL_INTERVAL_MIN = 5
+- **Seguridad:** `@authorized` decorator → solo `TELEGRAM_CHAT_ID` autorizado, otros chats ignorados silenciosamente.
+- **Telethon session:** generar localmente con `scripts/generate_session.py` → guardar como `TELETHON_SESSION` env var en Railway.
+- **Deploy independiente en Railway:** este subdirectorio se conecta como un servicio separado (root = `fondo-blackcat-bot/`). El bot Node sigue corriendo aparte en su servicio existente.
 
 ## Deployment
 - Hosted on Railway (`railway.json`, `Dockerfile`)
 - Persistent data via Railway volume mounted at data directory
 - Multi-wallet support: each Telegram chat can register multiple wallets with labels
+- **Fondo Black Cat Bot (Python):** segundo servicio Railway, root = `fondo-blackcat-bot/`, start = `python bot.py`
