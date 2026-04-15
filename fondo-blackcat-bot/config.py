@@ -20,7 +20,7 @@ TELETHON_SESSION = os.getenv("TELETHON_SESSION", "")
 
 # ─── APIs ───────────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-6")
 COINGLASS_API_KEY = os.getenv("COINGLASS_API_KEY", "")
 
 
