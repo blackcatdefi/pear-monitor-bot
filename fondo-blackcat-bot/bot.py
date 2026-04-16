@@ -10,7 +10,7 @@ import logging
 import sys
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from telegram import Update
+from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from config import (
@@ -24,7 +24,12 @@ from modules.analysis import generate_report, generate_thesis_check
 from modules.hyperlend import fetch_hyperlend
 from modules.market import fetch_market_data
 from modules.portfolio import fetch_all_wallets
-from modules.telegram_intel import fetch_telegram_intel, get_client as get_telethon, stop_client as stop_telethon
+from modules.telegram_intel import (
+    fetch_telegram_intel,
+    get_client as get_telethon,
+    scan_telegram_unread,
+    stop_client as stop_telethon,
+)
 from modules.unlocks import fetch_unlocks
 from templates.formatters import format_hf, format_quick_positions
 from utils.security import authorized
@@ -35,6 +40,17 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s — %(message)s",
 )
 log = logging.getLogger("fondo-blackcat")
+
+# Persistent keyboard for main commands
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("/reporte"), KeyboardButton("/posiciones")],
+        [KeyboardButton("/hf"), KeyboardButton("/tesis")],
+        [KeyboardButton("/alertas"), KeyboardButton("/start")],
+    ],
+    resize_keyboard=True,
+    is_persistent=True,
+)
 
 # Runtime state for /alertas toggle
 _alerts_enabled = {"value": ENABLE_ALERTS}
@@ -52,53 +68,65 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/tesis — estado de la tesis macro\n"
         "/alertas — toggle alertas automáticas (on/off)\n"
     )
-    await update.message.reply_text(text)
+    await update.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
 async def cmd_posiciones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("⏳ Snapshot...")
+    await update.message.reply_text("⏳ Snapshot...", reply_markup=MAIN_KEYBOARD)
     wallets, hl = await asyncio.gather(fetch_all_wallets(), fetch_hyperlend())
-    await send_long_message(update, format_quick_positions(wallets, hl))
+    await send_long_message(update, format_quick_positions(wallets, hl), reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
 async def cmd_hf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     hl = await fetch_hyperlend()
-    await update.message.reply_text(format_hf(hl))
+    await update.message.reply_text(format_hf(hl), reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
 async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("⏳ Generando reporte completo (puede tardar 30-90s)...")
-    portfolio, hl, market, unlocks, intel = await asyncio.gather(
+    await update.message.reply_text(
+        "⏳ Generando reporte completo (puede tardar 30-90s)...",
+        reply_markup=MAIN_KEYBOARD,
+    )
+    # Run unread scan + all data fetches in parallel.
+    # scan_telegram_unread reads unread channels in main folder and marks them read.
+    portfolio, hl, market, unlocks, intel_legacy, intel_unread = await asyncio.gather(
         fetch_all_wallets(),
         fetch_hyperlend(),
         fetch_market_data(),
         fetch_unlocks(),
         fetch_telegram_intel(hours=24),
+        scan_telegram_unread(max_per_dialog=100),
     )
-    report = await generate_report(portfolio, hl, market, unlocks, intel)
-    await send_long_message(update, report)
+    # Merge legacy tiered intel with unread scan into a single dict passed to analysis
+    merged_intel: dict = {}
+    if isinstance(intel_legacy, dict):
+        merged_intel.update(intel_legacy)
+    if isinstance(intel_unread, dict) and intel_unread.get("status") == "ok":
+        merged_intel["unread_scan"] = intel_unread
+    report = await generate_report(portfolio, hl, market, unlocks, merged_intel)
+    await send_long_message(update, report, reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
 async def cmd_tesis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("⏳ Analizando estado de la tesis...")
+    await update.message.reply_text("⏳ Analizando estado de la tesis...", reply_markup=MAIN_KEYBOARD)
     portfolio, hl, market = await asyncio.gather(
         fetch_all_wallets(),
         fetch_hyperlend(),
         fetch_market_data(),
     )
     text = await generate_thesis_check(portfolio, hl, market)
-    await send_long_message(update, text)
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
 async def cmd_alertas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _alerts_enabled["value"] = not _alerts_enabled["value"]
     estado = "ON ✅" if _alerts_enabled["value"] else "OFF ⛔"
-    await update.message.reply_text(f"Alertas automáticas: {estado}")
+    await update.message.reply_text(f"Alertas automáticas: {estado}", reply_markup=MAIN_KEYBOARD)
 
 
 # ─── Scheduler job ──────────────────────────────────────────────────────────
@@ -113,14 +141,12 @@ async def _alert_job(application: Application) -> None:
 
 # ─── Lifecycle hooks ────────────────────────────────────────────────────────
 async def post_init(application: Application) -> None:
-    # Try to bring up Telethon client at startup (best effort)
     client = await get_telethon()
     if client is None:
         log.warning("Telethon NOT initialized — /reporte will run without channel intel.")
     else:
         log.info("Telethon client connected.")
 
-    # Scheduler
     if ENABLE_ALERTS:
         scheduler = AsyncIOScheduler()
         scheduler.add_job(
