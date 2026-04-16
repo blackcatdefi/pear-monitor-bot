@@ -102,8 +102,8 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         fetch_unlocks(),
         fetch_telegram_intel(hours=24),
         scan_telegram_unread(max_per_dialog=100),
-        fetch_x_intel(hours=24),
-        scan_gmail_unread(hours=24),
+        fetch_x_intel(hours=48),
+        scan_gmail_unread(),
         fetch_bounce_tech(),
     )
     # Merge tiered intel + unread scan + X intel into a single dict passed to analysis
