@@ -1,7 +1,8 @@
 """Telegram channel intelligence via Telethon (userbot session).
 
-Reads recent messages from tiered channels for analysis. Requires
-TELETHON_SESSION (StringSession) generated locally via scripts/generate_session.py.
+Reads messages from tiered channels AND scans all unread messages in the
+main folder, marking them as read after processing. Requires TELETHON_SESSION
+(StringSession) generated via scripts/regen_telethon.py.
 """
 from __future__ import annotations
 
@@ -37,7 +38,7 @@ async def get_client() -> TelegramClient | None:
             _client = TelegramClient(StringSession(TELETHON_SESSION), TELEGRAM_API_ID, TELEGRAM_API_HASH)
             await _client.connect()
             if not await _client.is_user_authorized():
-                log.error("Telethon session is not authorized — regenerate StringSession locally.")
+                log.error("Telethon session is not authorized — regenerate StringSession via scripts/regen_telethon.py.")
                 await _client.disconnect()
                 _client = None
                 return None
@@ -76,7 +77,7 @@ async def _read_channel(client: TelegramClient, handle: str, limit: int, hours: 
 
 
 async def fetch_telegram_intel(hours: int = 24) -> dict[str, Any]:
-    """Read all channels per tier with appropriate limits. Returns tiered text bundle."""
+    """Read all tiered channels (legacy path). Returns tiered text bundle."""
     client = await get_client()
     if client is None:
         return {"status": "error", "error": "telethon_not_configured"}
@@ -84,7 +85,6 @@ async def fetch_telegram_intel(hours: int = 24) -> dict[str, Any]:
     result: dict[str, list[dict[str, Any]]] = {"tier1": [], "tier2": [], "tier3": []}
     for tier, channels in CHANNELS.items():
         limit = CHANNEL_LIMITS.get(tier, 50)
-        # Read channels in tier in parallel (be conservative — Telegram throttles)
         sem = asyncio.Semaphore(3)
 
         async def _do(channel: dict[str, str]) -> dict[str, Any]:
@@ -101,3 +101,74 @@ async def fetch_telegram_intel(hours: int = 24) -> dict[str, Any]:
         result[tier] = gathered
 
     return {"status": "ok", "data": result}
+
+
+async def scan_telegram_unread(max_per_dialog: int = 100) -> dict[str, Any]:
+    """Scan unread messages in the MAIN folder (folder 0) only, across all
+    channels the user follows. Marks each dialog as read after extraction so
+    subsequent calls only see new messages.
+
+    Returns {"status": "ok"|"error", "data": [{channel, handle, messages:[{date,text,views}]}], "total_messages": N, "channels_scanned": N}
+    """
+    client = await get_client()
+    if client is None:
+        return {"status": "error", "error": "telethon_not_configured"}
+
+    out_channels: list[dict[str, Any]] = []
+    total_messages = 0
+    channels_scanned = 0
+
+    try:
+        # folder=0 is the "main" / all-chats folder (excludes archive/folders)
+        dialogs = await client.get_dialogs(folder=0)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("get_dialogs failed: %s", exc)
+        return {"status": "error", "error": f"get_dialogs_failed: {exc}"}
+
+    for dialog in dialogs:
+        try:
+            unread = int(getattr(dialog, "unread_count", 0) or 0)
+            if unread <= 0:
+                continue
+            # Only channels/megagroups (not private DMs)
+            if not getattr(dialog, "is_channel", False):
+                continue
+
+            limit = min(unread, max_per_dialog)
+            messages: list[dict[str, Any]] = []
+            async for msg in client.iter_messages(dialog.entity, limit=limit):
+                text = getattr(msg, "text", None)
+                if not text:
+                    continue
+                messages.append({
+                    "date": msg.date.isoformat() if msg.date else None,
+                    "views": getattr(msg, "views", None),
+                    "text": text.strip(),
+                })
+
+            if messages:
+                out_channels.append({
+                    "channel": getattr(dialog, "name", "?"),
+                    "handle": getattr(getattr(dialog, "entity", None), "username", None) or "",
+                    "unread_count": unread,
+                    "messages": messages,
+                })
+                total_messages += len(messages)
+                channels_scanned += 1
+
+            # Mark dialog as read (ack read up to the latest message)
+            try:
+                await client.send_read_acknowledge(dialog.entity)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("send_read_acknowledge failed for %s: %s", getattr(dialog, "name", "?"), exc)
+        except Exception as exc:  # noqa: BLE001
+            # Don't let one bad dialog kill the whole scan
+            log.warning("Error scanning dialog %s: %s", getattr(dialog, "name", "?"), exc)
+            continue
+
+    return {
+        "status": "ok",
+        "data": out_channels,
+        "total_messages": total_messages,
+        "channels_scanned": channels_scanned,
+    }
