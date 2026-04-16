@@ -31,6 +31,7 @@ from modules.telegram_intel import (
     stop_client as stop_telethon,
 )
 from modules.unlocks import fetch_unlocks
+from modules.gmail_intel import scan_gmail_unread
 from modules.x_intel import fetch_x_intel
 from templates.formatters import format_hf, format_quick_positions
 from utils.security import authorized
@@ -93,7 +94,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
     # Run unread scan + X intel + all data fetches in parallel.
     # scan_telegram_unread reads unread channels in main folder and marks them read.
-    portfolio, hl, market, unlocks, intel_legacy, intel_unread, x_intel = await asyncio.gather(
+    portfolio, hl, market, unlocks, intel_legacy, intel_unread, x_intel, gmail_intel = await asyncio.gather(
         fetch_all_wallets(),
         fetch_all_hyperlend(),
         fetch_market_data(),
@@ -101,6 +102,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         fetch_telegram_intel(hours=24),
         scan_telegram_unread(max_per_dialog=100),
         fetch_x_intel(hours=24),
+        scan_gmail_unread(hours=24),
     )
     # Merge tiered intel + unread scan + X intel into a single dict passed to analysis
     merged_intel: dict = {}
@@ -110,6 +112,8 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         merged_intel["unread_scan"] = intel_unread
     if isinstance(x_intel, dict):
         merged_intel["x_intel"] = x_intel
+    if isinstance(gmail_intel, dict) and gmail_intel.get("status") == "ok":
+        merged_intel["gmail_intel"] = gmail_intel
     report = await generate_report(portfolio, hl, market, unlocks, merged_intel)
     await send_long_message(update, report, reply_markup=MAIN_KEYBOARD)
 
