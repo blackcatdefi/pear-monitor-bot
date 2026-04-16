@@ -31,6 +31,7 @@ from modules.telegram_intel import (
     stop_client as stop_telethon,
 )
 from modules.unlocks import fetch_unlocks
+from modules.bounce_tech import fetch_bounce_tech
 from modules.gmail_intel import scan_gmail_unread
 from modules.x_intel import fetch_x_intel
 from templates.formatters import format_hf, format_quick_positions
@@ -76,8 +77,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 @authorized
 async def cmd_posiciones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("⏳ Snapshot...", reply_markup=MAIN_KEYBOARD)
-    wallets, hl = await asyncio.gather(fetch_all_wallets(), fetch_all_hyperlend())
-    await send_long_message(update, format_quick_positions(wallets, hl), reply_markup=MAIN_KEYBOARD)
+    wallets, hl, bt = await asyncio.gather(fetch_all_wallets(), fetch_all_hyperlend(), fetch_bounce_tech())
+    await send_long_message(update, format_quick_positions(wallets, hl, bounce_tech=bt), reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
@@ -94,7 +95,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
     # Run unread scan + X intel + all data fetches in parallel.
     # scan_telegram_unread reads unread channels in main folder and marks them read.
-    portfolio, hl, market, unlocks, intel_legacy, intel_unread, x_intel, gmail_intel = await asyncio.gather(
+    portfolio, hl, market, unlocks, intel_legacy, intel_unread, x_intel, gmail_intel, bt = await asyncio.gather(
         fetch_all_wallets(),
         fetch_all_hyperlend(),
         fetch_market_data(),
@@ -103,6 +104,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         scan_telegram_unread(max_per_dialog=100),
         fetch_x_intel(hours=24),
         scan_gmail_unread(hours=24),
+        fetch_bounce_tech(),
     )
     # Merge tiered intel + unread scan + X intel into a single dict passed to analysis
     merged_intel: dict = {}
