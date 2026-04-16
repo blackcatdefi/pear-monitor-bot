@@ -28,7 +28,7 @@ def _fmt_hf(v: float | None) -> str:
     return f"{v:.3f}"
 
 
-def format_quick_positions(wallets: list[dict[str, Any]], hyperlend: list[dict[str, Any]] | dict[str, Any]) -> str:
+def format_quick_positions(wallets: list[dict[str, Any]], hyperlend: list[dict[str, Any]] | dict[str, Any], bounce_tech: list[dict[str, Any]] | None = None) -> str:
     lines: list[str] = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines.append(f"📊 Snapshot Fondo Black Cat — {now}")
@@ -84,6 +84,28 @@ def format_quick_positions(wallets: list[dict[str, Any]], hyperlend: list[dict[s
             lines.append(f"    LTV: {(h.get('ltv') or 0)*100:.1f}% | LiqThr: {(h.get('current_liquidation_threshold') or 0)*100:.1f}%")
         else:
             lines.append(f"  ❌ {hl.get('error','error')}")
+
+    # ── Bounce Tech leveraged tokens ──
+    if bounce_tech:
+        bt_positions = []
+        for bw in bounce_tech:
+            if bw.get("status") != "ok":
+                continue
+            for p in bw.get("positions", []):
+                bt_positions.append(p)
+        if bt_positions:
+            lines.append("")
+            lines.append("BOUNCE TECH (Leveraged Tokens)")
+            bt_total = 0.0
+            for p in bt_positions:
+                direction = "🟢 LONG" if p.get("is_long") else "🔴 SHORT"
+                asset = p.get("asset", "?")
+                lev = p.get("leverage", "?")
+                val = p.get("value_usd", 0.0)
+                bt_total += val
+                lines.append(f"  {direction} {asset} {lev} — {_fmt_usd(val)}")
+            lines.append(f"  Total BT: {_fmt_usd(bt_total)}")
+
     return "\n".join(lines)
 
 
@@ -122,6 +144,7 @@ def compile_raw_data(
     market: dict[str, Any] | None,
     unlocks: dict[str, Any] | None,
     telegram_intel: dict[str, Any] | None,
+    bounce_tech: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build the user message that we feed to Claude with all raw data."""
     import json
@@ -134,6 +157,7 @@ def compile_raw_data(
         "market": market or {},
         "unlocks": unlocks or {},
         "telegram_intel": telegram_intel or {},
+        "bounce_tech": bounce_tech or [],
     }
     pretty = json.dumps(blob, ensure_ascii=False, indent=2, default=str)
     return (
