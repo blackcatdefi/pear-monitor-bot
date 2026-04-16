@@ -28,7 +28,7 @@ def _fmt_hf(v: float | None) -> str:
     return f"{v:.3f}"
 
 
-def format_quick_positions(wallets: list[dict[str, Any]], hyperlend: dict[str, Any]) -> str:
+def format_quick_positions(wallets: list[dict[str, Any]], hyperlend: list[dict[str, Any]] | dict[str, Any]) -> str:
     lines: list[str] = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines.append(f"📊 Snapshot Fondo Black Cat — {now}")
@@ -60,42 +60,65 @@ def format_quick_positions(wallets: list[dict[str, Any]], hyperlend: dict[str, A
         lines.append(f"    Equity: {eq} | UPnL: {upnl} | Notional: {ntl}")
         lines.append(f"    {pos_summary}")
     lines.append(f"  TOTAL: Equity {_fmt_usd(total_eq)} | UPnL {_fmt_usd(total_upnl)}")
+
+    # HyperLend section — supports both list (new) and dict (legacy) format
     lines.append("")
     lines.append("HYPERLEND")
-    if hyperlend.get("status") == "ok":
-        h = hyperlend["data"]
-        lines.append(f"  HF: {_fmt_hf(h.get('health_factor'))}")
-        lines.append(f"  Colateral: {_fmt_usd(h.get('total_collateral_usd'))}")
-        lines.append(f"  Borrowed: {_fmt_usd(h.get('total_debt_usd'))}")
-        lines.append(f"  Available borrow: {_fmt_usd(h.get('available_borrows_usd'))}")
-        lines.append(f"  LTV: {(h.get('ltv') or 0)*100:.1f}% | LiqThr: {(h.get('current_liquidation_threshold') or 0)*100:.1f}%")
-    else:
-        lines.append(f"  ❌ {hyperlend.get('error','error')}")
+    hl_list = hyperlend if isinstance(hyperlend, list) else [hyperlend]
+    for hl in hl_list:
+        if hl.get("status") == "ok":
+            h = hl["data"]
+            coll = h.get("total_collateral_usd", 0.0) or 0.0
+            if coll < 0.01:
+                continue
+            label = h.get("label") or hl.get("label") or "—"
+            wallet_short = (h.get("wallet") or "")[:6]
+            if wallet_short:
+                wallet_short = wallet_short + "…" + (h.get("wallet") or "")[-4:]
+            header = f"  [{label}]" + (f" {wallet_short}" if wallet_short else "")
+            lines.append(header)
+            lines.append(f"    HF: {_fmt_hf(h.get('health_factor'))}")
+            lines.append(f"    Colateral: {_fmt_usd(h.get('total_collateral_usd'))}")
+            lines.append(f"    Borrowed: {_fmt_usd(h.get('total_debt_usd'))}")
+            lines.append(f"    Available borrow: {_fmt_usd(h.get('available_borrows_usd'))}")
+            lines.append(f"    LTV: {(h.get('ltv') or 0)*100:.1f}% | LiqThr: {(h.get('current_liquidation_threshold') or 0)*100:.1f}%")
+        else:
+            lines.append(f"  ❌ {hl.get('error','error')}")
     return "\n".join(lines)
 
 
-def format_hf(hyperlend: dict[str, Any]) -> str:
-    if hyperlend.get("status") != "ok":
-        return f"❌ HyperLend: {hyperlend.get('error','error')}"
-    h = hyperlend["data"]
-    hf = h.get("health_factor")
-    icon = "🟢"
-    if hf is not None and not math.isinf(hf):
-        if hf < 1.10:
-            icon = "🚨"
-        elif hf < 1.20:
-            icon = "⚠️"
-    return (
-        f"{icon} HyperLend Health Factor: {_fmt_hf(hf)}\n"
-        f"Colateral: {_fmt_usd(h.get('total_collateral_usd'))} | "
-        f"Borrowed: {_fmt_usd(h.get('total_debt_usd'))} | "
-        f"Available: {_fmt_usd(h.get('available_borrows_usd'))}"
-    )
+def format_hf(hyperlend: list[dict[str, Any]] | dict[str, Any]) -> str:
+    """Format HF for /hf command — supports both list and single dict."""
+    hl_list = hyperlend if isinstance(hyperlend, list) else [hyperlend]
+    parts: list[str] = []
+    for hl in hl_list:
+        if hl.get("status") != "ok":
+            parts.append(f"❌ HyperLend: {hl.get('error','error')}")
+            continue
+        h = hl["data"]
+        coll = h.get("total_collateral_usd", 0.0) or 0.0
+        if coll < 0.01:
+            continue
+        hf = h.get("health_factor")
+        icon = "🟢"
+        if hf is not None and not math.isinf(hf):
+            if hf < 1.10:
+                icon = "🚨"
+            elif hf < 1.20:
+                icon = "⚠️"
+        label = h.get("label") or hl.get("label") or "—"
+        parts.append(
+            f"{icon} [{label}] HF: {_fmt_hf(hf)}\n"
+            f"  Colateral: {_fmt_usd(h.get('total_collateral_usd'))} | "
+            f"Borrowed: {_fmt_usd(h.get('total_debt_usd'))} | "
+            f"Available: {_fmt_usd(h.get('available_borrows_usd'))}"
+        )
+    return "\n".join(parts) if parts else "— Sin posiciones HyperLend activas"
 
 
 def compile_raw_data(
     portfolio: list[dict[str, Any]] | None,
-    hyperlend: dict[str, Any] | None,
+    hyperlend: list[dict[str, Any]] | dict[str, Any] | None,
     market: dict[str, Any] | None,
     unlocks: dict[str, Any] | None,
     telegram_intel: dict[str, Any] | None,
