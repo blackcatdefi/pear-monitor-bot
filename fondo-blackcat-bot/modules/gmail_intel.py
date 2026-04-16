@@ -1,11 +1,11 @@
-"""Gmail intel module — reads unread emails and marks them as read.
+"""Gmail intel module — reads ALL unread emails, marks read, and archives.
 
 Uses IMAP with Gmail App Password for simplicity.
 Env vars needed:
-  GMAIL_EMAIL       — Gmail address (e.g. blackcatdefi@gmail.com)
+  GMAIL_EMAIL — Gmail address (e.g. blackcatdefi@gmail.com)
   GMAIL_APP_PASSWORD — App Password from Google Account settings
 
-Pattern mirrors scan_telegram_unread: read → extract → mark read → return dict.
+Pattern mirrors scan_telegram_unread: read → extract → mark read → archive → return dict.
 """
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ import asyncio
 import email
 import imaplib
 import logging
-from datetime import datetime, timedelta, timezone
 from email.header import decode_header
 from typing import Any
 
@@ -62,8 +61,8 @@ def _get_body(msg: email.message.Message) -> str:
     return ""
 
 
-def _scan_inbox_sync(hours: int = 24, max_emails: int = 50) -> dict[str, Any]:
-    """Synchronous IMAP scan of unread emails in the last N hours."""
+def _scan_inbox_sync(max_emails: int = 200) -> dict[str, Any]:
+    """Synchronous IMAP scan of ALL unread emails. Marks read + archives."""
     if not GMAIL_EMAIL or not GMAIL_APP_PASSWORD:
         return {"status": "error", "error": "GMAIL_EMAIL or GMAIL_APP_PASSWORD not configured"}
 
@@ -73,9 +72,8 @@ def _scan_inbox_sync(hours: int = 24, max_emails: int = 50) -> dict[str, Any]:
         imap.login(GMAIL_EMAIL, GMAIL_APP_PASSWORD)
         imap.select("INBOX")
 
-        # Search for unread emails from the last N hours
-        since_date = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%d-%b-%Y")
-        _, msg_ids = imap.search(None, f'(UNSEEN SINCE "{since_date}")')
+        # Search for ALL unread emails (no date filter)
+        _, msg_ids = imap.search(None, "(UNSEEN)")
 
         if not msg_ids or not msg_ids[0]:
             imap.logout()
@@ -113,13 +111,22 @@ def _scan_inbox_sync(hours: int = 24, max_emails: int = 50) -> dict[str, Any]:
                     "snippet": snippet,
                 })
 
-                # Mark as read (add SEEN flag)
+                # Mark as read
                 imap.store(uid, "+FLAGS", "\\Seen")
+
+                # Archive: copy to All Mail (safety net) then mark deleted from INBOX
+                try:
+                    imap.copy(uid, "[Gmail]/All Mail")
+                except Exception:
+                    pass  # Already in All Mail on Gmail
+                imap.store(uid, "+FLAGS", "\\Deleted")
 
             except Exception as exc:  # noqa: BLE001
                 log.warning("Failed to process email %s: %s", uid, exc)
                 continue
 
+        # Expunge archived messages from INBOX view
+        imap.expunge()
         imap.logout()
 
         return {
@@ -136,6 +143,6 @@ def _scan_inbox_sync(hours: int = 24, max_emails: int = 50) -> dict[str, Any]:
         return {"status": "error", "error": str(exc)}
 
 
-async def scan_gmail_unread(hours: int = 24, max_emails: int = 50) -> dict[str, Any]:
+async def scan_gmail_unread(max_emails: int = 200) -> dict[str, Any]:
     """Async wrapper — runs IMAP scan in a thread to avoid blocking."""
-    return await asyncio.to_thread(_scan_inbox_sync, hours, max_emails)
+    return await asyncio.to_thread(_scan_inbox_sync, max_emails)
