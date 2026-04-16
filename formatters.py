@@ -34,6 +34,8 @@ def format_quick_positions(wallets: list[dict[str, Any]], hyperlend: list[dict[s
     lines.append(f"📊 Snapshot Fondo Black Cat — {now}")
     lines.append("")
     lines.append("PORTFOLIO HYPERLIQUID")
+    # Sort wallets by equity descending
+    wallets = sorted(wallets, key=lambda w: (w.get("data", {}).get("account_value") or 0) if w.get("status") == "ok" else 0, reverse=True)
     total_eq = 0.0
     total_upnl = 0.0
     for w in wallets:
@@ -65,6 +67,8 @@ def format_quick_positions(wallets: list[dict[str, Any]], hyperlend: list[dict[s
     lines.append("")
     lines.append("HYPERLEND")
     hl_list = hyperlend if isinstance(hyperlend, list) else [hyperlend]
+    # Sort HyperLend by collateral descending
+    hl_list = sorted(hl_list, key=lambda hl: (hl.get("data", {}).get("total_collateral_usd") or 0) if hl.get("status") == "ok" else 0, reverse=True)
     for hl in hl_list:
         if hl.get("status") == "ok":
             h = hl["data"]
@@ -112,6 +116,8 @@ def format_quick_positions(wallets: list[dict[str, Any]], hyperlend: list[dict[s
 def format_hf(hyperlend: list[dict[str, Any]] | dict[str, Any]) -> str:
     """Format HF for /hf command — supports both list and single dict."""
     hl_list = hyperlend if isinstance(hyperlend, list) else [hyperlend]
+    # Sort HyperLend by collateral descending
+    hl_list = sorted(hl_list, key=lambda hl: (hl.get("data", {}).get("total_collateral_usd") or 0) if hl.get("status") == "ok" else 0, reverse=True)
     parts: list[str] = []
     for hl in hl_list:
         if hl.get("status") != "ok":
