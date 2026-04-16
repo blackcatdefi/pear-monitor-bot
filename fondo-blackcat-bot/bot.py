@@ -21,7 +21,7 @@ from config import (
 )
 from modules.alerts import run_alert_cycle
 from modules.analysis import generate_report, generate_thesis_check
-from modules.hyperlend import fetch_hyperlend
+from modules.hyperlend import fetch_all_hyperlend
 from modules.market import fetch_market_data
 from modules.portfolio import fetch_all_wallets
 from modules.telegram_intel import (
@@ -75,13 +75,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 @authorized
 async def cmd_posiciones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("⏳ Snapshot...", reply_markup=MAIN_KEYBOARD)
-    wallets, hl = await asyncio.gather(fetch_all_wallets(), fetch_hyperlend())
+    wallets, hl = await asyncio.gather(fetch_all_wallets(), fetch_all_hyperlend())
     await send_long_message(update, format_quick_positions(wallets, hl), reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
 async def cmd_hf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    hl = await fetch_hyperlend()
+    hl = await fetch_all_hyperlend()
     await update.message.reply_text(format_hf(hl), reply_markup=MAIN_KEYBOARD)
 
 
@@ -95,7 +95,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # scan_telegram_unread reads unread channels in main folder and marks them read.
     portfolio, hl, market, unlocks, intel_legacy, intel_unread, x_intel = await asyncio.gather(
         fetch_all_wallets(),
-        fetch_hyperlend(),
+        fetch_all_hyperlend(),
         fetch_market_data(),
         fetch_unlocks(),
         fetch_telegram_intel(hours=24),
@@ -119,7 +119,7 @@ async def cmd_tesis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("⏳ Analizando estado de la tesis...", reply_markup=MAIN_KEYBOARD)
     portfolio, hl, market = await asyncio.gather(
         fetch_all_wallets(),
-        fetch_hyperlend(),
+        fetch_all_hyperlend(),
         fetch_market_data(),
     )
     text = await generate_thesis_check(portfolio, hl, market)
@@ -133,7 +133,7 @@ async def cmd_alertas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(f"Alertas automáticas: {estado}", reply_markup=MAIN_KEYBOARD)
 
 
-# ─── Scheduler job ───────────────────────────────────────────────────────────
+# ─── Scheduler job ──────────────────────────────────────────────────────────
 async def _alert_job(application: Application) -> None:
     if not _alerts_enabled["value"]:
         return
