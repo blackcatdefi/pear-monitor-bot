@@ -66,23 +66,52 @@ API_BASE = "https://api.x.com/2"
 _USER_ID_CACHE: dict[str, str] = {}
 
 
-async def _resolve_user_ids(client: httpx.AsyncClient, usernames: list[str]) -> dict[str, str]:
-    """Return {username_lower: user_id}. Uses /users/by?usernames=... (batch up to 100)."""
+async def _resolve_user_ids(
+    client: httpx.AsyncClient, usernames: list[str]
+) -> dict[str, str]:
+    """Return {username_lower: user_id}. Uses /users/by?usernames=... (batch up to 100).
+    Now handles >100 usernames by chunking into batches of 100.
+    """
     missing = [u for u in usernames if u.lower() not in _USER_ID_CACHE]
-    if missing:
+    # Chunk missing into batches of 100 (X API limit per request)
+    for i in range(0, len(missing), 100):
+        batch = missing[i : i + 100]
         try:
             resp = await client.get(
                 f"{API_BASE}/users/by",
-                params={"usernames": ",".join(missing[:100])},
+                params={"usernames": ",".join(batch)},
             )
             if resp.status_code == 200:
-                for u in (resp.json().get("data") or []):
+                for u in resp.json().get("data") or []:
                     _USER_ID_CACHE[u["username"].lower()] = u["id"]
+            elif resp.status_code == 429:
+                log.warning("X users/by rate limited at batch %d, pausing 60s", i // 100)
+                await asyncio.sleep(60)
+                # Retry this batch once
+                resp2 = await client.get(
+                    f"{API_BASE}/users/by",
+                    params={"usernames": ",".join(batch)},
+                )
+                if resp2.status_code == 200:
+                    for u in resp2.json().get("data") or []:
+                        _USER_ID_CACHE[u["username"].lower()] = u["id"]
+                else:
+                    log.warning("X users/by retry failed %d: %s", resp2.status_code, resp2.text[:200])
             else:
-                log.warning("X users/by failed %d: %s", resp.status_code, resp.text[:200])
+                log.warning(
+                    "X users/by failed %d: %s", resp.status_code, resp.text[:200]
+                )
         except Exception as exc:  # noqa: BLE001
-            log.warning("X users/by exception: %s", exc)
-    return {u.lower(): _USER_ID_CACHE[u.lower()] for u in usernames if u.lower() in _USER_ID_CACHE}
+            log.warning("X users/by exception batch %d: %s", i // 100, exc)
+        # Small delay between batches to respect rate limits
+        if i + 100 < len(missing):
+            await asyncio.sleep(1)
+
+    return {
+        u.lower(): _USER_ID_CACHE[u.lower()]
+        for u in usernames
+        if u.lower() in _USER_ID_CACHE
+    }
 
 
 async def _fetch_user_tweets(
@@ -104,9 +133,16 @@ async def _fetch_user_tweets(
     except Exception as exc:  # noqa: BLE001
         log.warning("X tweets %s exception: %s", username, exc)
         return []
-    if resp.status_code != 200:
-        log.warning("X tweets %s failed %d: %s", username, resp.status_code, resp.text[:200])
+
+    if resp.status_code == 429:
+        log.warning("X tweets %s rate limited, skipping", username)
         return []
+    if resp.status_code != 200:
+        log.warning(
+            "X tweets %s failed %d: %s", username, resp.status_code, resp.text[:200]
+        )
+        return []
+
     items = resp.json().get("data") or []
     out: list[dict[str, Any]] = []
     for t in items:
@@ -118,20 +154,24 @@ async def _fetch_user_tweets(
                     continue
             except Exception:  # noqa: BLE001
                 pass
-        out.append({
-            "id": t.get("id"),
-            "created_at": created,
-            "text": (t.get("text") or "").strip(),
-            "metrics": t.get("public_metrics") or {},
-        })
+        out.append(
+            {
+                "id": t.get("id"),
+                "created_at": created,
+                "text": (t.get("text") or "").strip(),
+                "metrics": t.get("public_metrics") or {},
+            }
+        )
     return out
 
 
-async def fetch_x_intel(hours: int = 24, accounts: list[str] | None = None) -> dict[str, Any]:
+async def fetch_x_intel(
+    hours: int = 24, accounts: list[str] | None = None
+) -> dict[str, Any]:
     """Fetch last `hours` of tweets from `accounts` (or env default).
 
-    Returns a dict with status=ok|error. On error, always returns a dict with
-    `error` key so the caller can branch without try/except.
+    Returns a dict with status=ok|error.  On error, always returns a dict
+    with `error` key so the caller can branch without try/except.
     """
     if not X_BEARER_TOKEN:
         return {"status": "error", "error": "x_bearer_token_not_configured"}
@@ -148,8 +188,8 @@ async def fetch_x_intel(hours: int = 24, accounts: list[str] | None = None) -> d
         if not uids:
             return {"status": "error", "error": "could_not_resolve_any_user"}
 
-        # Fan out — 1 request per handle, concurrency=5 to be polite to X rate limits.
-        sem = asyncio.Semaphore(5)
+        # Fan out — concurrency=10, with rate-limit awareness.
+        sem = asyncio.Semaphore(10)
 
         async def _do(uname: str) -> tuple[str, list[dict[str, Any]]]:
             uid = uids.get(uname.lower(), "")
@@ -161,17 +201,16 @@ async def fetch_x_intel(hours: int = 24, accounts: list[str] | None = None) -> d
 
         pairs = await asyncio.gather(*[_do(h) for h in handles])
 
-    data: dict[str, list[dict[str, Any]]] = {}
-    total = 0
-    for uname, msgs in pairs:
-        if msgs:
-            data[uname] = msgs
-            total += len(msgs)
+        data: dict[str, list[dict[str, Any]]] = {}
+        total = 0
+        for uname, msgs in pairs:
+            if msgs:
+                data[uname] = msgs
+                total += len(msgs)
 
-    return {
-        "status": "ok",
-        "data": data,
-        "accounts_scanned": len(data),
-        "total_tweets": total,
-    }
-
+        return {
+            "status": "ok",
+            "data": data,
+            "accounts_scanned": len(data),
+            "total_tweets": total,
+        }
