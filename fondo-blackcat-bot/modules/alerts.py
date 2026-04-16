@@ -20,7 +20,7 @@ from config import (
     LIQ_PROXIMITY_PCT,
     TELEGRAM_CHAT_ID,
 )
-from modules.hyperlend import fetch_hyperlend
+from modules.hyperlend import fetch_all_hyperlend
 from modules.portfolio import fetch_all_wallets, get_spot_price
 from utils.telegram import send_bot_message
 
@@ -64,20 +64,28 @@ def _clear(state: dict[str, Any], key: str) -> None:
 async def run_alert_cycle(bot) -> None:  # noqa: C901
     state = _load_state()
 
-    # 1. HyperLend HF
-    hl = await fetch_hyperlend()
-    if hl.get("status") == "ok":
-        hf = hl["data"].get("health_factor")
+    # 1. HyperLend HF (all wallets)
+    hl_list = await fetch_all_hyperlend()
+    for hl in hl_list:
+        if hl.get("status") != "ok":
+            continue
+        hld = hl["data"]
+        hf = hld.get("health_factor")
+        label = hld.get("label", "")
+        wallet_addr = hld.get("wallet", "")
+        short_addr = wallet_addr[:6] + "…" + wallet_addr[-4:] if wallet_addr else ""
+        ident = f"{label} ({short_addr})" if label else short_addr
+        wallet_key = wallet_addr[-8:] if wallet_addr else "unknown"
         if hf is not None and not math.isinf(hf):
             if hf < HF_CRITICAL:
-                await _emit(bot, "hf_critical", state, f"🚨 HYPERLEND HF CRÍTICO: {hf:.3f} — acción inmediata!")
+                await _emit(bot, f"hf_critical_{wallet_key}", state, f"🚨 HYPERLEND HF CRÍTICO: {hf:.3f} — {ident} — acción inmediata!")
             else:
-                _clear(state, "hf_critical")
+                _clear(state, f"hf_critical_{wallet_key}")
             if hf < HF_WARN:
-                await _emit(bot, "hf_warn", state, f"⚠️ HYPERLEND HF: {hf:.3f} — por debajo de {HF_WARN}")
+                await _emit(bot, f"hf_warn_{wallet_key}", state, f"⚠️ HYPERLEND HF: {hf:.3f} — {ident} — por debajo de {HF_WARN}")
             else:
-                _clear(state, "hf_warn")
-                _clear(state, "hf_critical")
+                _clear(state, f"hf_warn_{wallet_key}")
+                _clear(state, f"hf_critical_{wallet_key}")
 
     # 2. HYPE price
     hype_px = await get_spot_price("HYPE")
