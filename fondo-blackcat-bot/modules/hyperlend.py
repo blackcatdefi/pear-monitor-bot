@@ -19,6 +19,7 @@ from typing import Any
 from web3 import Web3
 
 from config import (
+    FUND_WALLETS,
     HYPEREVM_CHAIN_ID,
     HYPEREVM_RPC,
     HYPERLEND_POOL_ADDRESS,
@@ -90,7 +91,7 @@ class HyperLend:
 
 
 async def fetch_hyperlend(address: str = HYPERLEND_WALLET) -> dict[str, Any]:
-    """Fetch HyperLend state with graceful error handling."""
+    """Fetch HyperLend state for a single wallet with graceful error handling."""
     try:
         client = HyperLend()
         data = await client.get_account_data(address)
@@ -98,6 +99,63 @@ async def fetch_hyperlend(address: str = HYPERLEND_WALLET) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         log.exception("HyperLend fetch failed")
         return {"status": "error", "error": str(exc)}
+
+
+async def fetch_all_hyperlend() -> list[dict[str, Any]]:
+    """Fetch HyperLend state for ALL fund wallets + the legacy HYPERLEND_WALLET.
+
+    Returns a list of {status, data|error, label} dicts.
+    Only wallets with non-zero collateral are included in the response.
+    """
+    # Build list of (address, label) pairs, deduplicating
+    wallets: dict[str, str] = {}
+    # Legacy HYPERLEND_WALLET always included
+    if HYPERLEND_WALLET:
+        wallets[HYPERLEND_WALLET] = "HyperLend Principal"
+    # All fund wallets
+    for addr, label in FUND_WALLETS.items():
+        if addr not in wallets:
+            wallets[addr] = label
+
+    if not wallets:
+        return [{"status": "error", "error": "no_wallets_configured", "label": "?"}]
+
+    client = HyperLend()
+
+    async def _query(addr: str, label: str) -> dict[str, Any]:
+        try:
+            data = await client.get_account_data(addr)
+            data["label"] = label
+            return {"status": "ok", "data": data, "label": label}
+        except Exception as exc:  # noqa: BLE001
+            log.warning("HyperLend fetch %s (%s) failed: %s", label, addr[:10], exc)
+            return {"status": "error", "error": str(exc), "label": label}
+
+    results = await asyncio.gather(*[_query(a, l) for a, l in wallets.items()])
+
+    # Filter: only return wallets that have non-zero collateral (or errors)
+    filtered: list[dict[str, Any]] = []
+    for r in results:
+        if r["status"] == "error":
+            continue  # skip failed / zero wallets silently
+        coll = r["data"].get("total_collateral_usd", 0.0) or 0.0
+        if coll > 0.01:
+            filtered.append(r)
+
+    if not filtered:
+        # No wallet has HyperLend — return a single "no positions" entry
+        return [{"status": "ok", "data": {
+            "wallet": "",
+            "label": "—",
+            "total_collateral_usd": 0.0,
+            "total_debt_usd": 0.0,
+            "available_borrows_usd": 0.0,
+            "current_liquidation_threshold": 0.0,
+            "ltv": 0.0,
+            "health_factor": float("inf"),
+        }, "label": "—"}]
+
+    return filtered
 
 
 async def get_health_factor(address: str = HYPERLEND_WALLET) -> float | None:
