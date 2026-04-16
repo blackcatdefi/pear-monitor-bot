@@ -31,6 +31,7 @@ from modules.telegram_intel import (
     stop_client as stop_telethon,
 )
 from modules.unlocks import fetch_unlocks
+from modules.x_intel import fetch_x_intel
 from templates.formatters import format_hf, format_quick_positions
 from utils.security import authorized
 from utils.telegram import send_long_message
@@ -90,22 +91,25 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "⏳ Generando reporte completo (puede tardar 30-90s)...",
         reply_markup=MAIN_KEYBOARD,
     )
-    # Run unread scan + all data fetches in parallel.
+    # Run unread scan + X intel + all data fetches in parallel.
     # scan_telegram_unread reads unread channels in main folder and marks them read.
-    portfolio, hl, market, unlocks, intel_legacy, intel_unread = await asyncio.gather(
+    portfolio, hl, market, unlocks, intel_legacy, intel_unread, x_intel = await asyncio.gather(
         fetch_all_wallets(),
         fetch_hyperlend(),
         fetch_market_data(),
         fetch_unlocks(),
         fetch_telegram_intel(hours=24),
         scan_telegram_unread(max_per_dialog=100),
+        fetch_x_intel(hours=24),
     )
-    # Merge legacy tiered intel with unread scan into a single dict passed to analysis
+    # Merge tiered intel + unread scan + X intel into a single dict passed to analysis
     merged_intel: dict = {}
     if isinstance(intel_legacy, dict):
         merged_intel.update(intel_legacy)
     if isinstance(intel_unread, dict) and intel_unread.get("status") == "ok":
         merged_intel["unread_scan"] = intel_unread
+    if isinstance(x_intel, dict):
+        merged_intel["x_intel"] = x_intel
     report = await generate_report(portfolio, hl, market, unlocks, merged_intel)
     await send_long_message(update, report, reply_markup=MAIN_KEYBOARD)
 
@@ -129,7 +133,7 @@ async def cmd_alertas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(f"Alertas automáticas: {estado}", reply_markup=MAIN_KEYBOARD)
 
 
-# ─── Scheduler job ──────────────────────────────────────────────────────────
+# ─── Scheduler job ───────────────────────────────────────────────────────────
 async def _alert_job(application: Application) -> None:
     if not _alerts_enabled["value"]:
         return
