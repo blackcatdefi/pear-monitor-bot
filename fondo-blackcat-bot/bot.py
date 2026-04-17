@@ -36,6 +36,8 @@ from modules.unlocks import fetch_unlocks
 from modules.bounce_tech import fetch_bounce_tech
 from modules.gmail_intel import scan_gmail_unread
 from modules.x_intel import fetch_x_intel
+from modules.liq_calc import liq_calc
+from modules.kill_scenarios import kill_scenarios
 from templates.formatters import format_hf, format_quick_positions
 from templates.timeline import format_timeline
 from utils.security import authorized
@@ -53,6 +55,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton("/reporte"), KeyboardButton("/posiciones")],
         [KeyboardButton("/timeline"), KeyboardButton("/tesis")],
         [KeyboardButton("/hf"), KeyboardButton("/alertas")],
+        [KeyboardButton("/liqcalc"), KeyboardButton("/kill")],
         [KeyboardButton("/start")],
     ],
     resize_keyboard=True,
@@ -63,19 +66,21 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
 _alerts_enabled = {"value": ENABLE_ALERTS}
 
 
-# ─── Commands ─────────────────────────────────────────────────────────────────────────────
+# ─── Commands ───────────────────────────────────────────────────────────────────────────────────
 
 
 @authorized
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
-        "🐈\u200d⬛ Fondo Black Cat — analista personal\n\n"
+        "🐈‍⬛ Fondo Black Cat — analista personal\n\n"
         "Keyboard — todos los comandos:\n"
         "/reporte — TODO-EN-UNO: timeline + posiciones + análisis\n"
         "/posiciones — snapshot rápido (wallets + HF)\n"
         "/timeline — timeline X 48h (154 cuentas)\n"
         "/tesis — estado de la tesis macro\n"
         "/hf — Health Factor de HyperLend\n"
+        "/liqcalc — calculadora liquidación HyperLend\n"
+        "/kill — kill scenarios de la tesis\n"
         "/alertas — toggle alertas automáticas (on/off)\n"
     )
     await update.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
@@ -119,7 +124,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     x_intel = await fetch_x_intel(hours=48)
     log.info("/reporte: X intel done — status=%s", x_intel.get("status"))
 
-    # ─── PASO 2: Todo lo demás en paralelo ────────────────────────
+    # ─── PASO 2: Todo lo demás en paralelo ──────────────────────
     portfolio, hl, market, unlocks, intel_legacy, intel_unread, gmail_intel, bt = await asyncio.gather(
         fetch_all_wallets(),
         fetch_all_hyperlend(),
@@ -192,13 +197,27 @@ async def cmd_timeline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 @authorized
+async def cmd_liqcalc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("⏳ Calculando escenarios de liquidación...", reply_markup=MAIN_KEYBOARD)
+    text = await liq_calc()
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+async def cmd_kill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("⏳ Evaluando kill scenarios...", reply_markup=MAIN_KEYBOARD)
+    text = await kill_scenarios()
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
 async def cmd_alertas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _alerts_enabled["value"] = not _alerts_enabled["value"]
     estado = "ON ✅" if _alerts_enabled["value"] else "OFF ⛔"
     await update.message.reply_text(f"Alertas automáticas: {estado}", reply_markup=MAIN_KEYBOARD)
 
 
-# ─── Scheduler job ────────────────────────────────────────────────────────────────
+# ─── Scheduler job ────────────────────────────────────────────────────────────────────
 
 
 async def _alert_job(application: Application) -> None:
@@ -210,7 +229,7 @@ async def _alert_job(application: Application) -> None:
         log.exception("Alert cycle failed")
 
 
-# ─── Lifecycle hooks ────────────────────────────────────────────────────────────
+# ─── Lifecycle hooks ────────────────────────────────────────────────────────────────
 
 
 async def post_init(application: Application) -> None:
@@ -243,7 +262,7 @@ async def post_shutdown(application: Application) -> None:
     await stop_telethon()
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────────
+# ─── Main ─────────────────────────────────────────────────────────────────────────────
 
 
 def main() -> None:
@@ -269,6 +288,9 @@ def main() -> None:
     app.add_handler(CommandHandler("tesis", cmd_tesis))
     app.add_handler(CommandHandler("timeline", cmd_timeline))
     app.add_handler(CommandHandler("alertas", cmd_alertas))
+    app.add_handler(CommandHandler("liqcalc", cmd_liqcalc))
+    app.add_handler(CommandHandler("kill", cmd_kill))
+    app.add_handler(CommandHandler("kill_scenarios", cmd_kill))
 
     log.info("Fondo Black Cat bot starting...")
     app.run_polling(
@@ -279,4 +301,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
