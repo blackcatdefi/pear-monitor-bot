@@ -1,8 +1,9 @@
 """Periodic alert checks (HF, liquidation proximity, HYPE/BTC crashes).
 
-Edge-triggered: keeps last alert state in data/alert_state.json to avoid spam.
-HF alerts use escalated thresholds with cooldown + delta logic.
+Edge-triggered HF alerts: only fire when crossing thresholds or after
+significant value change / 2-hour passive reminder.
 """
+
 from __future__ import annotations
 
 import json
@@ -30,20 +31,20 @@ log = logging.getLogger(__name__)
 
 STATE_FILE = os.path.join(DATA_DIR, "alert_state.json")
 
-# ── Edge-triggered HF alert state (in-memory, persists via alert_state.json) ──
-# Structure: { wallet_key: { "last_hf": float, "last_ts": float, "last_level": str } }
-_HF_ALERT_KEY = "hf_edge_state"
-
-# Escalated thresholds: (threshold, level_name, emoji)
-_HF_THRESHOLDS = [
-    (1.05, "emergency", "\U0001f480"),    # 💀
-    (1.10, "critical", "\U0001f534\U0001f534"),  # 🔴🔴
-    (1.15, "strong", "\U0001f534"),        # 🔴
-    (1.20, "warning", "\u26a0\ufe0f"),     # ⚠️
+# ── HF edge-triggered thresholds ──
+HF_THRESHOLDS = [
+    (1.05, "EMERGENCY", "🆘"),
+    (1.10, "CRITICAL", "🚨"),
+    (1.15, "STRONG", "🔴"),
+    (1.20, "WARNING", "⚠️"),
 ]
 
-_HF_DELTA = 0.02          # re-alert only if HF changed by this much
-_HF_COOLDOWN = 7200       # 2 hours in seconds
+# State for edge-triggered HF alerts:
+# {wallet_addr: {"value": float, "timestamp": float, "threshold_crossed": float}}
+_last_hf_alerts: dict[str, dict] = {}
+
+HF_CHANGE_THRESHOLD = 0.02   # re-alert if HF changed by this much
+HF_PASSIVE_REMINDER_S = 7200  # 2 hours passive reminder
 
 
 def _load_state() -> dict[str, Any]:
@@ -63,12 +64,91 @@ def _save_state(state: dict[str, Any]) -> None:
     except Exception as exc:  # noqa: BLE001
         log.warning("Could not save alert state: %s", exc)
 
-7��2FVb�V֗B�&�B��W��7G"�7FFS�F�7E�7G"�����W76vS�7G"������S���b7FFR�vWB��W���2�&VG��W'FV@�&WGW&���r�v&��r�$�U%BW3�W2"��W���W76vR���bDT�Tu$��4�E��C��v�B6V�E�&�E��W76vR�&�B�DT�Tu$��4�E��B��W76vR��7FFU��W���G'VP���7��2FVb�V֗E�f�&6R�&�B��W76vS�7G"������S��""%6V�B�W'BV�6��F�F����ǒ�W6VB'�VFvR�G&�vvW&VB�b��"" ���r�v&��r�$�U%B�b�TDtS�W2"��W76vR���bDT�Tu$��4�E��C��v�B6V�E�&�E��W76vR�&�B�DT�Tu$��4�E��B��W76vR����FVb�6�V"�7FFS�F�7E�7G"�����W��7G"������S���b�W���7FFS��7FFR����W�����FVb�vWE��e��WfV�c�f��B���GW�U�7G"�7G%�����S��""%&WGW&���WfV����R�V�����f�"F�Rv�'7BF�&W6���B'&V6�VB��"���R�"" �f�"F�&W6���B��WfV��V�������e�D�$U4���E3���b�b�F�&W6���C��&WGW&���WfV��V������&WGW&����P����幌�����}�����}��}�������а�݅����}������Ȱ���聙���а���������Ȱ��хє聑��Ф����9����(������������ɥ���ɕ��!������聙�ɕ́���ѡɕ͡�����ɽ�ͥ����ݥѠ�������ݸ������ф����(������܀�ѥ���ѥ����(������}�хє聑��Ѐ��хє�͕ё���ձС}!}1IQ}-d�����(�����ɕ؀􁡙}�хє���С݅����}��䰁���(�����ɕ�}�����ɕع��Р�����}����(�����ɕ�}�̀��ɕع��Р�����}�̈����(�����ɕ�}��ٕ����ɕع��Р�����}��ٕ�������((������ٕ�}������}���}��}��ٕ�����(�������ɕ��}��ٕ��􁱕ٕ�}����l�t������ٕ�}�������͔���(����������􁱕ٕ�}����l�t������ٕ�}�������͔���((���������Ё��ٕ�}�����(����������!��́����ѡ䀠��ĸ�����P�����ȁ�хє�ͼ����Ё�ɽ�́�ɥ����́�ɕ͠(�����������݅����}��䁥����}�хє�(������������������}�хѕm݅����}���t(��������ɕ��ɸ((�������ѕɵ�������ݔ�͡�ձ����ɔ(����͡�ձ�}��ɔ����͔(����ɕ�ͽ��􀈈((��������ɕ�}����́9����(�������������Ёѥ����ɽ�ͥ�������܁��ѡɕ͡���(��������͡�ձ�}��ɔ��Q�Ք(��������ɕ�ͽ���ѡɕ͡�����ɽ�͕��(������������ɕ��}��ٕ�����ɕ�}��ٕ��(����������͍���ѕ��Ѽ���ݽ�͔���ٕ����ȁ����͍���ѕ��(��������͡�ձ�}��ɔ��Q�Ք(��������ɕ�ͽ��􁘉��ٕ������������ɕ�}��ٕ���I���ɕ��}��ٕ��(�����������̡������ɕ�}������}!}1Q�(����������!���ٕ��ͥ��������ѱ�ͥ�������Ё�����(��������͡�ձ�}��ɔ��Q�Ք(��������ɕ�ͽ��􁘉���ф�텉̡������ɕ�}����͙����}!}1Q�(������������܀���ɕ�}�̤���}!}
-==1=]8�(����������
-�����ݸ�����ɕ���ɔ�����Ё�Ёͅ�����ٕ�(��������͡�ձ�}��ɔ��Q�Ք(��������ɕ�ͽ��􀉍�����ݸ�����ɕ��((�������͡�ձ�}��ɔ�(����������ٕ�}���������ɕ��}��ٕ������Ƞ�(���������͜�􁘉핵����!eAI19�!����ٕ�}�����������͙�P��������m�ɕ�ͽ��t�(���������݅�Ё}����}��ɍ����а��͜�(����������}�хѕm݅����}���t���(�����������������}���聡��(�����������������}�̈聹�ܰ(�����������������}��ٕ��聍��ɕ��}��ٕ��(���������((async def run_alert_cycle(bot) -> None:  # noqa: C901
+
+async def _emit(bot, key: str, state: dict[str, Any], message: str) -> None:
+    if state.get(key):  # already alerted
+        return
+    log.warning("ALERT %s: %s", key, message)
+    if TELEGRAM_CHAT_ID:
+        await send_bot_message(bot, TELEGRAM_CHAT_ID, message)
+    state[key] = True
+
+
+def _clear(state: dict[str, Any], key: str) -> None:
+    if key in state:
+        state.pop(key)
+
+
+def _get_hf_threshold_level(hf: float) -> tuple[float, str, str] | None:
+    """Return the highest (most severe) threshold that HF is below."""
+    for threshold, label, emoji in HF_THRESHOLDS:
+        if hf < threshold:
+            return (threshold, label, emoji)
+    return None
+
+
+def _should_alert_hf(wallet_addr: str, hf: float) -> tuple[bool, str]:
+    """Edge-triggered HF alert logic.
+
+    Returns (should_alert, reason).
+    Alert ONLY when:
+    1. HF crosses a threshold for the first time (from above to below)
+    2. HF changed by more than 0.02 since last alert
+    3. More than 2 hours since last alert (passive reminder)
+    """
+    now = time.time()
+    last = _last_hf_alerts.get(wallet_addr)
+    current_threshold = _get_hf_threshold_level(hf)
+
+    if current_threshold is None:
+        # HF is healthy (above all thresholds) — clear state
+        if wallet_addr in _last_hf_alerts:
+            del _last_hf_alerts[wallet_addr]
+        return False, ""
+
+    threshold_val, threshold_label, _ = current_threshold
+
+    if last is None:
+        # First time crossing ANY threshold — alert
+        return True, f"threshold {threshold_label} crossed (HF < {threshold_val})"
+
+    last_value = last.get("value", 0)
+    last_time = last.get("timestamp", 0)
+    last_threshold = last.get("threshold_crossed", 999)
+
+    # 1. New (more severe) threshold crossed
+    if threshold_val < last_threshold:
+        return True, f"NEW threshold {threshold_label} crossed (HF < {threshold_val})"
+
+    # 2. HF changed significantly since last alert
+    hf_delta = abs(hf - last_value)
+    if hf_delta >= HF_CHANGE_THRESHOLD:
+        direction = "↓" if hf < last_value else "↑"
+        return True, f"HF moved {direction} by {hf_delta:.3f} since last alert"
+
+    # 3. Passive reminder after 2 hours
+    elapsed = now - last_time
+    if elapsed >= HF_PASSIVE_REMINDER_S:
+        hours = elapsed / 3600
+        return True, f"passive reminder ({hours:.1f}h since last alert)"
+
+    return False, ""
+
+
+def _record_hf_alert(wallet_addr: str, hf: float) -> None:
+    """Record that an HF alert was sent."""
+    threshold = _get_hf_threshold_level(hf)
+    _last_hf_alerts[wallet_addr] = {
+        "value": hf,
+        "timestamp": time.time(),
+        "threshold_crossed": threshold[0] if threshold else 999,
+    }
+
+
+async def run_alert_cycle(bot) -> None:  # noqa: C901
     state = _load_state()
 
-    # 1. HyperLend HF (all wallets) — edge-triggered
+    # 1. HyperLend HF (all wallets) — EDGE-TRIGGERED
     hl_list = await fetch_all_hyperlend()
     for hl in hl_list:
         if hl.get("status") != "ok":
@@ -79,19 +159,40 @@ def _save_state(state: dict[str, Any]) -> None:
         wallet_addr = hld.get("wallet", "")
         short_addr = wallet_addr[:6] + "…" + wallet_addr[-4:] if wallet_addr else ""
         ident = f"{label} ({short_addr})" if label else short_addr
-        wallet_key = wallet_addr[-8:] if wallet_addr else "unknown"
+
         if hf is not None and not math.isinf(hf):
-            await _check_hf_edge(bot, wallet_key, hf, ident, state)
+            should_alert, reason = _should_alert_hf(wallet_addr, hf)
+
+            if should_alert:
+                threshold = _get_hf_threshold_level(hf)
+                if threshold:
+                    _, level_label, emoji = threshold
+                    msg = (
+                        f"{emoji} HYPERLEND HF {level_label}: {hf:.3f} — {ident}\n"
+                        f"Razón: {reason}"
+                    )
+                    log.warning("HF ALERT %s: %s (reason: %s)", ident, hf, reason)
+                    if TELEGRAM_CHAT_ID:
+                        await send_bot_message(bot, TELEGRAM_CHAT_ID, msg)
+                    _record_hf_alert(wallet_addr, hf)
+            elif hf >= 1.20:
+                # HF recovered above all thresholds — clear state
+                if wallet_addr in _last_hf_alerts:
+                    log.info("HF recovered for %s: %.3f", ident, hf)
+                    del _last_hf_alerts[wallet_addr]
 
     # 2. HYPE price
     hype_px = await get_spot_price("HYPE")
     if hype_px is not None:
         if hype_px < HYPE_CRITICAL:
-            await _emit(bot, "hype_critical", state, f"🔴 HYPE @ ${hype_px:.2f} — VERIFICAR HF INMEDIATAMENTE!")
+            await _emit(bot, "hype_critical", state,
+                        f"🔴 HYPE @ ${hype_px:.2f} — VERIFICAR HF INMEDIATAMENTE!")
         else:
             _clear(state, "hype_critical")
+
         if hype_px < HYPE_WARN:
-            await _emit(bot, "hype_warn", state, f"🚨 HYPE @ ${hype_px:.2f} — impacto directo en colateral HyperLend")
+            await _emit(bot, "hype_warn", state,
+                        f"🚨 HYPE @ ${hype_px:.2f} — impacto directo en colateral HyperLend")
         else:
             _clear(state, "hype_warn")
             _clear(state, "hype_critical")
@@ -100,7 +201,8 @@ def _save_state(state: dict[str, Any]) -> None:
     btc_px = await get_spot_price("BTC")
     if btc_px is not None:
         if btc_px < BTC_WARN:
-            await _emit(bot, "btc_warn", state, f"🚨 BTC @ ${btc_px:,.0f} — debajo de ${BTC_WARN:,.0f}, target ZordXBT $46K activo")
+            await _emit(bot, "btc_warn", state,
+                        f"🚨 BTC @ ${btc_px:,.0f} — debajo de ${BTC_WARN:,.0f}, target ZordXBT $46K activo")
         else:
             _clear(state, "btc_warn")
 
