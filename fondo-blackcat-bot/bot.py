@@ -1,8 +1,9 @@
 """Fondo Black Cat — Telegram bot entry point.
 
-Runs python-telegram-bot v21 (commands) + Telethon userbot (channel reads) +
-APScheduler (alert loop) in the same asyncio event loop.
+Runs python-telegram-bot v21 (commands) + Telethon userbot (channel reads)
++ APScheduler (alert loop) in the same asyncio event loop.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -19,6 +20,7 @@ from config import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
 )
+
 from modules.alerts import run_alert_cycle
 from modules.analysis import generate_report, generate_thesis_check
 from modules.hyperlend import fetch_all_hyperlend
@@ -61,13 +63,13 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
 _alerts_enabled = {"value": ENABLE_ALERTS}
 
 
-# ─── Commands ─────────────────────────────────────────────────────────────────────
+# ─── Commands ─────────────────────────────────────────────────────────────────────────────
 
 
 @authorized
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
-        "🐈‍⬛ Fondo Black Cat — analista personal\n\n"
+        "🐈\u200d⬛ Fondo Black Cat — analista personal\n\n"
         "Keyboard — todos los comandos:\n"
         "/reporte — TODO-EN-UNO: timeline + posiciones + análisis\n"
         "/posiciones — snapshot rápido (wallets + HF)\n"
@@ -100,26 +102,36 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     1. Timeline — top 40 tweets por engagement de las últimas 48h (154 cuentas curadas)
     2. Posiciones — snapshot rápido de wallets + HyperLend + Bounce Tech
     3. Análisis — reporte completo generado por Claude (market + intel + tesis)
+
+    IMPORTANT: X intel fetches FIRST (sequentially) to allow full cold-start
+    retry cycle (up to 15s). Only after X data is ready do we fetch the rest
+    and send messages. "Perfecto, no rápido."
     """
     await update.message.reply_text(
         "⏳ Generando reporte completo: timeline + posiciones + análisis (30-90s)...",
         reply_markup=MAIN_KEYBOARD,
     )
 
-    # Todos los fetches en paralelo.
-    portfolio, hl, market, unlocks, intel_legacy, intel_unread, x_intel, gmail_intel, bt = await asyncio.gather(
+    # ─── PASO 1: X intel PRIMERO (secuencial, con retries) ───────────
+    # X API needs cold-start time. We fetch it FIRST so its 3-attempt retry
+    # cycle (up to 15s) completes fully before we send ANY message.
+    log.info("/reporte: fetching X intel first (sequential, with retries)...")
+    x_intel = await fetch_x_intel(hours=48)
+    log.info("/reporte: X intel done — status=%s", x_intel.get("status"))
+
+    # ─── PASO 2: Todo lo demás en paralelo ────────────────────────
+    portfolio, hl, market, unlocks, intel_legacy, intel_unread, gmail_intel, bt = await asyncio.gather(
         fetch_all_wallets(),
         fetch_all_hyperlend(),
         fetch_market_data(),
         fetch_unlocks(),
         fetch_telegram_intel(hours=24),
         scan_telegram_unread(max_per_dialog=100),
-        fetch_x_intel(hours=48),
         scan_gmail_unread(),
         fetch_bounce_tech(),
     )
 
-    # ─── Sección 1: Timeline X (48h) ─────────────────────────────────────
+    # ─── Sección 1: Timeline X (48h) ─────────────────────────────
     timeline_text = format_timeline(x_intel, top_n=40)
     await send_long_message(
         update,
@@ -127,7 +139,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         reply_markup=MAIN_KEYBOARD,
     )
 
-    # ─── Sección 2: Posiciones ─────────────────────────────────────────
+    # ─── Sección 2: Posiciones ─────────────────────────────────
     positions_text = format_quick_positions(portfolio, hl, bounce_tech=bt)
     await send_long_message(
         update,
@@ -135,7 +147,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         reply_markup=MAIN_KEYBOARD,
     )
 
-    # ─── Sección 3: Análisis Claude ──────────────────────────────────────
+    # ─── Sección 3: Análisis Claude ──────────────────────────────
     merged_intel: dict = {}
     if isinstance(intel_legacy, dict):
         merged_intel.update(intel_legacy)
@@ -231,7 +243,7 @@ async def post_shutdown(application: Application) -> None:
     await stop_telethon()
 
 
-# ─── Main ───────────────────────────────────────────────────────────────────────
+# ─── Main ─────────────────────────────────────────────────────────────────────────
 
 
 def main() -> None:
@@ -249,7 +261,6 @@ def main() -> None:
         .post_shutdown(post_shutdown)
         .build()
     )
-
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_start))
     app.add_handler(CommandHandler("posiciones", cmd_posiciones))
@@ -268,3 +279,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
