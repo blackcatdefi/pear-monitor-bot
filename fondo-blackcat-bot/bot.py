@@ -35,6 +35,7 @@ from modules.bounce_tech import fetch_bounce_tech
 from modules.gmail_intel import scan_gmail_unread
 from modules.x_intel import fetch_x_intel
 from templates.formatters import format_hf, format_quick_positions
+from templates.timeline import format_timeline
 from utils.security import authorized
 from utils.telegram import send_long_message
 
@@ -49,7 +50,8 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("/reporte"), KeyboardButton("/posiciones")],
         [KeyboardButton("/hf"), KeyboardButton("/tesis")],
-        [KeyboardButton("/alertas"), KeyboardButton("/start")],
+        [KeyboardButton("/timeline"), KeyboardButton("/alertas")],
+        [KeyboardButton("/start")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -69,6 +71,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/posiciones — snapshot rápido (wallets + HF)\n"
         "/hf — Health Factor de HyperLend\n"
         "/tesis — estado de la tesis macro\n"
+        "/timeline — últimas 48h de X (154 cuentas curadas)\n"
         "/alertas — toggle alertas automáticas (on/off)\n"
     )
     await update.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
@@ -129,6 +132,17 @@ async def cmd_tesis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         fetch_market_data(),
     )
     text = await generate_thesis_check(portfolio, hl, market)
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+async def cmd_timeline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "⏳ Leyendo últimas 48h de tu timeline X (154 cuentas)...",
+        reply_markup=MAIN_KEYBOARD,
+    )
+    x_intel = await fetch_x_intel(hours=48)
+    text = format_timeline(x_intel, top_n=40)
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
@@ -203,6 +217,7 @@ def main() -> None:
     app.add_handler(CommandHandler("hf", cmd_hf))
     app.add_handler(CommandHandler("reporte", cmd_reporte))
     app.add_handler(CommandHandler("tesis", cmd_tesis))
+    app.add_handler(CommandHandler("timeline", cmd_timeline))
     app.add_handler(CommandHandler("alertas", cmd_alertas))
 
     log.info("Fondo Black Cat bot starting...")
