@@ -1,9 +1,8 @@
-"""Token unlock data with fallback cascade.
+"""Token unlock data via DefiLlama emissions/unlocks API.
 
-Primary: DefiLlama emissions API (https://api.llama.fi/emissions)
-Fallback 1: Tokenomist API (https://tokenomist.ai/api)
-Fallback 2: Scrape defillama.com/unlocks
-If all fail: return error dict with details.
+Endpoint discovery: https://api.llama.fi/emissions returns list of protocols with
+upcoming unlock events. We filter by USD value and basket relevance.
+Falls back to Tokenomist API and then HTML scraping if DefiLlama returns 402/error.
 """
 from __future__ import annotations
 
@@ -18,15 +17,15 @@ from utils.http import get_json
 log = logging.getLogger(__name__)
 
 EMISSIONS_URL = "https://api.llama.fi/emissions"
-TOKENOMIST_URL = "https://tokenomist.ai/api/unlocks"
-DEFILLAMA_SCRAPE_URL = "https://defillama.com/unlocks"
+TOKENOMIST_URL = "https://tokenomist.ai/api/v1/unlocks"
+DEFILLAMA_HTML_URL = "https://defillama.com/unlocks"
 MIN_USD_THRESHOLD = 2_000_000  # $2M
 WINDOW_DAYS = 14
 PRIORITY_TOKENS = {t.upper() for t in (*ALT_SHORT_BASKET, "HYPE")}
 
 
 def _parse_defillama_events(data: list, now: int, horizon: int) -> list[dict[str, Any]]:
-    """Parse DefiLlama emissions API response into unlock events."""
+    """Parse DefiLlama emissions API response into unlock entries."""
     upcoming: list[dict[str, Any]] = []
     for proto in data:
         try:
@@ -56,154 +55,133 @@ def _parse_defillama_events(data: list, now: int, horizon: int) -> list[dict[str
                     "type": ev.get("description") or proto.get("category"),
                     "priority": is_priority,
                 })
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Skipping malformed unlock entry: %s", exc)
             continue
     return upcoming
 
 
-def _parse_tokenomist_events(data: list | dict, now: int, horizon: int) -> list[dict[str, Any]]:
-    """Parse Tokenomist API response into unlock events."""
-    upcoming: list[dict[str, Any]] = []
-    items = data if isinstance(data, list) else data.get("data", data.get("unlocks", []))
-    if not isinstance(items, list):
-        return upcoming
-    for item in items:
-        try:
-            symbol = (item.get("symbol") or item.get("token") or "").upper()
-            ts = item.get("unlock_date") or item.get("timestamp") or item.get("date")
-            if isinstance(ts, str):
-                # Try parsing ISO date string
-                import datetime
-                try:
-                    dt = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                    ts = int(dt.timestamp())
-                except (ValueError, TypeError):
-                    continue
-            if not ts or ts < now or ts > horizon:
-                continue
-            value_usd = float(item.get("value_usd") or item.get("usd_value") or item.get("value") or 0)
-            tokens = float(item.get("tokens") or item.get("amount") or item.get("noOfTokens") or 0)
-            is_priority = symbol in PRIORITY_TOKENS
-            if value_usd < MIN_USD_THRESHOLD and not is_priority:
-                continue
-            upcoming.append({
-                "symbol": symbol,
-                "name": item.get("name") or item.get("project") or symbol,
-                "timestamp": ts,
-                "tokens": tokens,
-                "value_usd": value_usd,
-                "float_pct": item.get("float_pct") or item.get("percent_of_supply"),
-                "category": item.get("category") or "unlock",
-                "type": item.get("type") or item.get("description") or "token_unlock",
-                "priority": is_priority,
-            })
-        except Exception:  # noqa: BLE001
-            continue
-    return upcoming
-
-
-async def _try_defillama_api(now: int, horizon: int) -> list[dict[str, Any]] | None:
-    """Attempt 1: DefiLlama emissions API."""
+async def _try_defillama(now: int, horizon: int) -> list[dict[str, Any]] | None:
+    """Primary source: DefiLlama emissions API."""
     try:
         data = await get_json(EMISSIONS_URL)
         if not isinstance(data, list):
-            log.warning("DefiLlama: unexpected response shape")
+            log.warning("DefiLlama emissions: unexpected shape")
             return None
         result = _parse_defillama_events(data, now, horizon)
-        if result:
-            log.info("DefiLlama API: got %d unlock events", len(result))
+        log.info("DefiLlama emissions OK: %d unlocks", len(result))
         return result
     except Exception as exc:  # noqa: BLE001
-        log.warning("DefiLlama API failed: %s", exc)
+        log.warning("DefiLlama emissions failed: %s", exc)
         return None
 
 
-async def _try_tokenomist_api(now: int, horizon: int) -> list[dict[str, Any]] | None:
-    """Attempt 2: Tokenomist API."""
+async def _try_tokenomist(now: int, horizon: int) -> list[dict[str, Any]] | None:
+    """Fallback #1: Tokenomist API."""
     try:
         data = await get_json(TOKENOMIST_URL)
-        result = _parse_tokenomist_events(data, now, horizon)
-        if result:
-            log.info("Tokenomist API: got %d unlock events", len(result))
-        return result
+        if not isinstance(data, (list, dict)):
+            log.warning("Tokenomist: unexpected shape")
+            return None
+        # Tokenomist may return { "data": [...] } or just [...]
+        items = data if isinstance(data, list) else data.get("data") or data.get("unlocks") or []
+        if not isinstance(items, list):
+            log.warning("Tokenomist: no iterable data found")
+            return None
+        upcoming: list[dict[str, Any]] = []
+        for item in items:
+            try:
+                symbol = (item.get("symbol") or item.get("token") or item.get("name") or "").upper()
+                ts = item.get("timestamp") or item.get("unlock_date") or item.get("date")
+                if isinstance(ts, str):
+                    # Try ISO date parsing
+                    import datetime
+                    try:
+                        ts = int(datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp())
+                    except Exception:
+                        continue
+                if not ts or ts < now or ts > horizon:
+                    continue
+                value_usd = float(item.get("value_usd") or item.get("usd_value") or item.get("value") or 0)
+                tokens = float(item.get("tokens") or item.get("amount") or item.get("noOfTokens") or 0)
+                is_priority = symbol in PRIORITY_TOKENS
+                if value_usd < MIN_USD_THRESHOLD and not is_priority:
+                    continue
+                upcoming.append({
+                    "symbol": symbol,
+                    "name": item.get("name") or symbol,
+                    "timestamp": ts,
+                    "tokens": tokens,
+                    "value_usd": value_usd,
+                    "float_pct": item.get("float_pct") or item.get("pctOfFloat"),
+                    "category": item.get("category") or item.get("type"),
+                    "type": item.get("type") or item.get("category") or "unlock",
+                    "priority": is_priority,
+                })
+            except Exception as exc:  # noqa: BLE001
+                log.debug("Tokenomist: skipping entry: %s", exc)
+                continue
+        log.info("Tokenomist OK: %d unlocks", len(upcoming))
+        return upcoming
     except Exception as exc:  # noqa: BLE001
-        log.warning("Tokenomist API failed: %s", exc)
+        log.warning("Tokenomist failed: %s", exc)
         return None
 
 
-async def _try_scrape_defillama(now: int, horizon: int) -> list[dict[str, Any]] | None:
-    """Attempt 3: Scrape defillama.com/unlocks page for basic data."""
+async def _try_defillama_scrape(now: int, horizon: int) -> list[dict[str, Any]] | None:
+    """Fallback #2: Scrape defillama.com/unlocks HTML page."""
     try:
         import httpx
-        async with httpx.AsyncClient(
-            timeout=15,
-            follow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; FondoBlackCat/1.0)"},
-        ) as client:
-            resp = await client.get(DEFILLAMA_SCRAPE_URL)
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            resp = await client.get(DEFILLAMA_HTML_URL, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; FondoBlackCatBot/1.0)"
+            })
             resp.raise_for_status()
             html = resp.text
 
-        # Try to extract __NEXT_DATA__ JSON from Next.js page
-        match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
-        if not match:
-            log.warning("Scrape: no __NEXT_DATA__ found")
-            return None
-
+        # Try to extract __NEXT_DATA__ JSON from the page (Next.js SSR)
         import json
-        next_data = json.loads(match.group(1))
-        props = next_data.get("props", {}).get("pageProps", {})
-        protocols = props.get("protocols") or props.get("data") or []
-        if not protocols:
-            log.warning("Scrape: no protocols in __NEXT_DATA__")
-            return None
+        match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html, re.DOTALL)
+        if match:
+            try:
+                next_data = json.loads(match.group(1))
+                # Navigate to props.pageProps — structure varies
+                page_props = next_data.get("props", {}).get("pageProps", {})
+                emissions = page_props.get("emissions") or page_props.get("data") or []
+                if isinstance(emissions, list) and emissions:
+                    result = _parse_defillama_events(emissions, now, horizon)
+                    log.info("DefiLlama HTML scrape OK: %d unlocks", len(result))
+                    return result
+            except json.JSONDecodeError:
+                pass
 
-        result = _parse_defillama_events(protocols, now, horizon)
-        if result:
-            log.info("Scrape defillama.com: got %d unlock events", len(result))
-        return result
+        log.warning("DefiLlama HTML scrape: could not extract data from page")
+        return None
     except Exception as exc:  # noqa: BLE001
-        log.warning("Scrape defillama.com failed: %s", exc)
+        log.warning("DefiLlama HTML scrape failed: %s", exc)
         return None
 
 
 async def fetch_unlocks() -> dict[str, Any]:
-    """Return upcoming unlocks with fallback cascade.
+    """Return upcoming unlocks within next WINDOW_DAYS, filtered by size + priority.
 
-    1. DefiLlama emissions API
-    2. Tokenomist API
-    3. Scrape defillama.com/unlocks
-    4. Error dict if all fail
+    Tries sources in order: DefiLlama API → Tokenomist API → DefiLlama HTML scrape.
     """
     now = int(time.time())
     horizon = now + WINDOW_DAYS * 86400
-    errors: list[str] = []
 
-    # Attempt 1: DefiLlama API
-    result = await _try_defillama_api(now, horizon)
-    if result is not None:
-        result.sort(key=lambda x: x["timestamp"])
-        return {"status": "ok", "source": "defillama_api", "data": result}
-    errors.append("DefiLlama API failed")
+    # Try each source in order
+    for source_name, fetcher in [
+        ("DefiLlama API", _try_defillama),
+        ("Tokenomist API", _try_tokenomist),
+        ("DefiLlama HTML", _try_defillama_scrape),
+    ]:
+        result = await fetcher(now, horizon)
+        if result is not None:
+            result.sort(key=lambda x: x["timestamp"])
+            return {"status": "ok", "source": source_name, "data": result}
 
-    # Attempt 2: Tokenomist API
-    result = await _try_tokenomist_api(now, horizon)
-    if result is not None:
-        result.sort(key=lambda x: x["timestamp"])
-        return {"status": "ok", "source": "tokenomist_api", "data": result}
-    errors.append("Tokenomist API failed")
-
-    # Attempt 3: Scrape defillama.com
-    result = await _try_scrape_defillama(now, horizon)
-    if result is not None:
-        result.sort(key=lambda x: x["timestamp"])
-        return {"status": "ok", "source": "defillama_scrape", "data": result}
-    errors.append("defillama.com scrape failed")
-
-    # All failed
-    log.error("All unlock sources failed: %s", "; ".join(errors))
     return {
         "status": "error",
-        "error": "All sources failed",
-        "details": errors,
+        "error": "All unlock sources failed (DefiLlama API, Tokenomist, DefiLlama HTML scrape)",
     }
