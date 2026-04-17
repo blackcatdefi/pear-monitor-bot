@@ -1,32 +1,37 @@
 """X / Twitter intelligence — reads recent tweets from tracked accounts.
 
-Uses the official X API v2 via a bearer token stored in the env var
-`X_BEARER_TOKEN`.  Gracefully degrades (returns an error dict) if the token
-is missing or the request fails, so /reporte never crashes on X problems.
+Primary source: official X API v2 via bearer token in X_BEARER_TOKEN env var.
+Fallbacks (in order, when API fails):
+    1. Nitter RSS (multiple public instances)
+    2. None — return empty but with a clear error message
+
+The previous version silently returned `could_not_resolve_any_user` when the
+bearer token was rate-limited / expired, leaving /reporte without any X intel.
+This version logs the actual HTTP status + body, and falls through to Nitter.
 
 Env vars:
-    X_BEARER_TOKEN — OAuth 2.0 Bearer token (app-only auth).
-    X_ACCOUNTS     — optional comma-separated list of X handles without @.
-                     Defaults to DEFAULT_ACCOUNTS below.
+    X_BEARER_TOKEN  — OAuth 2.0 Bearer token (app-only auth).  Optional.
+    X_ACCOUNTS      — optional comma-separated list of X handles without @.
+                      Defaults to DEFAULT_ACCOUNTS below.
+    NITTER_INSTANCES — optional comma-separated list of nitter hosts to try.
 
 Output shape (on success):
     {
         "status": "ok",
-        "data": {
-            "<username>": [
-                {"id": "...", "created_at": "...", "text": "...", "metrics": {...}}
-            ], ...
-        },
+        "source": "x_api" | "nitter",
+        "data": {"<username>": [{"id","created_at","text","metrics"}, ...], ...},
         "accounts_scanned": N,
         "total_tweets": N,
     }
 """
-
 from __future__ import annotations
 
 import asyncio
+import email.utils
 import logging
 import os
+import re
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -36,180 +41,117 @@ log = logging.getLogger(__name__)
 
 X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN", "").strip()
 
-# Curated list of crypto/DeFi/macro handles relevant to Fondo Black Cat.
 DEFAULT_ACCOUNTS: list[str] = [
-    "hyperliquidx", "hyperfndn", "DefiIgnas", "stablewatchHQ",
-    "santimentfeed", "WhaleAlert", "CryptoHayes", "cz_binance",
-    "VitalikButerin", "woonomic", "0xWhiteLotus", "DeFiDad",
+    "hyperliquidx",
+    "hyperfndn",
+    "DefiIgnas",
+    "stablewatchHQ",
+    "santimentfeed",
+    "WhaleAlert",
+    "CryptoHayes",
+    "cz_binance",
+    "VitalikButerin",
+    "woonomic",
+    "0xWhiteLotus",
+    "DeFiDad",
 ]
+
+# Public Nitter instances. They go down often; we try each in sequence.
+DEFAULT_NITTER_INSTANCES = [
+    "https://nitter.net",
+    "https://nitter.poast.org",
+    "https://nitter.privacydev.net",
+    "https://nitter.tiekoetter.com",
+    "https://nitter.unixfox.eu",
+]
+
+
+def _nitter_instances() -> list[str]:
+    raw = os.getenv("NITTER_INSTANCES", "").strip()
+    if raw:
+        return [h.strip().rstrip("/") for h in raw.split(",") if h.strip()]
+    return DEFAULT_NITTER_INSTANCES
 
 
 def _accounts_from_env() -> list[str]:
     raw = os.getenv("X_ACCOUNTS", "").strip()
     if raw:
         return [a.strip().lstrip("@") for a in raw.split(",") if a.strip()]
-    # Read from x_accounts.txt file (committed alongside this module)
     txt_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "x_accounts.txt")
     if os.path.isfile(txt_path):
         with open(txt_path) as f:
             file_content = f.read().strip()
-            if file_content:
-                return [a.strip().lstrip("@") for a in file_content.split(",") if a.strip()]
+        if file_content:
+            return [a.strip().lstrip("@") for a in file_content.split(",") if a.strip()]
     return DEFAULT_ACCOUNTS
 
 
-# Try both API domains — api.x.com may redirect to api.twitter.com or vice versa
-API_BASES = ["https://api.x.com/2", "https://api.twitter.com/2"]
-
-# Tiny in-memory cache: username(lower) -> user_id.  Cleared on redeploy.
+API_BASE = "https://api.x.com/2"
 _USER_ID_CACHE: dict[str, str] = {}
 
 
-async def _resolve_batch(
-    client: httpx.AsyncClient, batch: list[str], api_base: str
-) -> tuple[int, str]:
-    """Resolve a batch of usernames via /users/by. Returns (resolved_count, error_detail)."""
-    try:
-        resp = await client.get(
-            f"{api_base}/users/by",
-            params={"usernames": ",".join(batch)},
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            users = data.get("data") or []
-            errors = data.get("errors") or []
-            for u in users:
-                _USER_ID_CACHE[u["username"].lower()] = u["id"]
-            if errors:
-                suspended = [e.get("value", "?") for e in errors if "suspend" in str(e.get("detail", "")).lower()]
-                not_found = [e.get("value", "?") for e in errors if "not find" in str(e.get("detail", "")).lower()]
-                if suspended:
-                    log.info("X suspended accounts (skipped): %s", ", ".join(suspended[:10]))
-                if not_found:
-                    log.info("X not-found accounts (skipped): %s", ", ".join(not_found[:10]))
-            return len(users), ""
-        elif resp.status_code == 429:
-            return 0, f"rate_limited (429)"
-        elif resp.status_code == 401:
-            return 0, f"unauthorized (401): token may be invalid — {resp.text[:200]}"
-        elif resp.status_code == 403:
-            return 0, f"forbidden (403): {resp.text[:200]}"
-        else:
-            return 0, f"http_{resp.status_code}: {resp.text[:200]}"
-    except httpx.ConnectError as exc:
-        return 0, f"connect_error: {exc}"
-    except Exception as exc:  # noqa: BLE001
-        return 0, f"exception: {exc}"
-
-
+# ─── X API v2 primary path ──────────────────────────────────────────────
 async def _resolve_user_ids(
     client: httpx.AsyncClient, usernames: list[str]
-) -> dict[str, str]:
-    """Return {username_lower: user_id}.  Uses /users/by?usernames=... (batch up to 100).
-    Tries both api.x.com and api.twitter.com if the first fails.
-    Falls back to individual resolution if batch completely fails.
-    """
+) -> tuple[dict[str, str], list[str]]:
+    """Return ({username_lower: user_id}, [raw_errors]). Uses /users/by."""
     missing = [u for u in usernames if u.lower() not in _USER_ID_CACHE]
-    if not missing:
-        return {u.lower(): _USER_ID_CACHE[u.lower()] for u in usernames if u.lower() in _USER_ID_CACHE}
-
-    # --- Phase 1: Batch resolution (try each API base) ---
-    batch_resolved = 0
-    last_error = ""
-
-    for api_base in API_BASES:
-        batch_resolved = 0
-        last_error = ""
-        still_missing = [u for u in missing if u.lower() not in _USER_ID_CACHE]
-        if not still_missing:
-            break
-
-        for i in range(0, len(still_missing), 100):
-            batch = still_missing[i : i + 100]
-            count, err = await _resolve_batch(client, batch, api_base)
-            batch_resolved += count
-            if err:
-                last_error = err
-                log.warning("X batch resolve via %s failed (batch %d): %s", api_base, i // 100, err)
-                # If unauthorized/forbidden, don't try more batches on this base
-                if "401" in err or "403" in err:
-                    break
-
-            # Small delay between batches to respect rate limits
-            if i + 100 < len(still_missing):
-                await asyncio.sleep(1)
-
-        if batch_resolved > 0:
-            log.info("X batch resolution via %s: %d/%d resolved", api_base, batch_resolved, len(missing))
-            break  # Got some results, don't try next base
-        else:
-            log.warning("X batch resolution via %s: 0 resolved, trying next base...", api_base)
-
-    # --- Phase 2: Individual fallback if batch got 0 ---
-    if batch_resolved == 0:
-        log.warning("X batch resolution failed on all bases (last error: %s). Trying individual resolution...", last_error)
-        still_missing = [u for u in missing if u.lower() not in _USER_ID_CACHE]
-        # Try first 20 accounts individually to diagnose the issue
-        test_sample = still_missing[:20]
-        individual_resolved = 0
-        individual_errors: dict[str, int] = {}
-
-        for api_base in API_BASES:
-            if individual_resolved > 0:
-                break
-            for username in test_sample:
-                if username.lower() in _USER_ID_CACHE:
-                    continue
-                try:
-                    resp = await client.get(
-                        f"{api_base}/users/by/username/{username}",
-                    )
-                    if resp.status_code == 200:
-                        data = resp.json().get("data")
-                        if data:
-                            _USER_ID_CACHE[data["username"].lower()] = data["id"]
-                            individual_resolved += 1
-                    else:
-                        err_key = f"{resp.status_code}"
-                        individual_errors[err_key] = individual_errors.get(err_key, 0) + 1
-                        if resp.status_code in (401, 403):
-                            log.error(
-                                "X individual resolution: %d on %s — TOKEN IS LIKELY INVALID. Response: %s",
-                                resp.status_code, api_base, resp.text[:300]
-                            )
-                            break  # Token is bad, stop trying
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("X individual resolve %s: %s", username, exc)
-                await asyncio.sleep(0.5)  # Be gentle with rate limits
-
-        if individual_resolved > 0:
-            log.info("X individual fallback: %d/%d resolved", individual_resolved, len(test_sample))
-            # Now resolve the rest individually
-            remaining = [u for u in still_missing[20:] if u.lower() not in _USER_ID_CACHE]
-            for username in remaining:
-                try:
-                    resp = await client.get(
-                        f"{API_BASES[0]}/users/by/username/{username}",
-                    )
-                    if resp.status_code == 200:
-                        data = resp.json().get("data")
-                        if data:
-                            _USER_ID_CACHE[data["username"].lower()] = data["id"]
-                    elif resp.status_code == 429:
-                        log.warning("X individual resolve rate-limited, stopping")
-                        break
-                except Exception:  # noqa: BLE001
-                    pass
-                await asyncio.sleep(0.5)
-        else:
-            log.error(
-                "X individual resolution also failed: errors=%s — BEARER TOKEN IS LIKELY INVALID OR EXPIRED",
-                individual_errors
+    errors: list[str] = []
+    for i in range(0, len(missing), 100):
+        batch = missing[i : i + 100]
+        try:
+            resp = await client.get(
+                f"{API_BASE}/users/by",
+                params={"usernames": ",".join(batch)},
             )
+            log.info(
+                "X users/by batch %d status=%d bytes=%d",
+                i // 100, resp.status_code, len(resp.content),
+            )
+            if resp.status_code == 200:
+                payload = resp.json()
+                for u in payload.get("data") or []:
+                    _USER_ID_CACHE[u["username"].lower()] = u["id"]
+                if not payload.get("data"):
+                    log.warning("X users/by 200 but empty data — body: %s", resp.text[:400])
+            elif resp.status_code == 429:
+                log.warning(
+                    "X users/by rate limited at batch %d, pausing 60s; headers=%s",
+                    i // 100,
+                    {k: v for k, v in resp.headers.items() if "limit" in k.lower() or "reset" in k.lower()},
+                )
+                await asyncio.sleep(60)
+                resp2 = await client.get(
+                    f"{API_BASE}/users/by",
+                    params={"usernames": ",".join(batch)},
+                )
+                log.info("X users/by retry status=%d", resp2.status_code)
+                if resp2.status_code == 200:
+                    for u in resp2.json().get("data") or []:
+                        _USER_ID_CACHE[u["username"].lower()] = u["id"]
+                else:
+                    errors.append(f"batch {i//100} retry {resp2.status_code}: {resp2.text[:200]}")
+                    log.warning("X users/by retry failed %d: %s", resp2.status_code, resp2.text[:400])
+            else:
+                errors.append(f"batch {i//100} status {resp.status_code}: {resp.text[:200]}")
+                log.warning(
+                    "X users/by failed status=%d body=%s headers=%s",
+                    resp.status_code,
+                    resp.text[:400],
+                    dict(resp.headers),
+                )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"batch {i//100} exception: {exc}")
+            log.warning("X users/by exception batch %d: %s", i // 100, exc)
+        if i + 100 < len(missing):
+            await asyncio.sleep(1)
 
-    result = {u.lower(): _USER_ID_CACHE[u.lower()] for u in usernames if u.lower() in _USER_ID_CACHE}
-    log.info("X total resolved: %d/%d usernames", len(result), len(usernames))
-    return result
+    resolved = {
+        u.lower(): _USER_ID_CACHE[u.lower()]
+        for u in usernames
+        if u.lower() in _USER_ID_CACHE
+    }
+    return resolved, errors
 
 
 async def _fetch_user_tweets(
@@ -219,115 +161,297 @@ async def _fetch_user_tweets(
     cutoff: datetime,
     max_results: int = 20,
 ) -> list[dict[str, Any]]:
-    # Try each API base
-    for api_base in API_BASES:
+    try:
+        resp = await client.get(
+            f"{API_BASE}/users/{user_id}/tweets",
+            params={
+                "max_results": max_results,
+                "tweet.fields": "created_at,public_metrics",
+                "exclude": "retweets,replies",
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("X tweets %s exception: %s", username, exc)
+        return []
+
+    if resp.status_code == 429:
+        log.warning("X tweets %s rate limited, skipping", username)
+        return []
+    if resp.status_code != 200:
+        log.warning(
+            "X tweets %s failed %d: %s", username, resp.status_code, resp.text[:200]
+        )
+        return []
+
+    items = resp.json().get("data") or []
+    out: list[dict[str, Any]] = []
+    for t in items:
+        created = t.get("created_at")
+        if created:
+            try:
+                dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                if dt < cutoff:
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+        out.append(
+            {
+                "id": t.get("id"),
+                "created_at": created,
+                "text": (t.get("text") or "").strip(),
+                "metrics": t.get("public_metrics") or {},
+            }
+        )
+    return out
+
+
+# ─── Nitter RSS fallback ────────────────────────────────────────────────
+_NITTER_STATS_RE = re.compile(r"(\d[\d,]*)")
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _strip_html(s: str) -> str:
+    return _HTML_TAG_RE.sub("", s or "").strip()
+
+
+async def _fetch_nitter_rss_one(
+    client: httpx.AsyncClient, instance: str, username: str
+) -> tuple[str, list[dict[str, Any]]]:
+    url = f"{instance}/{username}/rss"
+    try:
+        resp = await client.get(url, follow_redirects=True, timeout=12.0)
+    except Exception as exc:  # noqa: BLE001
+        return f"{instance}: exception {exc}", []
+
+    if resp.status_code != 200 or not resp.content:
+        return f"{instance}: status {resp.status_code}", []
+    body = resp.content
+    # Some instances return HTML error pages with 200 — quick sniff for <rss
+    if b"<rss" not in body[:200] and b"<feed" not in body[:200]:
+        return f"{instance}: non-rss body", []
+
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError as exc:
+        return f"{instance}: parse {exc}", []
+
+    items: list[dict[str, Any]] = []
+    # RSS 2.0 structure: root -> channel -> item*
+    channel = root.find("channel")
+    if channel is None:
+        # Atom
+        for entry in root.findall("{http://www.w3.org/2005/Atom}entry"):
+            items.append(_parse_atom_entry(entry))
+    else:
+        for item in channel.findall("item"):
+            items.append(_parse_rss_item(item))
+
+    return "ok", items
+
+
+def _parse_rss_item(item: ET.Element) -> dict[str, Any]:
+    title_el = item.find("title")
+    desc_el = item.find("description")
+    pub_el = item.find("pubDate")
+    guid_el = item.find("guid")
+    link_el = item.find("link")
+
+    text = _strip_html(desc_el.text if desc_el is not None else (title_el.text if title_el is not None else ""))
+    created = None
+    if pub_el is not None and pub_el.text:
         try:
-            resp = await client.get(
-                f"{api_base}/users/{user_id}/tweets",
-                params={
-                    "max_results": max_results,
-                    "tweet.fields": "created_at,public_metrics",
-                    "exclude": "retweets,replies",
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.warning("X tweets %s exception on %s: %s", username, api_base, exc)
-            continue
+            dt = email.utils.parsedate_to_datetime(pub_el.text)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            created = dt.isoformat()
+        except Exception:  # noqa: BLE001
+            created = pub_el.text
 
-        if resp.status_code == 429:
-            log.warning("X tweets %s rate limited on %s, skipping", username, api_base)
-            return []
-        if resp.status_code != 200:
-            log.warning(
-                "X tweets %s failed %d on %s: %s",
-                username, resp.status_code, api_base, resp.text[:200],
-            )
-            continue  # Try next base
+    tid = None
+    if guid_el is not None and guid_el.text:
+        m = re.search(r"(\d+)", guid_el.text)
+        if m:
+            tid = m.group(1)
+    if not tid and link_el is not None and link_el.text:
+        m = re.search(r"status/(\d+)", link_el.text)
+        if m:
+            tid = m.group(1)
 
-        items = resp.json().get("data") or []
-        out: list[dict[str, Any]] = []
-        for t in items:
-            created = t.get("created_at")
-            if created:
+    return {
+        "id": tid,
+        "created_at": created,
+        "text": text,
+        "metrics": {},  # Nitter RSS doesn't give us engagement counts
+    }
+
+
+def _parse_atom_entry(entry: ET.Element) -> dict[str, Any]:
+    ns = "{http://www.w3.org/2005/Atom}"
+    title_el = entry.find(ns + "title")
+    content_el = entry.find(ns + "content") or entry.find(ns + "summary")
+    pub_el = entry.find(ns + "published") or entry.find(ns + "updated")
+    id_el = entry.find(ns + "id")
+
+    text = _strip_html(content_el.text if content_el is not None else (title_el.text if title_el is not None else ""))
+    created = pub_el.text if pub_el is not None else None
+    tid = None
+    if id_el is not None and id_el.text:
+        m = re.search(r"(\d+)", id_el.text)
+        if m:
+            tid = m.group(1)
+    return {
+        "id": tid,
+        "created_at": created,
+        "text": text,
+        "metrics": {},
+    }
+
+
+async def _nitter_fetch_all(
+    client: httpx.AsyncClient, usernames: list[str], cutoff: datetime
+) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
+    instances = _nitter_instances()
+    # Find a working instance by probing the first username
+    working_instance: str | None = None
+    probe_errors: list[str] = []
+    probe_user = usernames[0] if usernames else "jack"
+    for inst in instances:
+        status, items = await _fetch_nitter_rss_one(client, inst, probe_user)
+        if status == "ok":
+            working_instance = inst
+            log.info("Nitter fallback: using instance %s", inst)
+            break
+        probe_errors.append(f"{inst}: {status}")
+
+    if not working_instance:
+        log.warning("All Nitter instances failed probes: %s", probe_errors)
+        return {}, probe_errors
+
+    sem = asyncio.Semaphore(4)
+
+    async def _one(uname: str) -> tuple[str, list[dict[str, Any]]]:
+        async with sem:
+            status, items = await _fetch_nitter_rss_one(client, working_instance, uname)
+        if status != "ok":
+            return uname, []
+        filtered: list[dict[str, Any]] = []
+        for it in items:
+            if it.get("created_at"):
                 try:
-                    dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                    dt = datetime.fromisoformat(
+                        str(it["created_at"]).replace("Z", "+00:00")
+                    )
                     if dt < cutoff:
                         continue
                 except Exception:  # noqa: BLE001
                     pass
-            out.append(
-                {
-                    "id": t.get("id"),
-                    "created_at": created,
-                    "text": (t.get("text") or "").strip(),
-                    "metrics": t.get("public_metrics") or {},
-                }
-            )
-        return out
+            filtered.append(it)
+        return uname, filtered
 
-    return []
+    pairs = await asyncio.gather(*[_one(u) for u in usernames])
+
+    data: dict[str, list[dict[str, Any]]] = {}
+    for uname, msgs in pairs:
+        if msgs:
+            data[uname] = msgs
+
+    return data, probe_errors
 
 
+# ─── Public entry point ─────────────────────────────────────────────────
 async def fetch_x_intel(
     hours: int = 24, accounts: list[str] | None = None
 ) -> dict[str, Any]:
-    """Fetch last `hours` of tweets from `accounts` (or env default).
+    """Fetch last `hours` of tweets from `accounts`.
 
-    Returns a dict with status=ok|error.  On error, always returns a dict
-    with `error` key so the caller can branch without try/except.
+    Tries X API first, falls back to Nitter RSS.  Never raises.
     """
-    if not X_BEARER_TOKEN:
-        return {"status": "error", "error": "x_bearer_token_not_configured"}
-
     handles = accounts or _accounts_from_env()
     if not handles:
         return {"status": "error", "error": "no_accounts_configured"}
 
-    log.info("X intel: resolving %d accounts...", len(handles))
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-    headers = {"Authorization": f"Bearer {X_BEARER_TOKEN}"}
 
-    async with httpx.AsyncClient(
-        headers=headers, timeout=15.0, follow_redirects=True
-    ) as client:
-        # Single resolution attempt (internal retries + individual fallback)
-        uids = await _resolve_user_ids(client, handles)
+    # ── Attempt 1: X API v2 ──
+    api_errors: list[str] = []
+    if X_BEARER_TOKEN:
+        headers = {"Authorization": f"Bearer {X_BEARER_TOKEN}"}
+        try:
+            async with httpx.AsyncClient(headers=headers, timeout=15.0) as client:
+                uids, resolve_errors = await _resolve_user_ids(client, handles)
+                api_errors.extend(resolve_errors)
+                if not uids:
+                    log.warning(
+                        "X user resolution empty on first attempt, retrying in 2.5s"
+                    )
+                    await asyncio.sleep(2.5)
+                    uids, more_errors = await _resolve_user_ids(client, handles)
+                    api_errors.extend(more_errors)
 
-        if not uids:
-            return {
-                "status": "error",
-                "error": "could_not_resolve_any_user",
-                "detail": "Both batch and individual resolution failed. Check X_BEARER_TOKEN validity.",
-                "accounts_attempted": len(handles),
-            }
+                if uids:
+                    sem = asyncio.Semaphore(10)
 
-        log.info("X intel: %d/%d accounts resolved, fetching tweets...", len(uids), len(handles))
+                    async def _do(uname: str) -> tuple[str, list[dict[str, Any]]]:
+                        uid = uids.get(uname.lower(), "")
+                        if not uid:
+                            return uname, []
+                        async with sem:
+                            msgs = await _fetch_user_tweets(client, uname, uid, cutoff)
+                        return uname, msgs
 
-        # Fan out — concurrency=10, with rate-limit awareness.
-        sem = asyncio.Semaphore(10)
+                    pairs = await asyncio.gather(*[_do(h) for h in handles])
+                    data: dict[str, list[dict[str, Any]]] = {}
+                    total = 0
+                    for uname, msgs in pairs:
+                        if msgs:
+                            data[uname] = msgs
+                            total += len(msgs)
 
-        async def _do(uname: str) -> tuple[str, list[dict[str, Any]]]:
-            uid = uids.get(uname.lower(), "")
-            if not uid:
-                return uname, []
-            async with sem:
-                msgs = await _fetch_user_tweets(client, uname, uid, cutoff)
-                return uname, msgs
+                    if data:
+                        return {
+                            "status": "ok",
+                            "source": "x_api",
+                            "data": data,
+                            "accounts_scanned": len(data),
+                            "total_tweets": total,
+                        }
+                    api_errors.append("x_api returned no tweets (token valid but empty)")
+                else:
+                    api_errors.append("x_api could not resolve any user")
+        except Exception as exc:  # noqa: BLE001
+            log.exception("X API path failed")
+            api_errors.append(f"x_api exception: {exc}")
+    else:
+        api_errors.append("X_BEARER_TOKEN not configured")
 
-        pairs = await asyncio.gather(*[_do(h) for h in handles])
+    # ── Attempt 2: Nitter RSS ──
+    log.warning("Falling back to Nitter. Prior X API errors: %s", api_errors[:5])
+    nitter_errors: list[str] = []
+    try:
+        async with httpx.AsyncClient(
+            headers={"User-Agent": "Mozilla/5.0 FondoBlackCatBot/1.0"},
+            timeout=15.0,
+        ) as client:
+            data, probe_errors = await _nitter_fetch_all(client, handles, cutoff)
+            nitter_errors.extend(probe_errors)
+            if data:
+                total = sum(len(v) for v in data.values())
+                return {
+                    "status": "ok",
+                    "source": "nitter",
+                    "data": data,
+                    "accounts_scanned": len(data),
+                    "total_tweets": total,
+                    "x_api_errors": api_errors[:5],
+                }
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Nitter fallback failed")
+        nitter_errors.append(f"nitter exception: {exc}")
 
-        data: dict[str, list[dict[str, Any]]] = {}
-        total = 0
-        for uname, msgs in pairs:
-            if msgs:
-                data[uname] = msgs
-                total += len(msgs)
-
-        return {
-            "status": "ok",
-            "data": data,
-            "accounts_scanned": len(data),
-            "accounts_resolved": len(uids),
-            "accounts_total": len(handles),
-            "total_tweets": total,
-        }
+    # Nothing worked — return structured error with diagnostic detail
+    return {
+        "status": "error",
+        "error": "all_sources_failed",
+        "x_api_errors": api_errors[:10],
+        "nitter_errors": nitter_errors[:10],
+    }

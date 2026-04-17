@@ -82,8 +82,24 @@ def format_quick_positions(wallets: list[dict[str, Any]], hyperlend: list[dict[s
             header = f"  [{label}]" + (f" {wallet_short}" if wallet_short else "")
             lines.append(header)
             lines.append(f"    HF: {_fmt_hf(h.get('health_factor'))}")
-            lines.append(f"    Colateral: {_fmt_usd(h.get('total_collateral_usd'))}")
-            lines.append(f"    Borrowed: {_fmt_usd(h.get('total_debt_usd'))}")
+            # Colateral — show asset symbol + balance when available
+            coll_sym = h.get("collateral_symbol")
+            coll_bal = h.get("collateral_balance") or 0.0
+            if coll_sym and coll_bal:
+                lines.append(
+                    f"    Colateral: {coll_bal:.4f} {coll_sym} ({_fmt_usd(h.get('total_collateral_usd'))})"
+                )
+            else:
+                lines.append(f"    Colateral: {_fmt_usd(h.get('total_collateral_usd'))}")
+            # Borrowed — show actual asset symbol (UETH, USDH, ...) + balance
+            debt_sym = h.get("debt_symbol")
+            debt_bal = h.get("debt_balance") or 0.0
+            if debt_sym and debt_bal:
+                lines.append(
+                    f"    Borrowed: {debt_bal:.4f} {debt_sym} ({_fmt_usd(h.get('total_debt_usd'))})"
+                )
+            else:
+                lines.append(f"    Borrowed: {_fmt_usd(h.get('total_debt_usd'))}")
             lines.append(f"    Available borrow: {_fmt_usd(h.get('available_borrows_usd'))}")
             lines.append(f"    LTV: {(h.get('ltv') or 0)*100:.1f}% | LiqThr: {(h.get('current_liquidation_threshold') or 0)*100:.1f}%")
         else:
@@ -135,11 +151,25 @@ def format_hf(hyperlend: list[dict[str, Any]] | dict[str, Any]) -> str:
             elif hf < 1.20:
                 icon = "⚠️"
         label = h.get("label") or hl.get("label") or "—"
+        coll_sym = h.get("collateral_symbol")
+        coll_bal = h.get("collateral_balance") or 0.0
+        debt_sym = h.get("debt_symbol")
+        debt_bal = h.get("debt_balance") or 0.0
+        coll_str = (
+            f"{coll_bal:.4f} {coll_sym} ({_fmt_usd(h.get('total_collateral_usd'))})"
+            if coll_sym and coll_bal
+            else _fmt_usd(h.get("total_collateral_usd"))
+        )
+        debt_str = (
+            f"{debt_bal:.4f} {debt_sym} ({_fmt_usd(h.get('total_debt_usd'))})"
+            if debt_sym and debt_bal
+            else _fmt_usd(h.get("total_debt_usd"))
+        )
         parts.append(
             f"{icon} [{label}] HF: {_fmt_hf(hf)}\n"
-            f"  Colateral: {_fmt_usd(h.get('total_collateral_usd'))} | "
-            f"Borrowed: {_fmt_usd(h.get('total_debt_usd'))} | "
-            f"Available: {_fmt_usd(h.get('available_borrows_usd'))}"
+            f"  Colateral: {coll_str}\n"
+            f"  Borrowed:  {debt_str}\n"
+            f"  Available: {_fmt_usd(h.get('available_borrows_usd'))}"
         )
     return "\n".join(parts) if parts else "— Sin posiciones HyperLend activas"
 

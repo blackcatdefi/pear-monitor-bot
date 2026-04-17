@@ -1,9 +1,8 @@
 """Fondo Black Cat — Telegram bot entry point.
 
-Runs python-telegram-bot v21 (commands) + Telethon userbot (channel reads)
-+ APScheduler (alert loop) in the same asyncio event loop.
+Runs python-telegram-bot v21 (commands) + Telethon userbot (channel reads) +
+APScheduler (alert loop) in the same asyncio event loop.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -20,7 +19,6 @@ from config import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
 )
-
 from modules.alerts import run_alert_cycle
 from modules.analysis import generate_report, generate_thesis_check
 from modules.hyperlend import fetch_all_hyperlend
@@ -36,8 +34,9 @@ from modules.unlocks import fetch_unlocks
 from modules.bounce_tech import fetch_bounce_tech
 from modules.gmail_intel import scan_gmail_unread
 from modules.x_intel import fetch_x_intel
-from modules.liq_calc import liq_calc
-from modules.kill_scenarios import kill_scenarios
+from modules.flywheel import compute_flywheel
+from modules.liq_calc import compute_liq_matrix
+from modules import pnl_tracker, position_log
 from templates.formatters import format_hf, format_quick_positions
 from templates.timeline import format_timeline
 from utils.security import authorized
@@ -53,9 +52,10 @@ log = logging.getLogger("fondo-blackcat")
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("/reporte"), KeyboardButton("/posiciones")],
+        [KeyboardButton("/flywheel"), KeyboardButton("/liqcalc")],
         [KeyboardButton("/timeline"), KeyboardButton("/tesis")],
-        [KeyboardButton("/hf"), KeyboardButton("/alertas")],
-        [KeyboardButton("/liqcalc"), KeyboardButton("/kill")],
+        [KeyboardButton("/hf"), KeyboardButton("/pnl")],
+        [KeyboardButton("/log"), KeyboardButton("/alertas")],
         [KeyboardButton("/start")],
     ],
     resize_keyboard=True,
@@ -66,9 +66,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
 _alerts_enabled = {"value": ENABLE_ALERTS}
 
 
-# ─── Commands ───────────────────────────────────────────────────────────────────────────────────
-
-
+# ─── Commands ───────────────────────────────────────────────────────────────
 @authorized
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
@@ -76,11 +74,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Keyboard — todos los comandos:\n"
         "/reporte — TODO-EN-UNO: timeline + posiciones + análisis\n"
         "/posiciones — snapshot rápido (wallets + HF)\n"
+        "/flywheel — pair trade HL (LONG HYPE / SHORT UETH)\n"
+        "/liqcalc — matriz liq HYPE × deuda\n"
         "/timeline — timeline X 48h (154 cuentas)\n"
         "/tesis — estado de la tesis macro\n"
         "/hf — Health Factor de HyperLend\n"
-        "/liqcalc — calculadora liquidación HyperLend\n"
-        "/kill — kill scenarios de la tesis\n"
+        "/pnl — realized PnL 7D / 30D / YTD\n"
+        "/log — últimas 20 entradas del position log\n"
         "/alertas — toggle alertas automáticas (on/off)\n"
     )
     await update.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
@@ -104,55 +104,41 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     """Reporte TODO-EN-UNO: timeline X + posiciones + análisis Claude.
 
     Emite 3 mensajes secuenciales:
-    1. Timeline — top 40 tweets por engagement de las últimas 48h (154 cuentas curadas)
-    2. Posiciones — snapshot rápido de wallets + HyperLend + Bounce Tech
-    3. Análisis — reporte completo generado por Claude (market + intel + tesis)
-
-    IMPORTANT: X intel fetches FIRST (sequentially) to allow full cold-start
-    retry cycle (up to 15s). Only after X data is ready do we fetch the rest
-    and send messages. "Perfecto, no rápido."
+      1. Timeline — top 40 tweets por engagement de las últimas 48h (154 cuentas curadas)
+      2. Posiciones — snapshot rápido de wallets + HyperLend + Bounce Tech
+      3. Análisis — reporte completo generado por Claude (market + intel + tesis)
     """
     await update.message.reply_text(
         "⏳ Generando reporte completo: timeline + posiciones + análisis (30-90s)...",
         reply_markup=MAIN_KEYBOARD,
     )
-
-    # ─── PASO 1: X intel PRIMERO (secuencial, con retries) ───────────
-    # X API needs cold-start time. We fetch it FIRST so its 3-attempt retry
-    # cycle (up to 15s) completes fully before we send ANY message.
-    log.info("/reporte: fetching X intel first (sequential, with retries)...")
-    x_intel = await fetch_x_intel(hours=48)
-    log.info("/reporte: X intel done — status=%s", x_intel.get("status"))
-
-    # ─── PASO 2: Todo lo demás en paralelo ──────────────────────
-    portfolio, hl, market, unlocks, intel_legacy, intel_unread, gmail_intel, bt = await asyncio.gather(
+    # Todos los fetches en paralelo.
+    portfolio, hl, market, unlocks, intel_legacy, intel_unread, x_intel, gmail_intel, bt = await asyncio.gather(
         fetch_all_wallets(),
         fetch_all_hyperlend(),
         fetch_market_data(),
         fetch_unlocks(),
         fetch_telegram_intel(hours=24),
         scan_telegram_unread(max_per_dialog=100),
+        fetch_x_intel(hours=48),
         scan_gmail_unread(),
         fetch_bounce_tech(),
     )
-
-    # ─── Sección 1: Timeline X (48h) ─────────────────────────────
+    # ─── Sección 1: Timeline X (48h) ─────────────────────────────────────
     timeline_text = format_timeline(x_intel, top_n=40)
     await send_long_message(
         update,
         "📡 TIMELINE X — 48H\n" + ("─" * 30) + "\n\n" + timeline_text,
         reply_markup=MAIN_KEYBOARD,
     )
-
-    # ─── Sección 2: Posiciones ─────────────────────────────────
+    # ─── Sección 2: Posiciones ───────────────────────────────────────────
     positions_text = format_quick_positions(portfolio, hl, bounce_tech=bt)
     await send_long_message(
         update,
         "💼 POSICIONES\n" + ("─" * 30) + "\n\n" + positions_text,
         reply_markup=MAIN_KEYBOARD,
     )
-
-    # ─── Sección 3: Análisis Claude ──────────────────────────────
+    # ─── Sección 3: Análisis Claude ──────────────────────────────────────
     merged_intel: dict = {}
     if isinstance(intel_legacy, dict):
         merged_intel.update(intel_legacy)
@@ -162,7 +148,6 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         merged_intel["x_intel"] = x_intel
     if isinstance(gmail_intel, dict) and gmail_intel.get("status") == "ok":
         merged_intel["gmail_intel"] = gmail_intel
-
     report, thesis_update = await generate_report(portfolio, hl, market, unlocks, merged_intel)
     await send_long_message(
         update,
@@ -197,29 +182,81 @@ async def cmd_timeline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 @authorized
-async def cmd_liqcalc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("⏳ Calculando escenarios de liquidación...", reply_markup=MAIN_KEYBOARD)
-    text = await liq_calc()
-    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
-
-
-@authorized
-async def cmd_kill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("⏳ Evaluando kill scenarios...", reply_markup=MAIN_KEYBOARD)
-    text = await kill_scenarios()
-    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
-
-
-@authorized
 async def cmd_alertas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _alerts_enabled["value"] = not _alerts_enabled["value"]
     estado = "ON ✅" if _alerts_enabled["value"] else "OFF ⛔"
     await update.message.reply_text(f"Alertas automáticas: {estado}", reply_markup=MAIN_KEYBOARD)
 
 
-# ─── Scheduler job ────────────────────────────────────────────────────────────────────
+@authorized
+async def cmd_flywheel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("⏳ Calculando flywheel pair trade...", reply_markup=MAIN_KEYBOARD)
+    try:
+        text = await compute_flywheel()
+    except Exception as exc:  # noqa: BLE001
+        log.exception("flywheel failed")
+        text = f"❌ /flywheel falló: {exc}"
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
+@authorized
+async def cmd_liqcalc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("⏳ Calculando matriz de liquidación...", reply_markup=MAIN_KEYBOARD)
+    try:
+        text = await compute_liq_matrix()
+    except Exception as exc:  # noqa: BLE001
+        log.exception("liqcalc failed")
+        text = f"❌ /liqcalc falló: {exc}"
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    args = context.args or []
+    if args and args[0].lower() == "add":
+        try:
+            params = pnl_tracker.parse_manual_add(args[1:])
+            row_id = pnl_tracker.record_event(**params)
+            await update.message.reply_text(
+                f"✅ PnL event #{row_id} registered ({params['category']} "
+                f"{params['asset']} ${params['amount_usd']:.2f}).",
+                reply_markup=MAIN_KEYBOARD,
+            )
+        except ValueError as exc:
+            await update.message.reply_text(f"❌ {exc}", reply_markup=MAIN_KEYBOARD)
+        return
+    try:
+        text = pnl_tracker.build_summary()
+    except Exception as exc:  # noqa: BLE001
+        log.exception("pnl failed")
+        text = f"❌ /pnl falló: {exc}"
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    args = context.args or []
+    if args and args[0].lower() == "add":
+        try:
+            params = position_log.parse_manual_add(args[1:])
+            row_id = position_log.append(**params)
+            await update.message.reply_text(
+                f"✅ Log entry #{row_id} agregada ({params['kind']}).",
+                reply_markup=MAIN_KEYBOARD,
+            )
+        except ValueError as exc:
+            await update.message.reply_text(f"❌ {exc}", reply_markup=MAIN_KEYBOARD)
+        return
+    try:
+        entries = position_log.last_n(20)
+        text = position_log.format_log(entries)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("log failed")
+        text = f"❌ /log falló: {exc}"
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+# ─── Scheduler job ──────────────────────────────────────────────────────────
 async def _alert_job(application: Application) -> None:
     if not _alerts_enabled["value"]:
         return
@@ -229,9 +266,7 @@ async def _alert_job(application: Application) -> None:
         log.exception("Alert cycle failed")
 
 
-# ─── Lifecycle hooks ────────────────────────────────────────────────────────────────
-
-
+# ─── Lifecycle hooks ────────────────────────────────────────────────────────
 async def post_init(application: Application) -> None:
     client = await get_telethon()
     if client is None:
@@ -262,9 +297,7 @@ async def post_shutdown(application: Application) -> None:
     await stop_telethon()
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────────────
-
-
+# ─── Main ───────────────────────────────────────────────────────────────────
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
         print("ERROR: TELEGRAM_BOT_TOKEN no configurado", file=sys.stderr)
@@ -280,6 +313,7 @@ def main() -> None:
         .post_shutdown(post_shutdown)
         .build()
     )
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_start))
     app.add_handler(CommandHandler("posiciones", cmd_posiciones))
@@ -288,15 +322,13 @@ def main() -> None:
     app.add_handler(CommandHandler("tesis", cmd_tesis))
     app.add_handler(CommandHandler("timeline", cmd_timeline))
     app.add_handler(CommandHandler("alertas", cmd_alertas))
+    app.add_handler(CommandHandler("flywheel", cmd_flywheel))
     app.add_handler(CommandHandler("liqcalc", cmd_liqcalc))
-    app.add_handler(CommandHandler("kill", cmd_kill))
-    app.add_handler(CommandHandler("kill_scenarios", cmd_kill))
+    app.add_handler(CommandHandler("pnl", cmd_pnl))
+    app.add_handler(CommandHandler("log", cmd_log))
 
     log.info("Fondo Black Cat bot starting...")
-    app.run_polling(
-        allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True,
-    )
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
