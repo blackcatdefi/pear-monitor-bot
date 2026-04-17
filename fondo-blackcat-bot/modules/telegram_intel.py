@@ -1,7 +1,7 @@
 """Telegram channel intelligence via Telethon (userbot session).
 
 Reads messages from tiered channels AND scans all unread messages in the
-main folder, marking them as read after processing. Requires TELETHON_SESSION
+main folder, marking them as read after processing.  Requires TELETHON_SESSION
 (StringSession) generated via scripts/regen_telethon.py.
 """
 from __future__ import annotations
@@ -29,17 +29,27 @@ _lock = asyncio.Lock()
 
 
 async def get_client() -> TelegramClient | None:
-    """Lazily create + connect the Telethon client. Returns None if not configured."""
+    """Lazily create + connect the Telethon client.  Returns None if not configured."""
     global _client
     if not (TELETHON_SESSION and TELEGRAM_API_ID and TELEGRAM_API_HASH):
         return None
     async with _lock:
         if _client is None:
-            _client = TelegramClient(StringSession(TELETHON_SESSION), TELEGRAM_API_ID, TELEGRAM_API_HASH)
-            await _client.connect()
-            if not await _client.is_user_authorized():
-                log.error("Telethon session is not authorized — regenerate StringSession via scripts/regen_telethon.py.")
-                await _client.disconnect()
+            try:
+                _client = TelegramClient(StringSession(TELETHON_SESSION), TELEGRAM_API_ID, TELEGRAM_API_HASH)
+                await _client.connect()
+                if not await _client.is_user_authorized():
+                    log.error("Telethon session is not authorized \u2014 regenerate StringSession via scripts/regen_telethon.py.")
+                    await _client.disconnect()
+                    _client = None
+                    return None
+            except Exception as exc:  # noqa: BLE001
+                log.error("Telethon connection failed (bot continues without channel intel): %s", exc)
+                try:
+                    if _client:
+                        await _client.disconnect()
+                except Exception:  # noqa: BLE001
+                    pass
                 _client = None
                 return None
         return _client
@@ -62,6 +72,7 @@ async def _read_channel(client: TelegramClient, handle: str, limit: int, hours: 
     except Exception as exc:  # noqa: BLE001
         log.warning("Failed reading channel %s: %s", handle, exc)
         return []
+
     out: list[dict[str, Any]] = []
     for m in messages:
         if not getattr(m, "text", None):
@@ -77,12 +88,13 @@ async def _read_channel(client: TelegramClient, handle: str, limit: int, hours: 
 
 
 async def fetch_telegram_intel(hours: int = 24) -> dict[str, Any]:
-    """Read all tiered channels (legacy path). Returns tiered text bundle."""
+    """Read all tiered channels (legacy path).  Returns tiered text bundle."""
     client = await get_client()
     if client is None:
         return {"status": "error", "error": "telethon_not_configured"}
 
     result: dict[str, list[dict[str, Any]]] = {"tier1": [], "tier2": [], "tier3": []}
+
     for tier, channels in CHANNELS.items():
         limit = CHANNEL_LIMITS.get(tier, 50)
         sem = asyncio.Semaphore(3)
@@ -105,10 +117,13 @@ async def fetch_telegram_intel(hours: int = 24) -> dict[str, Any]:
 
 async def scan_telegram_unread(max_per_dialog: int = 100) -> dict[str, Any]:
     """Scan unread messages in the MAIN folder (folder 0) only, across all
-    channels the user follows. Marks each dialog as read after extraction so
+    channels the user follows.  Marks each dialog as read after extraction so
     subsequent calls only see new messages.
 
-    Returns {"status": "ok"|"error", "data": [{channel, handle, messages:[{date,text,views}]}], "total_messages": N, "channels_scanned": N}
+    Returns {"status": "ok"|"error",
+             "data": [{channel, handle, messages:[{date,text,views}]}],
+             "total_messages": N,
+             "channels_scanned": N}
     """
     client = await get_client()
     if client is None:
@@ -161,6 +176,7 @@ async def scan_telegram_unread(max_per_dialog: int = 100) -> dict[str, Any]:
                 await client.send_read_acknowledge(dialog.entity)
             except Exception as exc:  # noqa: BLE001
                 log.warning("send_read_acknowledge failed for %s: %s", getattr(dialog, "name", "?"), exc)
+
         except Exception as exc:  # noqa: BLE001
             # Don't let one bad dialog kill the whole scan
             log.warning("Error scanning dialog %s: %s", getattr(dialog, "name", "?"), exc)
