@@ -65,6 +65,9 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
 # Runtime state for /alertas toggle
 _alerts_enabled = {"value": ENABLE_ALERTS}
 
+# Set to False if Telethon fails to init — commands skip channel intel gracefully
+_telethon_ok = True
+
 
 # ─── Commands ───────────────────────────────────────────────────────────────
 @authorized
@@ -112,18 +115,24 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "⏳ Generando reporte completo: timeline + posiciones + análisis (30-90s)...",
         reply_markup=MAIN_KEYBOARD,
     )
-    # Todos los fetches en paralelo.
-    portfolio, hl, market, unlocks, intel_legacy, intel_unread, x_intel, gmail_intel, bt = await asyncio.gather(
+    # Todos los fetches en paralelo (Telethon separado — puede estar deshabilitado).
+    portfolio, hl, market, unlocks, x_intel, gmail_intel, bt = await asyncio.gather(
         fetch_all_wallets(),
         fetch_all_hyperlend(),
         fetch_market_data(),
         fetch_unlocks(),
-        fetch_telegram_intel(hours=24),
-        scan_telegram_unread(max_per_dialog=100),
         fetch_x_intel(hours=48),
         scan_gmail_unread(),
         fetch_bounce_tech(),
     )
+    if _telethon_ok:
+        intel_legacy, intel_unread = await asyncio.gather(
+            fetch_telegram_intel(hours=24),
+            scan_telegram_unread(max_per_dialog=100),
+        )
+    else:
+        intel_legacy = {"status": "error", "error": "telethon_disabled"}
+        intel_unread = {"status": "error", "error": "telethon_disabled"}
     # ─── Sección 1: Timeline X (48h) ─────────────────────────────────────
     timeline_text = format_timeline(x_intel, top_n=40)
     await send_long_message(
@@ -268,11 +277,17 @@ async def _alert_job(application: Application) -> None:
 
 # ─── Lifecycle hooks ────────────────────────────────────────────────────────
 async def post_init(application: Application) -> None:
-    client = await get_telethon()
-    if client is None:
-        log.warning("Telethon NOT initialized — /reporte will run without channel intel.")
-    else:
-        log.info("Telethon client connected.")
+    global _telethon_ok
+    try:
+        client = await get_telethon()
+        if client is None:
+            log.warning("Telethon NOT initialized — /reporte will run without channel intel.")
+            _telethon_ok = False
+        else:
+            log.info("Telethon client connected.")
+    except Exception:
+        log.exception("Telethon init failed — Telegram intel disabled")
+        _telethon_ok = False
 
     if ENABLE_ALERTS:
         scheduler = AsyncIOScheduler()
