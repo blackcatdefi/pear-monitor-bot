@@ -55,9 +55,16 @@ DEFAULT_ACCOUNTS: list[str] = [
 
 def _accounts_from_env() -> list[str]:
     raw = os.getenv("X_ACCOUNTS", "").strip()
-    if not raw:
-        return DEFAULT_ACCOUNTS
-    return [a.strip().lstrip("@") for a in raw.split(",") if a.strip()]
+    if raw:
+        return [a.strip().lstrip("@") for a in raw.split(",") if a.strip()]
+    # Read from x_accounts.txt file (committed alongside this module)
+    txt_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "x_accounts.txt")
+    if os.path.isfile(txt_path):
+        with open(txt_path) as f:
+            file_content = f.read().strip()
+        if file_content:
+            return [a.strip().lstrip("@") for a in file_content.split(",") if a.strip()]
+    return DEFAULT_ACCOUNTS
 
 
 API_BASE = "https://api.x.com/2"
