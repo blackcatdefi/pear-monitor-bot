@@ -70,15 +70,15 @@ def _accounts_from_env() -> list[str]:
 
 API_BASE = "https://api.x.com/2"
 
-# Tiny in-memory cache: username(lower) -> user_id.  Cleared on redeploy.
+# Tiny in-memory cache: username(lower) -> user_id. Cleared on redeploy.
 _USER_ID_CACHE: dict[str, str] = {}
 
 
 async def _resolve_user_ids(
     client: httpx.AsyncClient, usernames: list[str]
 ) -> dict[str, str]:
-    """Return {username_lower: user_id}.
-    Uses /users/by?usernames=... (batch up to 100).
+    """Return {username_lower: user_id}. Uses /users/by?usernames=... (batch up to 100).
+
     Now handles >100 usernames by chunking into batches of 100.
     """
     missing = [u for u in usernames if u.lower() not in _USER_ID_CACHE]
@@ -144,14 +144,17 @@ async def _fetch_user_tweets(
     except Exception as exc:  # noqa: BLE001
         log.warning("X tweets %s exception: %s", username, exc)
         return []
+
     if resp.status_code == 429:
         log.warning("X tweets %s rate limited, skipping", username)
         return []
+
     if resp.status_code != 200:
         log.warning(
             "X tweets %s failed %d: %s", username, resp.status_code, resp.text[:200]
         )
         return []
+
     items = resp.json().get("data") or []
     out: list[dict[str, Any]] = []
     for t in items:
@@ -192,14 +195,28 @@ async def fetch_x_intel(
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     headers = {"Authorization": f"Bearer {X_BEARER_TOKEN}"}
 
-    async with httpx.AsyncClient(headers=headers, timeout=15.0) as client:
-        uids = await _resolve_user_ids(client, handles)
+    MAX_RETRIES = 3
+    RETRY_DELAY = 5  # seconds between attempts
 
-        # --- RETRY: X API sometimes returns empty on cold first call ---
-        if not uids:
-            log.warning("X user resolution returned 0 IDs, retrying in 3s...")
-            await asyncio.sleep(3)
+    async with httpx.AsyncClient(headers=headers, timeout=15.0) as client:
+        uids: dict[str, str] = {}
+        for attempt in range(1, MAX_RETRIES + 1):
             uids = await _resolve_user_ids(client, handles)
+            if uids:
+                if attempt > 1:
+                    log.info("X user resolution succeeded on attempt %d/%d", attempt, MAX_RETRIES)
+                break
+            if attempt < MAX_RETRIES:
+                log.warning(
+                    "X user resolution returned 0 IDs (attempt %d/%d), retrying in %ds...",
+                    attempt, MAX_RETRIES, RETRY_DELAY,
+                )
+                await asyncio.sleep(RETRY_DELAY)
+            else:
+                log.error(
+                    "X user resolution failed after %d attempts — giving up", MAX_RETRIES
+                )
+
         if not uids:
             return {"status": "error", "error": "could_not_resolve_any_user"}
 
@@ -215,16 +232,17 @@ async def fetch_x_intel(
             return uname, msgs
 
         pairs = await asyncio.gather(*[_do(h) for h in handles])
-        data: dict[str, list[dict[str, Any]]] = {}
-        total = 0
-        for uname, msgs in pairs:
-            if msgs:
-                data[uname] = msgs
-                total += len(msgs)
 
-        return {
-            "status": "ok",
-            "data": data,
-            "accounts_scanned": len(data),
-            "total_tweets": total,
-        }
+    data: dict[str, list[dict[str, Any]]] = {}
+    total = 0
+    for uname, msgs in pairs:
+        if msgs:
+            data[uname] = msgs
+            total += len(msgs)
+
+    return {
+        "status": "ok",
+        "data": data,
+        "accounts_scanned": len(data),
+        "total_tweets": total,
+    }
