@@ -45,13 +45,15 @@ logging.basicConfig(
 )
 log = logging.getLogger("fondo-blackcat")
 
-# Persistent keyboard — /reporte es la función todo-en-uno.
-# /posiciones lo cubre el pear-monitor-bot en tiempo real.
+# Persistent keyboard — mínimo e impecable.
+# /reporte = todo-en-uno (timeline + posiciones + análisis Claude).
+# /alertas = único botón de estado (toggle ON/OFF) no cubierto por /reporte.
+# El resto (/tesis, /hf, /posiciones, /timeline, /start) sigue funcionando si se tipea,
+# pero no ocupa espacio en el keyboard porque son redundantes con /reporte o con
+# el pear-monitor-bot (posiciones en tiempo real).
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
-        [KeyboardButton("/reporte"), KeyboardButton("/tesis")],
-        [KeyboardButton("/hf"), KeyboardButton("/alertas")],
-        [KeyboardButton("/start")],
+        [KeyboardButton("/reporte"), KeyboardButton("/alertas")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -66,11 +68,14 @@ _alerts_enabled = {"value": ENABLE_ALERTS}
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "🐈‍⬛ Fondo Black Cat — analista personal\n\n"
-        "Comandos:\n"
-        "/reporte — TODO-EN-UNO: timeline X (48h) + posiciones + análisis completo\n"
+        "Keyboard (2 botones, lo único que necesitás):\n"
+        "/reporte — TODO-EN-UNO: timeline X (48h) + posiciones + análisis\n"
+        "/alertas — toggle alertas automáticas (on/off)\n\n"
+        "Comandos extra (tipear manual, sin botón):\n"
         "/tesis — estado de la tesis macro\n"
-        "/hf — Health Factor de HyperLend (quick check)\n"
-        "/alertas — toggle alertas automáticas (on/off)\n"
+        "/hf — Health Factor de HyperLend\n"
+        "/posiciones — snapshot rápido (wallets + HF)\n"
+        "/timeline — sólo timeline X 48h\n"
     )
     await update.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
 
