@@ -45,12 +45,12 @@ logging.basicConfig(
 )
 log = logging.getLogger("fondo-blackcat")
 
-# Persistent keyboard for main commands
+# Persistent keyboard — /reporte es la función todo-en-uno.
+# /posiciones lo cubre el pear-monitor-bot en tiempo real.
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
-        [KeyboardButton("/reporte"), KeyboardButton("/posiciones")],
-        [KeyboardButton("/hf"), KeyboardButton("/tesis")],
-        [KeyboardButton("/timeline"), KeyboardButton("/alertas")],
+        [KeyboardButton("/reporte"), KeyboardButton("/tesis")],
+        [KeyboardButton("/hf"), KeyboardButton("/alertas")],
         [KeyboardButton("/start")],
     ],
     resize_keyboard=True,
@@ -67,11 +67,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "🐈‍⬛ Fondo Black Cat — analista personal\n\n"
         "Comandos:\n"
-        "/reporte — reporte completo (portfolio + market + intel + análisis)\n"
-        "/posiciones — snapshot rápido (wallets + HF)\n"
-        "/hf — Health Factor de HyperLend\n"
+        "/reporte — TODO-EN-UNO: timeline X (48h) + posiciones + análisis completo\n"
         "/tesis — estado de la tesis macro\n"
-        "/timeline — últimas 48h de X (154 cuentas curadas)\n"
+        "/hf — Health Factor de HyperLend (quick check)\n"
         "/alertas — toggle alertas automáticas (on/off)\n"
     )
     await update.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
@@ -92,12 +90,18 @@ async def cmd_hf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 @authorized
 async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reporte TODO-EN-UNO: timeline X + posiciones + análisis Claude.
+
+    Emite 3 mensajes secuenciales:
+      1. Timeline — top 40 tweets por engagement de las últimas 48h (154 cuentas curadas)
+      2. Posiciones — snapshot rápido de wallets + HyperLend + Bounce Tech
+      3. Análisis — reporte completo generado por Claude (market + intel + tesis)
+    """
     await update.message.reply_text(
-        "⏳ Generando reporte completo (puede tardar 30-90s)...",
+        "⏳ Generando reporte completo: timeline + posiciones + análisis (30-90s)...",
         reply_markup=MAIN_KEYBOARD,
     )
-    # Run unread scan + X intel + all data fetches in parallel.
-    # scan_telegram_unread reads unread channels in main folder and marks them read.
+    # Todos los fetches en paralelo.
     portfolio, hl, market, unlocks, intel_legacy, intel_unread, x_intel, gmail_intel, bt = await asyncio.gather(
         fetch_all_wallets(),
         fetch_all_hyperlend(),
@@ -109,7 +113,21 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         scan_gmail_unread(),
         fetch_bounce_tech(),
     )
-    # Merge tiered intel + unread scan + X intel into a single dict passed to analysis
+    # ─── Sección 1: Timeline X (48h) ─────────────────────────────────────
+    timeline_text = format_timeline(x_intel, top_n=40)
+    await send_long_message(
+        update,
+        "📡 TIMELINE X — 48H\n" + ("─" * 30) + "\n\n" + timeline_text,
+        reply_markup=MAIN_KEYBOARD,
+    )
+    # ─── Sección 2: Posiciones ───────────────────────────────────────────
+    positions_text = format_quick_positions(portfolio, hl, bounce_tech=bt)
+    await send_long_message(
+        update,
+        "💼 POSICIONES\n" + ("─" * 30) + "\n\n" + positions_text,
+        reply_markup=MAIN_KEYBOARD,
+    )
+    # ─── Sección 3: Análisis Claude ──────────────────────────────────────
     merged_intel: dict = {}
     if isinstance(intel_legacy, dict):
         merged_intel.update(intel_legacy)
@@ -120,7 +138,11 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if isinstance(gmail_intel, dict) and gmail_intel.get("status") == "ok":
         merged_intel["gmail_intel"] = gmail_intel
     report = await generate_report(portfolio, hl, market, unlocks, merged_intel)
-    await send_long_message(update, report, reply_markup=MAIN_KEYBOARD)
+    await send_long_message(
+        update,
+        "🧠 ANÁLISIS COMPLETO\n" + ("─" * 30) + "\n\n" + report,
+        reply_markup=MAIN_KEYBOARD,
+    )
 
 
 @authorized
