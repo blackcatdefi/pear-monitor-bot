@@ -142,12 +142,14 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         merged_intel["x_intel"] = x_intel
     if isinstance(gmail_intel, dict) and gmail_intel.get("status") == "ok":
         merged_intel["gmail_intel"] = gmail_intel
-    report = await generate_report(portfolio, hl, market, unlocks, merged_intel)
+    report, thesis_update = await generate_report(portfolio, hl, market, unlocks, merged_intel)
     await send_long_message(
         update,
         "🧠 ANÁLISIS COMPLETO\n" + ("─" * 30) + "\n\n" + report,
         reply_markup=MAIN_KEYBOARD,
     )
+    if thesis_update:
+        await send_long_message(update, thesis_update, reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
