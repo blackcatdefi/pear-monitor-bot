@@ -61,7 +61,9 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
 _alerts_enabled = {"value": ENABLE_ALERTS}
 
 
-# ─── Commands ───────────────────────────────────────────────────────────────
+# ─── Commands ─────────────────────────────────────────────────────────────────────
+
+
 @authorized
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
@@ -95,14 +97,15 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     """Reporte TODO-EN-UNO: timeline X + posiciones + análisis Claude.
 
     Emite 3 mensajes secuenciales:
-      1. Timeline — top 40 tweets por engagement de las últimas 48h (154 cuentas curadas)
-      2. Posiciones — snapshot rápido de wallets + HyperLend + Bounce Tech
-      3. Análisis — reporte completo generado por Claude (market + intel + tesis)
+    1. Timeline — top 40 tweets por engagement de las últimas 48h (154 cuentas curadas)
+    2. Posiciones — snapshot rápido de wallets + HyperLend + Bounce Tech
+    3. Análisis — reporte completo generado por Claude (market + intel + tesis)
     """
     await update.message.reply_text(
         "⏳ Generando reporte completo: timeline + posiciones + análisis (30-90s)...",
         reply_markup=MAIN_KEYBOARD,
     )
+
     # Todos los fetches en paralelo.
     portfolio, hl, market, unlocks, intel_legacy, intel_unread, x_intel, gmail_intel, bt = await asyncio.gather(
         fetch_all_wallets(),
@@ -115,6 +118,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         scan_gmail_unread(),
         fetch_bounce_tech(),
     )
+
     # ─── Sección 1: Timeline X (48h) ─────────────────────────────────────
     timeline_text = format_timeline(x_intel, top_n=40)
     await send_long_message(
@@ -122,13 +126,15 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "📡 TIMELINE X — 48H\n" + ("─" * 30) + "\n\n" + timeline_text,
         reply_markup=MAIN_KEYBOARD,
     )
-    # ─── Sección 2: Posiciones ───────────────────────────────────────────
+
+    # ─── Sección 2: Posiciones ─────────────────────────────────────────
     positions_text = format_quick_positions(portfolio, hl, bounce_tech=bt)
     await send_long_message(
         update,
         "💼 POSICIONES\n" + ("─" * 30) + "\n\n" + positions_text,
         reply_markup=MAIN_KEYBOARD,
     )
+
     # ─── Sección 3: Análisis Claude ──────────────────────────────────────
     merged_intel: dict = {}
     if isinstance(intel_legacy, dict):
@@ -139,6 +145,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         merged_intel["x_intel"] = x_intel
     if isinstance(gmail_intel, dict) and gmail_intel.get("status") == "ok":
         merged_intel["gmail_intel"] = gmail_intel
+
     report, thesis_update = await generate_report(portfolio, hl, market, unlocks, merged_intel)
     await send_long_message(
         update,
@@ -179,7 +186,9 @@ async def cmd_alertas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(f"Alertas automáticas: {estado}", reply_markup=MAIN_KEYBOARD)
 
 
-# ─── Scheduler job ──────────────────────────────────────────────────────────
+# ─── Scheduler job ────────────────────────────────────────────────────────────────
+
+
 async def _alert_job(application: Application) -> None:
     if not _alerts_enabled["value"]:
         return
@@ -189,7 +198,9 @@ async def _alert_job(application: Application) -> None:
         log.exception("Alert cycle failed")
 
 
-# ─── Lifecycle hooks ────────────────────────────────────────────────────────
+# ─── Lifecycle hooks ────────────────────────────────────────────────────────────
+
+
 async def post_init(application: Application) -> None:
     client = await get_telethon()
     if client is None:
@@ -220,7 +231,9 @@ async def post_shutdown(application: Application) -> None:
     await stop_telethon()
 
 
-# ─── Main ───────────────────────────────────────────────────────────────────
+# ─── Main ───────────────────────────────────────────────────────────────────────
+
+
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
         print("ERROR: TELEGRAM_BOT_TOKEN no configurado", file=sys.stderr)
@@ -247,7 +260,10 @@ def main() -> None:
     app.add_handler(CommandHandler("alertas", cmd_alertas))
 
     log.info("Fondo Black Cat bot starting...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+    )
 
 
 if __name__ == "__main__":
