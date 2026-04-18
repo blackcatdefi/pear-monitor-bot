@@ -1,20 +1,20 @@
-"""X / Twitter intelligence â reads recent tweets from tracked accounts.
+"""X / Twitter intelligence — reads recent tweets from tracked accounts.
 
 Primary source: official X API v2 via bearer token in X_BEARER_TOKEN env var.
 Fallbacks (in order, when API fails):
     1. Nitter RSS (multiple public instances)
     2. RSSHub (public instance rsshub.app or custom RSSHUB_BASE)
-    3. None â return empty but with a clear error message
+    3. None — return empty but with a clear error message
 
 The previous version silently returned `could_not_resolve_any_user` when the
 bearer token was rate-limited / expired, leaving /reporte without any X intel.
 This version logs the actual HTTP status + body, and falls through to Nitter.
 
 Env vars:
-    X_BEARER_TOKEN  â OAuth 2.0 Bearer token (app-only auth).  Optional.
-    X_ACCOUNTS      â optional comma-separated list of X handles without @.
+    X_BEARER_TOKEN  — OAuth 2.0 Bearer token (app-only auth).  Optional.
+    X_ACCOUNTS      — optional comma-separated list of X handles without @.
                       Defaults to DEFAULT_ACCOUNTS below.
-    NITTER_INSTANCES â optional comma-separated list of nitter hosts to try.
+    NITTER_INSTANCES — optional comma-separated list of nitter hosts to try.
 
 Output shape (on success):
     {
@@ -57,7 +57,7 @@ DEFAULT_ACCOUNTS: list[str] = [
     "DeFiDad",
 ]
 
-# Public Nitter instances â updated Apr 2026. Dead instances removed.
+# Public Nitter instances — updated Apr 2026. Dead instances removed.
 DEFAULT_NITTER_INSTANCES = [
     "https://nitter.poast.org",
     "https://nitter.privacydev.net",
@@ -65,7 +65,7 @@ DEFAULT_NITTER_INSTANCES = [
     "https://xcancel.com",
 ]
 
-# RSSHub â public RSS bridge that supports Twitter/X
+# RSSHub — public RSS bridge that supports Twitter/X
 RSSHUB_BASE = os.getenv("RSSHUB_BASE", "https://rsshub.app").rstrip("/")
 
 
@@ -93,7 +93,7 @@ API_BASE = "https://api.x.com/2"
 _USER_ID_CACHE: dict[str, str] = {}
 
 
-# âââ X API v2 primary path ââââââââââââââââââââââââââââââââââââââââââââââ
+# ─── X API v2 primary path ──────────────────────────────────────────────
 async def _resolve_user_ids(
     client: httpx.AsyncClient, usernames: list[str]
 ) -> tuple[dict[str, str], list[str]]:
@@ -116,7 +116,7 @@ async def _resolve_user_ids(
                 for u in payload.get("data") or []:
                     _USER_ID_CACHE[u["username"].lower()] = u["id"]
                 if not payload.get("data"):
-                    log.warning("X users/by 200 but empty data â body: %s", resp.text[:400])
+                    log.warning("X users/by 200 but empty data — body: %s", resp.text[:400])
             elif resp.status_code == 429:
                 log.warning(
                     "X users/by rate limited at batch %d, pausing 60s; headers=%s",
@@ -208,7 +208,7 @@ async def _fetch_user_tweets(
     return out
 
 
-# âââ Nitter RSS fallback ââââââââââââââââââââââââââââââââââââââââââââââââ
+# ─── Nitter RSS fallback ────────────────────────────────────────────────
 _NITTER_STARS_RE = re.compile(r"(\d[\d,]*)")
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
@@ -229,7 +229,7 @@ async def _fetch_nitter_rss_one(
     if resp.status_code != 200 or not resp.content:
         return f"{instance}: status {resp.status_code}", []
     body = resp.content
-    # Some instances return HTML error pages with 200 â quick sniff for <rss
+    # Some instances return HTML error pages with 200 — quick sniff for <rss
     if b"<rss" not in body[:200] and b"<feed" not in body[:200]:
         return f"{instance}: non-rss body", []
 
@@ -361,7 +361,7 @@ async def _nitter_fetch_all(
     return data, probe_errors
 
 
-# âââ RSSHub fallback ââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ─── RSSHub fallback ────────────────────────────────────────────────────
 async def _rsshub_fetch_one(
     client: httpx.AsyncClient, username: str
 ) -> tuple[str, list[dict[str, Any]]]:
@@ -443,7 +443,7 @@ async def _rsshub_fetch_all(
     return data, errors
 
 
-# âââ Public entry point âââââââââââââââââââââââââââââââââââââââââââââââââ
+# ─── Public entry point ─────────────────────────────────────────────────
 async def fetch_x_intel(
     hours: int = 24, accounts: list[str] | None = None
 ) -> dict[str, Any]:
@@ -458,10 +458,10 @@ async def fetch_x_intel(
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     log.info("[CASCADE] Starting X intel fetch: %d accounts, cutoff %dh ago", len(handles), hours)
 
-    # ââ STEP 1: X API v2 ââ
+    # ── STEP 1: X API v2 ──
     api_errors: list[str] = []
     if X_BEARER_TOKEN:
-        log.info("[CASCADE] STEP 1 X API v2 â bearer token present (%d chars)", len(X_BEARER_TOKEN))
+        log.info("[CASCADE] STEP 1 X API v2 — bearer token present (%d chars)", len(X_BEARER_TOKEN))
         headers = {"Authorization": f"Bearer {X_BEARER_TOKEN}"}
         try:
             async with httpx.AsyncClient(headers=headers, timeout=15.0) as client:
@@ -496,7 +496,7 @@ async def fetch_x_intel(
                             total += len(msgs)
 
                     if data:
-                        log.info("[CASCADE] STEP 1 SUCCESS â %d accounts, %d tweets", len(data), total)
+                        log.info("[CASCADE] STEP 1 SUCCESS — %d accounts, %d tweets", len(data), total)
                         return {
                             "status": "ok",
                             "source": "x_api",
@@ -511,13 +511,13 @@ async def fetch_x_intel(
             log.exception("[CASCADE] STEP 1 X API exception")
             api_errors.append(f"x_api exception: {exc}")
     else:
-        log.warning("[CASCADE] STEP 1 SKIP â X_BEARER_TOKEN not set")
+        log.warning("[CASCADE] STEP 1 SKIP — X_BEARER_TOKEN not set")
         api_errors.append("X_BEARER_TOKEN not configured")
 
     log.warning("[CASCADE] STEP 1 FAILED. Errors: %s", api_errors[:5])
 
-    # ââ STEP 2: Nitter RSS ââ
-    log.info("[CASCADE] STEP 2 Nitter RSS â trying instances: %s", _nitter_instances())
+    # ── STEP 2: Nitter RSS ──
+    log.info("[CASCADE] STEP 2 Nitter RSS — trying instances: %s", _nitter_instances())
     nitter_errors: list[str] = []
     try:
         async with httpx.AsyncClient(
@@ -530,7 +530,7 @@ async def fetch_x_intel(
                 log.warning("[CASCADE] STEP 2 Nitter probe errors: %s", probe_errors)
             if data:
                 total = sum(len(v) for v in data.values())
-                log.info("[CASCADE] STEP 2 SUCCESS â %d accounts, %d tweets via Nitter", len(data), total)
+                log.info("[CASCADE] STEP 2 SUCCESS — %d accounts, %d tweets via Nitter", len(data), total)
                 return {
                     "status": "ok",
                     "source": "nitter",
@@ -545,8 +545,8 @@ async def fetch_x_intel(
 
     log.warning("[CASCADE] STEP 2 FAILED. Nitter errors: %s", nitter_errors[:5])
 
-    # ââ STEP 3: RSSHub ââ
-    log.info("[CASCADE] STEP 3 RSSHub â base: %s", RSSHUB_BASE)
+    # ── STEP 3: RSSHub ──
+    log.info("[CASCADE] STEP 3 RSSHub — base: %s", RSSHUB_BASE)
     rsshub_errors: list[str] = []
     try:
         async with httpx.AsyncClient(
@@ -557,7 +557,7 @@ async def fetch_x_intel(
             rsshub_errors.extend(rh_errors)
             if data:
                 total = sum(len(v) for v in data.values())
-                log.info("[CASCADE] STEP 3 SUCCESS â %d accounts, %d tweets via RSSHub", len(data), total)
+                log.info("[CASCADE] STEP 3 SUCCESS — %d accounts, %d tweets via RSSHub", len(data), total)
                 return {
                     "status": "ok",
                     "source": "rsshub",
@@ -573,7 +573,7 @@ async def fetch_x_intel(
 
     log.warning("[CASCADE] STEP 3 FAILED. RSSHub errors: %s", rsshub_errors[:5])
 
-    # Nothing worked â return structured error with diagnostic detail
+    # Nothing worked — return structured error with diagnostic detail
     log.error("[CASCADE] ALL 3 STEPS FAILED. X API: %s | Nitter: %s | RSSHub: %s",
               api_errors[:3], nitter_errors[:3], rsshub_errors[:3])
     return {
