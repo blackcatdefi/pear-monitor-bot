@@ -77,12 +77,14 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
         ident = f"{label} ({short_addr})" if label else short_addr
         wallet_key = wallet_addr[-8:] if wallet_addr else "unknown"
         if hf is not None and not math.isinf(hf):
-            if hf < HF_CRITICAL:
-                await _emit(bot, f"hf_critical_{wallet_key}", state, f"🚨 HYPERLEND HF CRÍTICO: {hf:.3f} — {ident} — acción inmediata!")
+            # Round to 4 decimals to avoid float noise (e.g. 1.19999 displaying as 1.200)
+            hf_r = round(hf, 4)
+            if hf_r < HF_CRITICAL:  # strict <, exact threshold does NOT alert
+                await _emit(bot, f"🚨 HYPERLEND HF CRÍTICO: {hf_r:.4f} — {ident} — acción inmediata!")
             else:
                 _clear(state, f"hf_critical_{wallet_key}")
-            if hf < HF_WARN:
-                await _emit(bot, f"hf_warn_{wallet_key}", state, f"⚠️ HYPERLEND HF: {hf:.3f} — {ident} — por debajo de {HF_WARN}")
+            if hf_r < HF_WARN:  # strict <, exact 1.20 does NOT alert
+                await _emit(bot, f"⚠️ HYPERLEND HF: {hf_r:.4f} — {ident} — por debajo de {HF_WARN:.2f}")
             else:
                 _clear(state, f"hf_warn_{wallet_key}")
                 _clear(state, f"hf_critical_{wallet_key}")
