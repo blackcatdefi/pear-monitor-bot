@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from web3 import Web3
@@ -173,6 +174,7 @@ class HyperLend:
 
         out: list[dict[str, Any]] = []
         for asset in assets:
+            time.sleep(0.5)  # avoid RPC rate limit -32005
             try:
                 rd = self.pool.functions.getReserveData(
                     Web3.to_checksum_address(asset)
@@ -277,6 +279,8 @@ class HyperLend:
             log.warning("per-reserve balances failed for %s: %s", addr, exc)
             breakdown = {"collateral": [], "debt": []}
 
+        asset_detail_ok = bool(breakdown.get("collateral") or breakdown.get("debt"))
+
         # Pick "primary" (largest balance) collateral and debt for convenience.
         primary_collateral = (
             max(breakdown["collateral"], key=lambda x: x["balance"])
@@ -307,6 +311,7 @@ class HyperLend:
             "collateral_balance": primary_collateral["balance"] if primary_collateral else 0.0,
             "debt_symbol": primary_debt["symbol"] if primary_debt else None,
             "debt_balance": primary_debt["balance"] if primary_debt else 0.0,
+            "asset_detail_note": None if asset_detail_ok else "asset detail unavailable",
         }
 
     async def get_account_data(self, address: str = HYPERLEND_WALLET) -> dict[str, Any]:
