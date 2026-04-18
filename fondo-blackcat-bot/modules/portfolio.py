@@ -3,6 +3,7 @@
 Docs: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint
 
 Covers main perp dex + HIP-3 builder-deployed dexes (cash, para, flx, vntl, hyna, km, abcd, xyz).
+Also fetches spot token balances (kHYPE, PEAR, etc.).
 """
 from __future__ import annotations
 
@@ -124,11 +125,49 @@ async def _fetch_dex(wallet: str, dex: str | None) -> dict[str, Any]:
         }
 
 
+async def _fetch_spot(wallet: str) -> list[dict[str, Any]]:
+    """Fetch spot token balances (kHYPE, PEAR, HYPE, etc.) for a wallet."""
+    try:
+        state = await spot_state(wallet)
+        balances = state.get("balances", []) or []
+        result: list[dict[str, Any]] = []
+        for b in balances:
+            try:
+                total = float(b.get("total", 0) or 0)
+            except (TypeError, ValueError):
+                total = 0.0
+            if total <= 0:
+                continue
+            try:
+                hold = float(b.get("hold", 0) or 0)
+            except (TypeError, ValueError):
+                hold = 0.0
+            try:
+                entry_ntl = float(b.get("entryNtl", 0) or 0)
+            except (TypeError, ValueError):
+                entry_ntl = 0.0
+            result.append({
+                "coin": b.get("coin", "?"),
+                "total": total,
+                "hold": hold,
+                "entry_ntl": entry_ntl,
+            })
+        return result
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Fetch spot for %s failed: %s", wallet, exc)
+        return []
+
+
 async def fetch_wallet(wallet: str, label: str) -> dict[str, Any]:
-    """Fetch one wallet across main + HIP-3 dexes; returns {status, data|error}."""
+    """Fetch one wallet across main + HIP-3 dexes + spot; returns {status, data|error}."""
     try:
         dex_keys: list[str | None] = [None] + list(HIP3_DEXES)
-        results = await asyncio.gather(*[_fetch_dex(wallet, d) for d in dex_keys])
+        # Fetch all perp dexes + spot concurrently
+        dex_tasks = [_fetch_dex(wallet, d) for d in dex_keys]
+        spot_task = _fetch_spot(wallet)
+        all_results = await asyncio.gather(*dex_tasks, spot_task)
+        spot_balances = all_results[-1]  # last result is spot
+        dex_results = all_results[:-1]   # everything else is perp dexes
 
         positions: list[dict[str, Any]] = []
         account_value = 0.0
@@ -136,7 +175,7 @@ async def fetch_wallet(wallet: str, label: str) -> dict[str, Any]:
         total_margin_used = 0.0
         withdrawable = 0.0
         unrealized_total = 0.0
-        for r in results:
+        for r in dex_results:
             positions.extend(r.get("positions") or [])
             account_value += r.get("account_value", 0.0)
             total_ntl_pos += r.get("total_ntl_pos", 0.0)
@@ -154,6 +193,7 @@ async def fetch_wallet(wallet: str, label: str) -> dict[str, Any]:
             "withdrawable": withdrawable,
             "positions": positions,
             "unrealized_pnl_total": unrealized_total,
+            "spot_balances": spot_balances,
         }
         return {"status": "ok", "data": summary}
     except Exception as exc:  # noqa: BLE001
