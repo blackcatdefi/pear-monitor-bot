@@ -31,7 +31,8 @@ def get_client() -> AsyncAnthropic | None:
     return _client
 
 
-# ─── Persistent thesis state ─────────────────────────────────────────────────
+# ─── Persistent thesis state ───────────────────────────────────────────────
+
 
 def _load_thesis() -> dict[str, Any]:
     """Load thesis state from disk. Returns empty dict if none."""
@@ -60,8 +61,8 @@ def _thesis_context(state: dict[str, Any]) -> str:
     if not state or not state.get("current"):
         return ""
     parts = [
-        "\n\n═══ ESTADO PREVIO DE LA TESIS (auto-actualizado) ═══",
-        f"Última actualización: {state.get('last_updated', 'desconocido')}",
+        "\n\n\u2550\u2550\u2550 ESTADO PREVIO DE LA TESIS (auto-actualizado) \u2550\u2550\u2550",
+        f"\u00daltima actualizaci\u00f3n: {state.get('last_updated', 'desconocido')}",
         f"Reportes acumulados: {state.get('report_count', 0)}",
         "",
         state["current"],
@@ -72,25 +73,27 @@ def _thesis_context(state: dict[str, Any]) -> str:
         parts.append("")
         parts.append("APRENDIZAJES ACUMULADOS:")
         for l in learnings[-10:]:  # last 10
-            parts.append(f"  • [{l.get('date', '?')}] {l.get('text', '')}")
-    parts.append("═══ FIN ESTADO PREVIO ═══")
+            parts.append(f"  \u2022 [{l.get('date', '?')}] {l.get('text', '')}")
+    parts.append("\u2550\u2550\u2550 FIN ESTADO PREVIO \u2550\u2550\u2550")
     return "\n".join(parts)
 
 
-THESIS_UPDATE_PROMPT = """Basándote en el reporte que acabás de generar y el estado previo de la tesis (si hay), actualizá el estado de la tesis.
+THESIS_UPDATE_PROMPT = """Bas\u00e1ndote en el reporte que acab\u00e1s de generar y el estado previo de la tesis (si hay), actualiz\u00e1 el estado de la tesis.
 
-Respondé EXCLUSIVAMENTE en este formato JSON (sin markdown, sin backticks, solo JSON puro):
+Respond\u00e9 EXCLUSIVAMENTE en este formato JSON (sin markdown, sin backticks, solo JSON puro):
+
 {
   "components": {
-    "war_trade": {"status": "VALIDA|NEUTRO|INVALIDA", "detail": "dato específico corto", "action": "MANTENER|AGREGAR|REDUCIR|SALIR"},
-    "alt_short_bleed": {"status": "VALIDA|NEUTRO|INVALIDA", "detail": "dato específico corto", "action": "MANTENER|AGREGAR|REDUCIR|SALIR"},
-    "hype_flywheel": {"status": "VALIDA|NEUTRO|INVALIDA", "detail": "dato específico corto", "action": "MANTENER|AGREGAR|REDUCIR|SALIR"},
-    "fed_hawkish": {"status": "VALIDA|NEUTRO|INVALIDA", "detail": "dato específico corto", "action": "MANTENER|AGREGAR|REDUCIR|SALIR"}
+    "war_trade": {"status": "VALIDA|NEUTRO|INVALIDA", "detail": "dato espec\u00edfico corto", "action": "MANTENER|AGREGAR|REDUCIR|SALIR"},
+    "alt_short_bleed": {"status": "VALIDA|NEUTRO|INVALIDA", "detail": "dato espec\u00edfico corto", "action": "MANTENER|AGREGAR|REDUCIR|SALIR"},
+    "hype_flywheel": {"status": "VALIDA|NEUTRO|INVALIDA", "detail": "dato espec\u00edfico corto", "action": "MANTENER|AGREGAR|REDUCIR|SALIR"},
+    "fed_hawkish": {"status": "VALIDA|NEUTRO|INVALIDA", "detail": "dato espec\u00edfico corto", "action": "MANTENER|AGREGAR|REDUCIR|SALIR"},
+    "trade_del_ciclo": {"status": "VALIDA|NEUTRO|INVALIDA", "detail": "dato espec\u00edfico corto", "action": "MANTENER|AGREGAR|REDUCIR|SALIR"}
   },
-  "overall_conviction": "1-10 (10=máxima convicción en la tesis)",
+  "overall_conviction": "1-10 (10=m\u00e1xima convicci\u00f3n en la tesis)",
   "new_learnings": ["aprendizaje nuevo 1 de este reporte (si hay)", "aprendizaje 2 (si hay)"],
-  "thesis_evolution": "1-2 oraciones: cómo cambió la tesis respecto al reporte anterior (o 'primera ejecución' si no hay previo)",
-  "summary": "Resumen ejecutivo de la tesis actualizada en 3-4 líneas para mostrar al usuario"
+  "thesis_evolution": "1-2 oraciones: c\u00f3mo cambi\u00f3 la tesis respecto al reporte anterior (o 'primera ejecuci\u00f3n' si no hay previo)",
+  "summary": "Resumen ejecutivo de la tesis actualizada en 3-4 l\u00edneas para mostrar al usuario"
 }"""
 
 
@@ -138,10 +141,10 @@ async def _update_thesis_state(report_text: str, user_data: str) -> str | None:
         # Build the human-readable thesis summary
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         components = update.get("components", {})
-        status_map = {"VALIDA": "✅", "NEUTRO": "⚠️", "INVALIDA": "🔴"}
+        status_map = {"VALIDA": "\u2705", "NEUTRO": "\u26a0\ufe0f", "INVALIDA": "\U0001f534"}
 
-        summary_lines = [f"📊 TESIS ACTUALIZADA — {now}"]
-        summary_lines.append(f"Convicción global: {update.get('overall_conviction', '?')}/10")
+        summary_lines = [f"\U0001f4ca TESIS ACTUALIZADA \u2014 {now}"]
+        summary_lines.append(f"Convicci\u00f3n global: {update.get('overall_conviction', '?')}/10")
         summary_lines.append("")
 
         for key, label in [
@@ -149,11 +152,12 @@ async def _update_thesis_state(report_text: str, user_data: str) -> str | None:
             ("alt_short_bleed", "Alt Short Bleed"),
             ("hype_flywheel", "HYPE Flywheel"),
             ("fed_hawkish", "Fed Hawkish"),
+            ("trade_del_ciclo", "Trade del Ciclo"),
         ]:
             c = components.get(key, {})
-            icon = status_map.get(c.get("status", ""), "❓")
+            icon = status_map.get(c.get("status", ""), "\u2753")
             summary_lines.append(
-                f"{icon} {label}: {c.get('detail', 'n/a')} → {c.get('action', '?')}"
+                f"{icon} {label}: {c.get('detail', 'n/a')} \u2192 {c.get('action', '?')}"
             )
 
         summary_lines.append("")
@@ -167,6 +171,7 @@ async def _update_thesis_state(report_text: str, user_data: str) -> str | None:
         for l in new_learnings:
             if l and l.strip():
                 existing_learnings.append({"date": now, "text": l.strip()})
+
         # Trim to last 50 learnings
         existing_learnings = existing_learnings[-50:]
 
@@ -189,23 +194,23 @@ async def _update_thesis_state(report_text: str, user_data: str) -> str | None:
             "key_learnings": existing_learnings,
             "history": history,
         }
-
         _save_thesis(new_state)
         log.info("Thesis state updated (report #%d)", new_state["report_count"])
 
         # Return user-facing summary
         user_summary = update.get("summary", current_text)
-        return f"🧬 TESIS AUTO-ACTUALIZADA (reporte #{new_state['report_count']})\n\n{current_text}\n\n{user_summary}"
+        return f"\U0001f9ec TESIS AUTO-ACTUALIZADA (reporte #{new_state['report_count']})\n\n{current_text}\n\n{user_summary}"
 
     except json.JSONDecodeError as e:
-        log.warning("Thesis update JSON parse failed: %s — raw: %s", e, raw[:200])
+        log.warning("Thesis update JSON parse failed: %s \u2014 raw: %s", e, raw[:200])
         return None
     except Exception:  # noqa: BLE001
         log.exception("Thesis auto-update failed")
         return None
 
 
-# ─── Report generation ───────────────────────────────────────────────────────
+# ─── Report generation ─────────────────────────────────────────────────────
+
 
 async def generate_report(
     portfolio: list[dict[str, Any]] | None,
@@ -220,7 +225,7 @@ async def generate_report(
     """
     client = get_client()
     if client is None:
-        return "❌ ANTHROPIC_API_KEY no configurada — no se puede generar el reporte.", None
+        return "\u274c ANTHROPIC_API_KEY no configurada \u2014 no se puede generar el reporte.", None
 
     user_content = compile_raw_data(portfolio, hyperlend, market, unlocks, telegram_intel)
 
@@ -245,7 +250,8 @@ async def generate_report(
         for block in resp.content:
             if hasattr(block, "text"):
                 parts.append(block.text)
-        report_text = "\n".join(parts).strip() or "(reporte vacío)"
+
+        report_text = "\n".join(parts).strip() or "(reporte vac\u00edo)"
 
         # Auto-update thesis in the background
         thesis_update = await _update_thesis_state(report_text, user_content)
@@ -254,7 +260,7 @@ async def generate_report(
 
     except Exception as exc:  # noqa: BLE001
         log.exception("Anthropic call failed")
-        return f"❌ Error generando reporte con Claude: {exc}", None
+        return f"\u274c Error generando reporte con Claude: {exc}", None
 
 
 async def generate_thesis_check(
@@ -262,10 +268,10 @@ async def generate_thesis_check(
     hyperlend: dict[str, Any] | None,
     market: dict[str, Any] | None,
 ) -> str:
-    """Thesis check — uses persistent state + fresh data."""
+    """Thesis check \u2014 uses persistent state + fresh data."""
     client = get_client()
     if client is None:
-        return "❌ ANTHROPIC_API_KEY no configurada."
+        return "\u274c ANTHROPIC_API_KEY no configurada."
 
     user_content = compile_raw_data(portfolio, hyperlend, market, None, None)
 
@@ -290,8 +296,10 @@ async def generate_thesis_check(
         for block in resp.content:
             if hasattr(block, "text"):
                 parts.append(block.text)
-        return "\n".join(parts).strip() or "(análisis vacío)"
+
+        return "\n".join(parts).strip() or "(an\u00e1lisis vac\u00edo)"
 
     except Exception as exc:  # noqa: BLE001
         log.exception("Thesis check failed")
-        return f"❌ Error: {exc}"
+        return f"\u274c Error: {exc}"
+
