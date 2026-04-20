@@ -1,4 +1,4 @@
-"""Fondo Black Cat — Telegram bot entry point.
+"""Fondo Black Cat \u2014 Telegram bot entry point.
 
 Runs python-telegram-bot v21 (commands) + Telethon userbot (channel reads)
 + APScheduler (alert loop) in the same asyncio event loop.
@@ -33,7 +33,7 @@ from modules.telegram_intel import (
     stop_client as stop_telethon,
 )
 from modules.unlocks import fetch_unlocks
-from modules.bounce_tech import fetch_bounce_tech
+from modules.bounce_tech import detect_closes as bt_detect_closes, fetch_bounce_tech
 from modules.gmail_intel import scan_gmail_unread
 from modules.x_intel import fetch_x_intel
 from modules.flywheel import compute_flywheel
@@ -46,11 +46,11 @@ from utils.telegram import send_long_message
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+    format="%(asctime)s %(levelname)s %(name)s \u2014 %(message)s",
 )
 log = logging.getLogger("fondo-blackcat")
 
-# Persistent keyboard — todos los comandos accesibles con un tap.
+# Persistent keyboard \u2014 todos los comandos accesibles con un tap.
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("/reporte"), KeyboardButton("/posiciones")],
@@ -67,37 +67,53 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
 # Runtime state for /alertas toggle
 _alerts_enabled = {"value": ENABLE_ALERTS}
 
-# Set to False if Telethon fails to init — commands skip channel intel gracefully
+# Set to False if Telethon fails to init \u2014 commands skip channel intel gracefully
 _telethon_ok = True
 
 
-# ─── Commands ─────────────────────────────────────────────────────────────────────
+# \u2500\u2500\u2500 Commands \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 
 @authorized
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
-        "U0001f408‍⬛ Fondo Black Cat — analista personal\n\n"
-        "Keyboard — todos los comandos:\n"
-        "/reporte — TODO-EN-UNO: timeline + posiciones + análisis\n"
-        "/posiciones — snapshot rápido (wallets + HF)\n"
-        "/flywheel — pair trade HL (LONG HYPE / SHORT UETH)\n"
-        "/liqcalc — matriz liq HYPE × deuda\n"
-        "/timeline — timeline X 48h (154 cuentas)\n"
-        "/tesis — estado de la tesis macro\n"
-        "/hf — Health Factor de HyperLend\n"
-        "/kill — kill scenarios de cada posición\n"
-        "/pnl — realized PnL 7D / 30D / YTD\n"
-        "/log — últimas 20 entradas del position log\n"
-        "/alertas — toggle alertas automáticas (on/off)\n"
+        "\U0001f408\u200d\u2b1b Fondo Black Cat \u2014 analista personal\n\n"
+        "Keyboard \u2014 todos los comandos:\n"
+        "/reporte \u2014 TODO-EN-UNO: timeline + posiciones + an\u00e1lisis\n"
+        "/posiciones \u2014 snapshot r\u00e1pido (wallets + HF)\n"
+        "/flywheel \u2014 pair trade HL (LONG HYPE / SHORT UETH)\n"
+        "/liqcalc \u2014 matriz liq HYPE \u00d7 deuda\n"
+        "/timeline \u2014 timeline X 48h (154 cuentas)\n"
+        "/tesis \u2014 estado de la tesis macro\n"
+        "/hf \u2014 Health Factor de HyperLend\n"
+        "/kill \u2014 kill scenarios de cada posici\u00f3n\n"
+        "/pnl \u2014 realized PnL 7D / 30D / YTD\n"
+        "/log \u2014 \u00faltimas 20 entradas del position log\n"
+        "/alertas \u2014 toggle alertas autom\u00e1ticas (on/off)\n"
     )
     await update.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
 async def cmd_posiciones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("⏳ Snapshot...", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text("\u23f3 Snapshot...", reply_markup=MAIN_KEYBOARD)
     wallets, hl, bt = await asyncio.gather(fetch_all_wallets(), fetch_all_hyperlend(), fetch_bounce_tech())
+    # Detect Bounce Tech position closes
+    bt_closes = bt_detect_closes(bt)
+    for close in bt_closes:
+        close_msg = (
+            f"\U0001f514 Bounce Tech {close['direction']} {close['asset']} "
+            f"{close['leverage']} CERRADA.\n"
+            f"\u00daltimo valor registrado: ${close['last_value_usd']:,.2f}"
+        )
+        await update.message.reply_text(close_msg, reply_markup=MAIN_KEYBOARD)
+        position_log.append(
+            kind="CLOSE",
+            message=f"Bounce Tech {close['direction']} {close['asset']} {close['leverage']} closed. Last value: ${close['last_value_usd']:,.2f}",
+            asset=close["asset"],
+            amount_usd=0,
+            wallet_label="Bounce Tech",
+        )
     await send_long_message(update, format_quick_positions(wallets, hl, bounce_tech=bt), reply_markup=MAIN_KEYBOARD)
 
 
@@ -109,19 +125,19 @@ async def cmd_hf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 @authorized
 async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Reporte TODO-EN-UNO: timeline X + posiciones + análisis Claude.
+    """Reporte TODO-EN-UNO: timeline X + posiciones + an\u00e1lisis Claude.
 
     Emite 3 mensajes secuenciales:
-    1. Timeline — top 40 tweets por engagement de las últimas 48h (154 cuentas curadas)
-    2. Posiciones — snapshot rápido de wallets + HyperLend + Bounce Tech
-    3. Análisis — reporte completo generado por Claude (market + intel + tesis)
+    1. Timeline \u2014 top 40 tweets por engagement de las \u00faltimas 48h (154 cuentas curadas)
+    2. Posiciones \u2014 snapshot r\u00e1pido de wallets + HyperLend + Bounce Tech
+    3. An\u00e1lisis \u2014 reporte completo generado por Claude (market + intel + tesis)
     """
     await update.message.reply_text(
-        "⏳ Generando reporte completo: timeline + posiciones + análisis (30-90s)...",
+        "\u23f3 Generando reporte completo: timeline + posiciones + an\u00e1lisis (30-90s)...",
         reply_markup=MAIN_KEYBOARD,
     )
 
-    # Todos los fetches en paralelo (Telethon separado — puede estar deshabilitado).
+    # Todos los fetches en paralelo (Telethon separado \u2014 puede estar deshabilitado).
     portfolio, hl, market, unlocks, x_intel, gmail_intel, bt = await asyncio.gather(
         fetch_all_wallets(),
         fetch_all_hyperlend(),
@@ -141,25 +157,25 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         intel_legacy = {"status": "error", "error": "telethon_disabled"}
         intel_unread = {"status": "error", "error": "telethon_disabled"}
 
-    # ─── Sección 1: Timeline X (48h) — omitir si todas las fuentes fallaron ──
+    # \u2500\u2500\u2500 Secci\u00f3n 1: Timeline X (48h) \u2014 omitir si todas las fuentes fallaron \u2500\u2500
     x_intel_ok = isinstance(x_intel, dict) and x_intel.get("status") == "ok"
     if x_intel_ok:
         timeline_text = format_timeline(x_intel, top_n=40)
         await send_long_message(
             update,
-            "U0001f4e1 TIMELINE X — 48H\n" + ("─" * 30) + "\n\n" + timeline_text,
+            "\U0001f4e1 TIMELINE X \u2014 48H\n" + ("\u2500" * 30) + "\n\n" + timeline_text,
             reply_markup=MAIN_KEYBOARD,
         )
 
-    # ─── Sección 2: Posiciones ─────────────────────────────────────────
+    # \u2500\u2500\u2500 Secci\u00f3n 2: Posiciones \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     positions_text = format_quick_positions(portfolio, hl, bounce_tech=bt)
     await send_long_message(
         update,
-        "U0001f4bc POSICIONES\n" + ("─" * 30) + "\n\n" + positions_text,
+        "\U0001f4bc POSICIONES\n" + ("\u2500" * 30) + "\n\n" + positions_text,
         reply_markup=MAIN_KEYBOARD,
     )
 
-    # ─── Sección 3: Análisis Claude ──────────────────────────────────────
+    # \u2500\u2500\u2500 Secci\u00f3n 3: An\u00e1lisis Claude \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     merged_intel: dict = {}
     if isinstance(intel_legacy, dict):
         merged_intel.update(intel_legacy)
@@ -176,7 +192,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     await send_long_message(
         update,
-        "U0001f9e0 ANÁLISIS COMPLETO\n" + ("─" * 30) + "\n\n" + report,
+        "\U0001f9e0 AN\u00c1LISIS COMPLETO\n" + ("\u2500" * 30) + "\n\n" + report,
         reply_markup=MAIN_KEYBOARD,
     )
 
@@ -186,7 +202,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Nota si timeline X no disponible
     if not x_intel_ok:
         await update.message.reply_text(
-            "ℹ️ Nota: Timeline X no disponible en este reporte (todas las fuentes fallaron). "
+            "\u2139\ufe0f Nota: Timeline X no disponible en este reporte (todas las fuentes fallaron). "
             "Verificar X_BEARER_TOKEN y disponibilidad de Nitter/RSSHub.",
             reply_markup=MAIN_KEYBOARD,
         )
@@ -194,7 +210,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 @authorized
 async def cmd_tesis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("⏳ Analizando estado de la tesis...", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text("\u23f3 Analizando estado de la tesis...", reply_markup=MAIN_KEYBOARD)
     portfolio, hl, market = await asyncio.gather(
         fetch_all_wallets(),
         fetch_all_hyperlend(),
@@ -207,7 +223,7 @@ async def cmd_tesis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 @authorized
 async def cmd_timeline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "⏳ Leyendo últimas 48h de tu timeline X (154 cuentas)...",
+        "\u23f3 Leyendo \u00faltimas 48h de tu timeline X (154 cuentas)...",
         reply_markup=MAIN_KEYBOARD,
     )
     x_intel = await fetch_x_intel(hours=48)
@@ -218,63 +234,67 @@ async def cmd_timeline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 @authorized
 async def cmd_alertas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _alerts_enabled["value"] = not _alerts_enabled["value"]
-    estado = "ON ✅" if _alerts_enabled["value"] else "OFF ⛔"
-    await update.message.reply_text(f"Alertas automáticas: {estado}", reply_markup=MAIN_KEYBOARD)
+    estado = "ON \u2705" if _alerts_enabled["value"] else "OFF \u26d4"
+    await update.message.reply_text(f"Alertas autom\u00e1ticas: {estado}", reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
 async def cmd_flywheel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("⏳ Calculando flywheel pair trade...", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text("\u23f3 Calculando flywheel pair trade...", reply_markup=MAIN_KEYBOARD)
     try:
         text = await compute_flywheel()
     except Exception as exc:  # noqa: BLE001
         log.exception("flywheel failed")
-        text = f"❌ /flywheel falló: {exc}"
+        text = f"\u274c /flywheel fall\u00f3: {exc}"
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
 async def cmd_liqcalc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("⏳ Calculando matriz de liquidación...", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text("\u23f3 Calculando matriz de liquidaci\u00f3n...", reply_markup=MAIN_KEYBOARD)
     try:
         text = await compute_liq_matrix()
     except Exception as exc:  # noqa: BLE001
         log.exception("liqcalc failed")
-        text = f"❌ /liqcalc falló: {exc}"
+        text = f"\u274c /liqcalc fall\u00f3: {exc}"
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
 async def cmd_kill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("⏳ Evaluando kill scenarios...", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text("\u23f3 Evaluando kill scenarios...", reply_markup=MAIN_KEYBOARD)
     try:
         text = await compute_kill_scenarios()
     except Exception as exc:  # noqa: BLE001
         log.exception("kill scenarios failed")
-        text = f"❌ /kill falló: {exc}"
+        text = f"\u274c /kill fall\u00f3: {exc}"
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
 async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = context.args or []
+    if args and args[0].lower() == "ciclo":
+        text = pnl_tracker.build_cycle_summary()
+        await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+        return
     if args and args[0].lower() == "add":
         try:
             params = pnl_tracker.parse_manual_add(args[1:])
             row_id = pnl_tracker.record_event(**params)
             await update.message.reply_text(
-                f"✅ PnL event #{row_id} registered ({params['category']} "
+                f"\u2705 PnL event #{row_id} registered ({params['category']} "
                 f"{params['asset']} ${params['amount_usd']:.2f}).",
                 reply_markup=MAIN_KEYBOARD,
             )
         except ValueError as exc:
-            await update.message.reply_text(f"❌ {exc}", reply_markup=MAIN_KEYBOARD)
+            await update.message.reply_text(f"\u274c {exc}", reply_markup=MAIN_KEYBOARD)
         return
     try:
         text = pnl_tracker.build_summary()
     except Exception as exc:  # noqa: BLE001
         log.exception("pnl failed")
-        text = f"❌ /pnl falló: {exc}"
+        text = f"\u274c /pnl fall\u00f3: {exc}"
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
@@ -286,22 +306,22 @@ async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             params = position_log.parse_manual_add(args[1:])
             row_id = position_log.append(**params)
             await update.message.reply_text(
-                f"✅ Log entry #{row_id} agregada ({params['kind']}).",
+                f"\u2705 Log entry #{row_id} agregada ({params['kind']}).",
                 reply_markup=MAIN_KEYBOARD,
             )
         except ValueError as exc:
-            await update.message.reply_text(f"❌ {exc}", reply_markup=MAIN_KEYBOARD)
+            await update.message.reply_text(f"\u274c {exc}", reply_markup=MAIN_KEYBOARD)
         return
     try:
         entries = position_log.last_n(20)
         text = position_log.format_log(entries)
     except Exception as exc:  # noqa: BLE001
         log.exception("log failed")
-        text = f"❌ /log falló: {exc}"
+        text = f"\u274c /log fall\u00f3: {exc}"
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
-# ─── Scheduler job ──────────────────────────────────────────────────────────────
+# \u2500\u2500\u2500 Scheduler job \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 async def _alert_job(application: Application) -> None:
     if not _alerts_enabled["value"]:
@@ -312,19 +332,19 @@ async def _alert_job(application: Application) -> None:
         log.exception("Alert cycle failed")
 
 
-# ─── Lifecycle hooks ────────────────────────────────────────────────────────────
+# \u2500\u2500\u2500 Lifecycle hooks \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 async def post_init(application: Application) -> None:
     global _telethon_ok
     try:
         client = await get_telethon()
         if client is None:
-            log.warning("Telethon NOT initialized — /reporte will run without channel intel.")
+            log.warning("Telethon NOT initialized \u2014 /reporte will run without channel intel.")
             _telethon_ok = False
         else:
             log.info("Telethon client connected.")
     except Exception:
-        log.exception("Telethon init failed — Telegram intel disabled")
+        log.exception("Telethon init failed \u2014 Telegram intel disabled")
         _telethon_ok = False
 
     if ENABLE_ALERTS:
@@ -350,7 +370,7 @@ async def post_shutdown(application: Application) -> None:
     await stop_telethon()
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
+# \u2500\u2500\u2500 Main \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 
 def main() -> None:
@@ -389,4 +409,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
