@@ -1,21 +1,25 @@
 """Bounce Tech — query leveraged token positions on HyperEVM.
 
 Bounce Tech deploys ERC-20 leveraged tokens (up to 10x, no liquidation risk)
-that auto-rebalance via Hyperliquid perps.  We call the LeveragedTokenHelper
+that auto-rebalance via Hyperliquid perps. We call the LeveragedTokenHelper
 contract to fetch all tokens a wallet holds plus their exchange rates.
 
 Env / config:
-  HYPEREVM_RPC  — HyperEVM JSON-RPC (default https://rpc.hyperliquid.xyz/evm)
+    HYPEREVM_RPC — HyperEVM JSON-RPC (default https://rpc.hyperliquid.xyz/evm)
 """
+
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+from datetime import datetime, timezone
 from typing import Any
 
 from web3 import Web3
 
-from config import FUND_WALLETS, HYPEREVM_RPC
+from config import DATA_DIR, FUND_WALLETS, HYPEREVM_RPC
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +69,32 @@ LT_HELPER_ABI: list[dict[str, Any]] = [
     }
 ]
 
+
+# ─── BT state persistence for close detection ──────────────────────────────
+BT_STATE_FILE = os.path.join(DATA_DIR, "bt_state.json")
+
+
+def _load_bt_state() -> dict[str, Any]:
+    """Load previous Bounce Tech state from JSON."""
+    if not os.path.isfile(BT_STATE_FILE):
+        return {}
+    try:
+        with open(BT_STATE_FILE) as f:
+            return json.load(f)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _save_bt_state(state: dict[str, Any]) -> None:
+    """Save current Bounce Tech state to JSON."""
+    try:
+        os.makedirs(os.path.dirname(BT_STATE_FILE), exist_ok=True)
+        with open(BT_STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2, default=str)
+    except Exception:  # noqa: BLE001
+        log.exception("Could not save BT state")
+
+
 def _query_wallet_sync(wallet: str) -> dict[str, Any]:
     """Synchronous call to LeveragedTokenHelper.getLeveragedTokens(wallet, true)."""
     try:
@@ -77,9 +107,9 @@ def _query_wallet_sync(wallet: str) -> dict[str, Any]:
         positions: list[dict[str, Any]] = []
         for tok in raw:
             # tok is a tuple matching LeveragedTokenData components
-            leverage = tok[3]  # targetLeverage (uint256, 1e18 scaled)
+            leverage = tok[3]       # targetLeverage (uint256, 1e18 scaled)
             exchange_rate = tok[5]  # exchangeRate (uint256, 1e18 scaled)
-            balance = tok[11]  # balanceOf (uint256, 1e18 scaled)
+            balance = tok[11]       # balanceOf (uint256, 1e18 scaled)
 
             if balance == 0:
                 continue
@@ -92,9 +122,9 @@ def _query_wallet_sync(wallet: str) -> dict[str, Any]:
 
             positions.append({
                 "token_address": tok[0],  # leveragedToken address
-                "asset": tok[2],  # targetAsset (e.g. "HYPE", "BTC")
+                "asset": tok[2],          # targetAsset (e.g. "HYPE", "BTC")
                 "leverage": f"{lev_f:.0f}x",
-                "is_long": tok[4],  # bool
+                "is_long": tok[4],        # bool
                 "direction": "LONG" if tok[4] else "SHORT",
                 "balance": bal_f,
                 "exchange_rate": rate_f,
@@ -109,7 +139,6 @@ def _query_wallet_sync(wallet: str) -> dict[str, Any]:
             "positions": positions,
             "count": len(positions),
         }
-
     except Exception as exc:  # noqa: BLE001
         log.exception("Bounce Tech query failed for %s", wallet)
         return {"status": "error", "wallet": wallet, "error": str(exc)}
@@ -129,6 +158,52 @@ async def fetch_bounce_tech(wallet: str | None = None) -> list[dict[str, Any]]:
     results = await asyncio.gather(
         *(asyncio.to_thread(_query_wallet_sync, w) for w in wallets)
     )
-
     # Filter to wallets that actually have positions
     return [r for r in results if r.get("count", 0) > 0 or r.get("status") == "error"]
+
+
+def detect_closes(current_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Compare current BT positions with previous state, detect closes.
+
+    Returns list of close event dicts for positions that disappeared.
+    Always saves current state for next comparison.
+    """
+    prev = _load_bt_state()
+    prev_positions = prev.get("positions", {})
+
+    # Build current position map
+    current_positions: dict[str, dict[str, Any]] = {}
+    for r in current_results:
+        if r.get("status") != "ok":
+            continue
+        for p in r.get("positions", []):
+            addr = p.get("token_address", "")
+            if addr:
+                current_positions[addr] = {
+                    "asset": p.get("asset", "?"),
+                    "direction": p.get("direction", "?"),
+                    "leverage": p.get("leverage", "?"),
+                    "value_usd": p.get("value_usd", 0),
+                    "balance": p.get("balance", 0),
+                }
+
+    # Detect closes (positions in prev but not in current)
+    closes: list[dict[str, Any]] = []
+    for addr, prev_p in prev_positions.items():
+        if addr not in current_positions:
+            closes.append({
+                "token_address": addr,
+                "asset": prev_p.get("asset", "?"),
+                "direction": prev_p.get("direction", "?"),
+                "leverage": prev_p.get("leverage", "?"),
+                "last_value_usd": prev_p.get("value_usd", 0),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
+    # Save current state
+    _save_bt_state({
+        "positions": current_positions,
+        "last_update": datetime.now(timezone.utc).isoformat(),
+    })
+
+    return closes
