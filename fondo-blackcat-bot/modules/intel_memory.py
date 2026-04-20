@@ -1,9 +1,8 @@
 """Persistent memory of all intel gathered by the bot.
 
-Every time the bot reads Telegram, X, Gmail, or any data source —
-even during failed /reporte executions — the raw intel gets saved here.
+Every time the bot reads Telegram, X, Gmail, or any data source
+— even during failed /reporte executions — the raw intel gets saved here.
 """
-
 import json
 import logging
 import os
@@ -36,12 +35,17 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 
-def save_intel(source: str, raw_text: str, parsed_summary: str | None = None, tags: list[str] | None = None) -> int:
+def save_intel(
+    source: str,
+    raw_text: str,
+    parsed_summary: str | None = None,
+    tags: list[str] | None = None,
+) -> int:
     """Save intel entry to database."""
     conn = _get_conn()
     cur = conn.execute(
         "INSERT INTO intel_memory (timestamp_utc, source, raw_text, parsed_summary, tags) VALUES (?, ?, ?, ?, ?)",
-        (datetime.now(timezone.utc).isoformat(), source, raw_text, parsed_summary, json.dumps(tags or []))
+        (datetime.now(timezone.utc).isoformat(), source, raw_text, parsed_summary, json.dumps(tags or [])),
     )
     conn.commit()
     row_id = cur.lastrowid
@@ -56,9 +60,10 @@ def get_recent_intel(hours: int = 24) -> dict[str, list[dict]]:
     cutoff = cutoff_dt.isoformat()
     rows = conn.execute(
         "SELECT * FROM intel_memory WHERE timestamp_utc >= ? ORDER BY timestamp_utc DESC",
-        (cutoff,)
+        (cutoff,),
     ).fetchall()
     conn.close()
+
     grouped: dict[str, list[dict]] = {}
     for r in rows:
         source = r["source"]
@@ -72,6 +77,36 @@ def get_unprocessed_count() -> int:
     count = conn.execute("SELECT COUNT(*) FROM intel_memory WHERE processed_for_thesis = 0").fetchone()[0]
     conn.close()
     return count
+
+
+def get_unprocessed_intel(limit: int = 50) -> list[dict]:
+    """Get unprocessed intel items for the intel_processor.
+
+    Returns list of dicts with id, source, raw_text, timestamp_utc.
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT id, source, raw_text, timestamp_utc FROM intel_memory "
+        "WHERE processed_for_thesis = 0 ORDER BY timestamp_utc ASC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_intel_item(
+    item_id: int,
+    parsed_summary: str | None = None,
+    tags: list[str] | None = None,
+) -> None:
+    """Update a single intel item with parsed data from intel_processor."""
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE intel_memory SET parsed_summary = ?, tags = ? WHERE id = ?",
+        (parsed_summary, json.dumps(tags or []), item_id),
+    )
+    conn.commit()
+    conn.close()
 
 
 def mark_as_processed(ids: list[int]) -> None:
@@ -88,29 +123,31 @@ def mark_as_processed(ids: list[int]) -> None:
 def format_intel_summary(hours: int = 24, source_filter: str | None = None) -> str:
     """Format intel memory for display in Telegram."""
     grouped = get_recent_intel(hours)
+
     if source_filter:
         grouped = {k: v for k, v in grouped.items() if k == source_filter}
 
     if not grouped:
-        return f"📥 Sin intel registrada en las últimas {hours}h"
+        return f"\U0001f4e5 Sin intel registrada en las \u00faltimas {hours}h"
 
     total = sum(len(v) for v in grouped.values())
-    lines = [f"📥 INTEL MEMORY — últimas {hours}h ({total} items)\n"]
+    lines = [f"\U0001f4e5 INTEL MEMORY \u2014 \u00faltimas {hours}h ({total} items)\n"]
 
     for source, items in sorted(grouped.items()):
         lines.append(f"{source.upper()} ({len(items)} items):")
-        for item in items[:10]:  # Show max 10 per source
+        for item in items[:10]:
             text_preview = (item.get("raw_text") or "")[:80]
             ts = item.get("timestamp_utc", "")[:16]
             tags = json.loads(item.get("tags") or "[]")
             tag_str = f" [{', '.join(tags)}]" if tags else ""
-            lines.append(f"  {ts} —{tag_str} {text_preview}")
+            lines.append(f"  {ts} \u2014{tag_str} {text_preview}")
         if len(items) > 10:
-            lines.append(f"  ... y {len(items) - 10} más")
+            lines.append(f"  ... y {len(items) - 10} m\u00e1s")
         lines.append("")
 
     unprocessed = get_unprocessed_count()
-    lines.append(f"Status: {total - unprocessed}/{total} procesados por análisis IA")
+    lines.append(f"Status: {total - unprocessed}/{total} procesados por an\u00e1lisis IA")
+
     return "\n".join(lines)
 
 
