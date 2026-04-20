@@ -8,19 +8,53 @@ Also fetches spot token balances (kHYPE, PEAR, etc.).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+from datetime import datetime, timezone
 from typing import Any
 
-from config import FUND_WALLETS, HIP3_DEXES, HYPERLIQUID_API
+from config import FUND_WALLETS, HIP3_DEXES, HYPERLIQUID_API, WALLET_FETCH_TIMEOUT, DATA_DIR
 from utils.http import post_json
 
 log = logging.getLogger(__name__)
 
 INFO_URL = f"{HYPERLIQUID_API}/info"
 
+# Module-level cache: {wallet_address: {cached_data}}
+_wallet_cache: dict[str, dict] = {}
+_WALLET_CACHE_FILE = os.path.join(DATA_DIR, "wallet_cache.json")
+
+
+def _load_wallet_cache() -> None:
+    """Load wallet cache from disk on startup."""
+    global _wallet_cache
+    if os.path.isfile(_WALLET_CACHE_FILE):
+        try:
+            with open(_WALLET_CACHE_FILE) as f:
+                _wallet_cache = json.load(f)
+            log.info("Loaded wallet cache for %d wallets", len(_wallet_cache))
+        except Exception as e:
+            log.warning("Could not load wallet cache: %s", e)
+            _wallet_cache = {}
+
+
+def _save_wallet_cache() -> None:
+    """Persist wallet cache to disk."""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(_WALLET_CACHE_FILE, "w") as f:
+            json.dump(_wallet_cache, f, indent=2, default=str)
+    except Exception as e:
+        log.warning("Could not save wallet cache: %s", e)
+
+
+# Load cache on module import
+_load_wallet_cache()
+
 
 async def _info(payload: dict[str, Any]) -> Any:
-    return await post_json(INFO_URL, payload)
+    return await post_json(INFO_URL, payload, timeout=WALLET_FETCH_TIMEOUT)
 
 
 async def clearinghouse_state(wallet: str, dex: str | None = None) -> dict[str, Any]:
@@ -159,46 +193,82 @@ async def _fetch_spot(wallet: str) -> list[dict[str, Any]]:
 
 
 async def fetch_wallet(wallet: str, label: str) -> dict[str, Any]:
-    """Fetch one wallet across main + HIP-3 dexes + spot; returns {status, data|error}."""
-    try:
-        dex_keys: list[str | None] = [None] + list(HIP3_DEXES)
-        # Fetch all perp dexes + spot concurrently
-        dex_tasks = [_fetch_dex(wallet, d) for d in dex_keys]
-        spot_task = _fetch_spot(wallet)
-        all_results = await asyncio.gather(*dex_tasks, spot_task)
-        spot_balances = all_results[-1]  # last result is spot
-        dex_results = all_results[:-1]   # everything else is perp dexes
+    """Fetch one wallet across main + HIP-3 dexes + spot with retry logic.
 
-        positions: list[dict[str, Any]] = []
-        account_value = 0.0
-        total_ntl_pos = 0.0
-        total_margin_used = 0.0
-        withdrawable = 0.0
-        unrealized_total = 0.0
-        for r in dex_results:
-            positions.extend(r.get("positions") or [])
-            account_value += r.get("account_value", 0.0)
-            total_ntl_pos += r.get("total_ntl_pos", 0.0)
-            total_margin_used += r.get("total_margin_used", 0.0)
-            withdrawable += r.get("withdrawable", 0.0)
-            unrealized_total += r.get("unrealized_pnl_total", 0.0)
+    Returns {status, data|error, stale_from_cache}.
+    Implements retry with exponential backoff (1s, 2s, 4s).
+    Falls back to cached value on failure.
+    """
+    max_retries = 3
+    retry_delays = [1, 2, 4]  # exponential backoff in seconds
 
-        summary = {
-            "wallet": wallet,
-            "label": label,
-            "account_value": account_value,
-            "total_ntl_pos": total_ntl_pos,
-            "total_margin_used": total_margin_used,
-            "cross_account_value": account_value,
-            "withdrawable": withdrawable,
-            "positions": positions,
-            "unrealized_pnl_total": unrealized_total,
-            "spot_balances": spot_balances,
+    for attempt in range(max_retries):
+        try:
+            dex_keys: list[str | None] = [None] + list(HIP3_DEXES)
+            # Fetch all perp dexes + spot concurrently
+            dex_tasks = [_fetch_dex(wallet, d) for d in dex_keys]
+            spot_task = _fetch_spot(wallet)
+            all_results = await asyncio.gather(*dex_tasks, spot_task)
+            spot_balances = all_results[-1]  # last result is spot
+            dex_results = all_results[:-1]   # everything else is perp dexes
+
+            positions: list[dict[str, Any]] = []
+            account_value = 0.0
+            total_ntl_pos = 0.0
+            total_margin_used = 0.0
+            withdrawable = 0.0
+            unrealized_total = 0.0
+            for r in dex_results:
+                positions.extend(r.get("positions") or [])
+                account_value += r.get("account_value", 0.0)
+                total_ntl_pos += r.get("total_ntl_pos", 0.0)
+                total_margin_used += r.get("total_margin_used", 0.0)
+                withdrawable += r.get("withdrawable", 0.0)
+                unrealized_total += r.get("unrealized_pnl_total", 0.0)
+
+            summary = {
+                "wallet": wallet,
+                "label": label,
+                "account_value": account_value,
+                "total_ntl_pos": total_ntl_pos,
+                "total_margin_used": total_margin_used,
+                "cross_account_value": account_value,
+                "withdrawable": withdrawable,
+                "positions": positions,
+                "unrealized_pnl_total": unrealized_total,
+                "spot_balances": spot_balances,
+            }
+
+            # Cache successful fetch
+            _wallet_cache[wallet] = summary
+            _save_wallet_cache()
+
+            return {"status": "ok", "data": summary}
+
+        except Exception as exc:
+            log.warning("Attempt %d/%d for wallet %s failed: %s", attempt + 1, max_retries, wallet, exc)
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delays[attempt])
+
+    # All retries exhausted — fall back to cache if available
+    if wallet in _wallet_cache:
+        cached = _wallet_cache[wallet]
+        log.warning("Using stale cache for wallet %s (fetch failed after %d retries)", wallet, max_retries)
+        return {
+            "status": "ok",
+            "data": cached,
+            "stale": True,
+            "stale_reason": "fetch_failed_after_retries"
         }
-        return {"status": "ok", "data": summary}
-    except Exception as exc:  # noqa: BLE001
-        log.exception("Error fetching wallet %s", wallet)
-        return {"status": "error", "wallet": wallet, "label": label, "error": str(exc)}
+
+    # No cache and fetch failed
+    log.error("Could not fetch wallet %s and no cache available", wallet)
+    return {
+        "status": "error",
+        "wallet": wallet,
+        "label": label,
+        "error": f"Fetch failed after {max_retries} retries and no cache available"
+    }
 
 
 async def fetch_all_wallets() -> list[dict[str, Any]]:
