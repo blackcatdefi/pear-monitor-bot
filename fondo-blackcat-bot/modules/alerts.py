@@ -1,4 +1,4 @@
-"""Periodic alert checks (HF, liquidation proximity, HYPE/BTC crashes).
+"""Periodic alert checks (HF, liquidation proximity, HYPE/BTC crashes, Trade del Ciclo DCA).
 
 Edge-triggered: keeps last alert state in data/alert_state.json to avoid spam.
 """
@@ -27,6 +27,15 @@ from utils.telegram import send_bot_message
 log = logging.getLogger(__name__)
 
 STATE_FILE = os.path.join(DATA_DIR, "alert_state.json")
+
+# Trade del Ciclo DCA levels
+CYCLE_DCA_LEVELS = [
+    {"price": 70_000, "label": "DCA Add 1", "margin": "$500"},
+    {"price": 63_000, "label": "DCA Add 2", "margin": "$750"},
+    {"price": 55_000, "label": "DCA Add 3", "margin": "$1,000"},
+]
+CYCLE_CRITICAL = 50_000  # Near liquidation zone
+CYCLE_TP_ZONE = 150_000  # Take profit zone
 
 
 def _load_state() -> dict[str, Any]:
@@ -73,18 +82,26 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
         hf = hld.get("health_factor")
         label = hld.get("label", "")
         wallet_addr = hld.get("wallet", "")
-        short_addr = wallet_addr[:6] + "…" + wallet_addr[-4:] if wallet_addr else ""
+        short_addr = wallet_addr[:6] + "\u2026" + wallet_addr[-4:] if wallet_addr else ""
         ident = f"{label} ({short_addr})" if label else short_addr
         wallet_key = wallet_addr[-8:] if wallet_addr else "unknown"
+
         if hf is not None and not math.isinf(hf):
-            # Round to 4 decimals to avoid float noise (e.g. 1.19999 displaying as 1.200)
+            # Round to 4 decimals to avoid float noise
             hf_r = round(hf, 4)
             if hf_r < HF_CRITICAL:  # strict <, exact threshold does NOT alert
-                await _emit(bot, f"🚨 HYPERLEND HF CRÍTICO: {hf_r:.4f} — {ident} — acción inmediata!")
+                await _emit(
+                    bot, f"hf_critical_{wallet_key}", state,
+                    f"\U0001f6a8 HYPERLEND HF CR\u00cdTICO: {hf_r:.4f} \u2014 {ident} \u2014 acci\u00f3n inmediata!"
+                )
             else:
                 _clear(state, f"hf_critical_{wallet_key}")
+
             if hf_r < HF_WARN:  # strict <, exact 1.20 does NOT alert
-                await _emit(bot, f"⚠️ HYPERLEND HF: {hf_r:.4f} — {ident} — por debajo de {HF_WARN:.2f}")
+                await _emit(
+                    bot, f"hf_warn_{wallet_key}", state,
+                    f"\u26a0\ufe0f HYPERLEND HF: {hf_r:.4f} \u2014 {ident} \u2014 por debajo de {HF_WARN:.2f}"
+                )
             else:
                 _clear(state, f"hf_warn_{wallet_key}")
                 _clear(state, f"hf_critical_{wallet_key}")
@@ -93,24 +110,61 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
     hype_px = await get_spot_price("HYPE")
     if hype_px is not None:
         if hype_px < HYPE_CRITICAL:
-            await _emit(bot, "hype_critical", state, f"🔴 HYPE @ ${hype_px:.2f} — VERIFICAR HF INMEDIATAMENTE!")
+            await _emit(bot, "hype_critical", state,
+                        f"\U0001f534 HYPE @ ${hype_px:.2f} \u2014 VERIFICAR HF INMEDIATAMENTE!")
         else:
             _clear(state, "hype_critical")
+
         if hype_px < HYPE_WARN:
-            await _emit(bot, "hype_warn", state, f"🚨 HYPE @ ${hype_px:.2f} — impacto directo en colateral HyperLend")
+            await _emit(bot, "hype_warn", state,
+                        f"\U0001f6a8 HYPE @ ${hype_px:.2f} \u2014 impacto directo en colateral HyperLend")
         else:
             _clear(state, "hype_warn")
             _clear(state, "hype_critical")
 
-    # 3. BTC crash
+    # 3. BTC crash (legacy)
     btc_px = await get_spot_price("BTC")
     if btc_px is not None:
         if btc_px < BTC_WARN:
-            await _emit(bot, "btc_warn", state, f"🚨 BTC @ ${btc_px:,.0f} — debajo de ${BTC_WARN:,.0f}, target ZordXBT $46K activo")
+            await _emit(bot, "btc_warn", state,
+                        f"\U0001f6a8 BTC @ ${btc_px:,.0f} \u2014 debajo de ${BTC_WARN:,.0f}")
         else:
             _clear(state, "btc_warn")
 
-    # 4. Liquidation proximity (per position)
+    # 4. Trade del Ciclo — BTC DCA dip alerts
+    if btc_px is not None:
+        for level in CYCLE_DCA_LEVELS:
+            key = f"cycle_dca_{level['price']}"
+            if btc_px <= level["price"]:
+                await _emit(
+                    bot, key, state,
+                    f"\U0001f4c9 Dip Alert Trade del Ciclo: BTC @ ${btc_px:,.0f} \u2014 "
+                    f"activar {level['label']} ({level['margin']} margin)"
+                )
+            else:
+                _clear(state, key)
+
+        # Critical zone (near liquidation)
+        if btc_px <= CYCLE_CRITICAL:
+            await _emit(
+                bot, "cycle_critical", state,
+                f"\u26a0\ufe0f ZONA CR\u00cdTICA Trade del Ciclo: BTC @ ${btc_px:,.0f} \u2014 "
+                f"HF del trade cerca de liquidaci\u00f3n!"
+            )
+        else:
+            _clear(state, "cycle_critical")
+
+        # TP zone
+        if btc_px >= CYCLE_TP_ZONE:
+            await _emit(
+                bot, "cycle_tp", state,
+                f"\U0001f3af TP Zone Trade del Ciclo: BTC @ ${btc_px:,.0f} \u2014 "
+                f"evaluar cierre parcial"
+            )
+        else:
+            _clear(state, "cycle_tp")
+
+    # 5. Liquidation proximity (per position)
     wallets = await fetch_all_wallets()
     for w in wallets:
         if w.get("status") != "ok":
@@ -125,12 +179,12 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
             if current == 0:
                 continue
             distance = abs(current - liq_px) / current
-            short_addr = d["wallet"][:6] + "…" + d["wallet"][-4:]
+            short_addr = d["wallet"][:6] + "\u2026" + d["wallet"][-4:]
             key = f"liq_{d['wallet']}_{p['coin']}"
             if distance < LIQ_PROXIMITY_PCT:
                 msg = (
-                    f"⚠️ {p['coin']} {p['side']} en {d['label']} ({short_addr}) "
-                    f"a {distance*100:.1f}% de liquidación (curr ${current:.4f} / liq ${liq_px:.4f})"
+                    f"\u26a0\ufe0f {p['coin']} {p['side']} en {d['label']} ({short_addr}) "
+                    f"a {distance*100:.1f}% de liquidaci\u00f3n (curr ${current:.4f} / liq ${liq_px:.4f})"
                 )
                 await _emit(bot, key, state, msg)
             else:
