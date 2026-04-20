@@ -1,16 +1,18 @@
 """PnL tracker — realized PnL, transfers, withdrawals (SQLite-backed).
 
 Three event categories:
-  • CLOSED    — realized PnL from a closed position (positive or negative $)
-  • TRANSFER  — movement between own wallets; neutral for PnL accounting
-  • WITHDRAW  — capital removed from the fund; NOT counted as PnL
+• CLOSED  — realized PnL from a closed position (positive or negative $)
+• TRANSFER — movement between own wallets; neutral for PnL accounting
+• WITHDRAW — capital removed from the fund; NOT counted as PnL
 
 Commands:
-  /pnl             → 7D / 30D / YTD summaries
-  /pnl add ...     → record a new event (one-off manual entry; future work)
+    /pnl       → 7D / 30D / YTD summaries
+    /pnl add ... → record a new event (one-off manual entry; future work)
+    /pnl ciclo → Trade del Ciclo detailed report
 
 Storage: sqlite3 at DATA_DIR/pnl.db, single table `pnl_events`.
 """
+
 from __future__ import annotations
 
 import logging
@@ -91,6 +93,39 @@ def _sum_by_category(since: datetime | None) -> dict[str, float]:
         c.close()
 
 
+def _query_cycle_events(since: datetime | None = None) -> list[dict[str, Any]]:
+    """Query PnL events related to Trade del Ciclo."""
+    c = _conn()
+    try:
+        if since:
+            rows = c.execute(
+                "SELECT id,ts,category,asset,amount_usd,wallet_label,notes "
+                "FROM pnl_events WHERE (notes LIKE '%trade_del_ciclo%' OR notes LIKE '%Trade del Ciclo%') "
+                "AND ts >= ? ORDER BY ts DESC",
+                (since.isoformat(),),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT id,ts,category,asset,amount_usd,wallet_label,notes "
+                "FROM pnl_events WHERE notes LIKE '%trade_del_ciclo%' OR notes LIKE '%Trade del Ciclo%' "
+                "ORDER BY ts DESC",
+            ).fetchall()
+        return [
+            {
+                "id": r[0],
+                "ts": r[1],
+                "category": r[2],
+                "asset": r[3],
+                "amount_usd": r[4],
+                "wallet_label": r[5],
+                "notes": r[6],
+            }
+            for r in rows
+        ]
+    finally:
+        c.close()
+
+
 def _fmt_usd(v: float) -> str:
     sign = "-" if v < 0 else "+"
     av = abs(v)
@@ -99,6 +134,41 @@ def _fmt_usd(v: float) -> str:
     if av >= 1_000:
         return f"{sign}${av/1_000:.1f}K"
     return f"{sign}${av:.2f}"
+
+
+def build_cycle_summary() -> str:
+    """Build detailed Trade del Ciclo PnL report for /pnl ciclo."""
+    events = _query_cycle_events()
+    if not events:
+        return (
+            "📊 TRADE DEL CICLO — PNL\n"
+            + "─" * 40 + "\n"
+            "Sin eventos registrados aún.\n"
+            "Los cierres parciales/totales se registran automáticamente.\n"
+            "Manual: /pnl add closed BTC <amount> trade_del_ciclo <notes>"
+        )
+
+    total_realized = sum(
+        e["amount_usd"] for e in events if e["category"] == EVENT_CLOSED
+    )
+
+    lines = [
+        "📊 TRADE DEL CICLO — PNL",
+        "─" * 40,
+        f"  Realized PnL total: {_fmt_usd(total_realized)} ({len(events)} eventos)",
+        "",
+        "  Historial:",
+    ]
+    for e in events[:20]:
+        ts_short = e["ts"][:16] if e.get("ts") else "?"
+        notes_short = (e.get("notes") or "")[:60]
+        lines.append(
+            f"    [{ts_short}] {e['category']} {e.get('asset', '')} {_fmt_usd(e['amount_usd'])}"
+        )
+        if notes_short:
+            lines.append(f"      {notes_short}")
+
+    return "\n".join(lines)
 
 
 def build_summary() -> str:
@@ -118,9 +188,9 @@ def build_summary() -> str:
         withdraw = totals.get(EVENT_WITHDRAW, 0.0)
         return [
             f"  {label}",
-            f"    Realized PnL:  {_fmt_usd(closed)}",
-            f"    Transfers:     {_fmt_usd(transfer)}   (neutral — entre wallets)",
-            f"    Withdrawals:   {_fmt_usd(withdraw)}   (capital out, no PnL)",
+            f"    Realized PnL: {_fmt_usd(closed)}",
+            f"    Transfers: {_fmt_usd(transfer)} (neutral — entre wallets)",
+            f"    Withdrawals: {_fmt_usd(withdraw)} (capital out, no PnL)",
         ]
 
     lines: list[str] = []
@@ -134,12 +204,12 @@ def build_summary() -> str:
     lines.append("")
     lines.extend(_line("Histórico total", totals_all))
 
-    # Event count for context
     c = _conn()
     try:
         total_events = c.execute("SELECT COUNT(*) FROM pnl_events").fetchone()[0]
     finally:
         c.close()
+
     lines.append("")
     lines.append(f"Total events registrados: {total_events}")
     if total_events == 0:
@@ -147,17 +217,26 @@ def build_summary() -> str:
             "Tip: registrá eventos con `/pnl add closed <asset> <amount> [notes]` "
             "(o las variantes transfer / withdraw)."
         )
+
+    # Trade del Ciclo section
+    cycle_events = _query_cycle_events()
+    if cycle_events:
+        cycle_realized = sum(
+            e["amount_usd"] for e in cycle_events if e["category"] == EVENT_CLOSED
+        )
+        lines.append("")
+        lines.append("📊 TRADE DEL CICLO")
+        lines.append(f"  Realized PnL: {_fmt_usd(cycle_realized)} ({len(cycle_events)} eventos)")
+        lines.append("  Detalle completo: /pnl ciclo")
+
     return "\n".join(lines)
 
 
 def parse_manual_add(args: list[str]) -> dict[str, Any]:
-    """Parse `/pnl add <category> <asset> <amount> [notes...]`.
-
-    Returns dict suitable for record_event(), or raises ValueError.
-    """
+    """Parse `/pnl add <category> <asset> <amount> [wallet_label] [notes...]`."""
     if len(args) < 3:
         raise ValueError(
-            "Usage: /pnl add <closed|transfer|withdraw> <asset> <amount_usd> [notes]"
+            "Usage: /pnl add <closed|transfer|withdraw> <asset> <amount_usd> [wallet_label] [notes]"
         )
     cat_raw = args[0].upper()
     if cat_raw not in VALID_EVENTS:
@@ -167,10 +246,23 @@ def parse_manual_add(args: list[str]) -> dict[str, Any]:
         amount = float(args[2])
     except ValueError as exc:
         raise ValueError(f"amount_usd must be a number (got {args[2]!r})") from exc
-    notes = " ".join(args[3:]) if len(args) > 3 else None
+
+    wallet_label = None
+    notes = None
+
+    if len(args) > 3:
+        # Check if args[3] looks like wallet_label or notes
+        # If it contains known keywords, treat as notes; otherwise wallet_label
+        if args[3].lower() in ("trade_del_ciclo", "ciclo", "btc", "hype"):
+            notes = " ".join(args[3:])
+        else:
+            wallet_label = args[3]
+            notes = " ".join(args[4:]) if len(args) > 4 else None
+
     return {
         "category": cat_raw,
         "asset": asset,
         "amount_usd": amount,
+        "wallet_label": wallet_label,
         "notes": notes,
     }
