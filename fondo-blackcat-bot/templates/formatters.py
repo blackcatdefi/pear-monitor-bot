@@ -31,13 +31,17 @@ def _fmt_hf(v: float | None) -> str:
 def format_quick_positions(wallets: list[dict[str, Any]], hyperlend: list[dict[str, Any]] | dict[str, Any], bounce_tech: list[dict[str, Any]] | None = None) -> str:
     lines: list[str] = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    lines.append(f"📊 Snapshot Fondo Black Cat — {now}")
+    lines.append(f"U0001f4ca Snapshot Fondo Black Cat — {now}")
     lines.append("")
     lines.append("PORTFOLIO HYPERLIQUID")
+
     # Sort wallets by equity descending
     wallets = sorted(wallets, key=lambda w: (w.get("data", {}).get("account_value") or 0) if w.get("status") == "ok" else 0, reverse=True)
+
     total_eq = 0.0
     total_upnl = 0.0
+    all_spot: list[dict[str, Any]] = []
+
     for w in wallets:
         if w.get("status") != "ok":
             label = w.get("label", "?")
@@ -61,7 +65,33 @@ def format_quick_positions(wallets: list[dict[str, Any]], hyperlend: list[dict[s
         lines.append(f"  • {d['label']} {short}")
         lines.append(f"    Equity: {eq} | UPnL: {upnl} | Notional: {ntl}")
         lines.append(f"    {pos_summary}")
+        # Collect spot balances
+        spot = d.get("spot_balances") or []
+        for sb in spot:
+            sb["_wallet_label"] = d["label"]
+        all_spot.extend(spot)
+
     lines.append(f"  TOTAL: Equity {_fmt_usd(total_eq)} | UPnL {_fmt_usd(total_upnl)}")
+
+    # ── Spot token balances (kHYPE, PEAR, etc.) ──
+    if all_spot:
+        lines.append("")
+        lines.append("SPOT TOKENS")
+        # Group by coin
+        by_coin: dict[str, list[dict[str, Any]]] = {}
+        for sb in all_spot:
+            coin = sb.get("coin", "?")
+            by_coin.setdefault(coin, []).append(sb)
+        for coin, entries in sorted(by_coin.items()):
+            total_amount = sum(e.get("total", 0) for e in entries)
+            total_entry = sum(e.get("entry_ntl", 0) for e in entries)
+            if len(entries) == 1:
+                wallet_label = entries[0].get("_wallet_label", "")
+                lines.append(f"  • {coin}: {total_amount:.4f} (cost basis: {_fmt_usd(total_entry)}) [{wallet_label}]")
+            else:
+                lines.append(f"  • {coin}: {total_amount:.4f} total (cost basis: {_fmt_usd(total_entry)})")
+                for e in entries:
+                    lines.append(f"      {e.get('_wallet_label','?')}: {e.get('total',0):.4f}")
 
     # HyperLend section — supports both list (new) and dict (legacy) format
     lines.append("")
@@ -118,7 +148,7 @@ def format_quick_positions(wallets: list[dict[str, Any]], hyperlend: list[dict[s
             lines.append("BOUNCE TECH (Leveraged Tokens)")
             bt_total = 0.0
             for p in bt_positions:
-                direction = "🟢 LONG" if p.get("is_long") else "🔴 SHORT"
+                direction = "U0001f7e2 LONG" if p.get("is_long") else "U0001f534 SHORT"
                 asset = p.get("asset", "?")
                 lev = p.get("leverage", "?")
                 val = p.get("value_usd", 0.0)
@@ -144,10 +174,10 @@ def format_hf(hyperlend: list[dict[str, Any]] | dict[str, Any]) -> str:
         if coll < 0.01:
             continue
         hf = h.get("health_factor")
-        icon = "🟢"
+        icon = "U0001f7e2"
         if hf is not None and not math.isinf(hf):
             if hf < 1.10:
-                icon = "🚨"
+                icon = "U0001f6a8"
             elif hf < 1.20:
                 icon = "⚠️"
         label = h.get("label") or hl.get("label") or "—"
@@ -168,7 +198,7 @@ def format_hf(hyperlend: list[dict[str, Any]] | dict[str, Any]) -> str:
         parts.append(
             f"{icon} [{label}] HF: {_fmt_hf(hf)}\n"
             f"  Colateral: {coll_str}\n"
-            f"  Borrowed:  {debt_str}\n"
+            f"  Borrowed: {debt_str}\n"
             f"  Available: {_fmt_usd(h.get('available_borrows_usd'))}"
         )
     return "\n".join(parts) if parts else "— Sin posiciones HyperLend activas"
@@ -186,6 +216,12 @@ def compile_raw_data(
     import json
 
     now = datetime.now(timezone.utc).isoformat()
+
+    # Extract bounce_tech from telegram_intel if not passed separately
+    bt = bounce_tech
+    if not bt and isinstance(telegram_intel, dict) and "bounce_tech" in telegram_intel:
+        bt = telegram_intel.pop("bounce_tech", None)
+
     blob = {
         "timestamp_utc": now,
         "portfolio": portfolio or [],
@@ -193,7 +229,7 @@ def compile_raw_data(
         "market": market or {},
         "unlocks": unlocks or {},
         "telegram_intel": telegram_intel or {},
-        "bounce_tech": bounce_tech or [],
+        "bounce_tech": bt or [],
     }
     pretty = json.dumps(blob, ensure_ascii=False, indent=2, default=str)
     return (
