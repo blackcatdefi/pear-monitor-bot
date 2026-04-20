@@ -1,8 +1,9 @@
 """Fondo Black Cat — Telegram bot entry point.
 
-Runs python-telegram-bot v21 (commands) + Telethon userbot (channel reads) +
-APScheduler (alert loop) in the same asyncio event loop.
+Runs python-telegram-bot v21 (commands) + Telethon userbot (channel reads)
++ APScheduler (alert loop) in the same asyncio event loop.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -22,6 +23,7 @@ from config import (
 from modules.alerts import run_alert_cycle
 from modules.analysis import generate_report, generate_thesis_check
 from modules.hyperlend import fetch_all_hyperlend
+from modules.kill_scenarios import compute_kill_scenarios
 from modules.market import fetch_market_data
 from modules.portfolio import fetch_all_wallets
 from modules.telegram_intel import (
@@ -54,9 +56,9 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton("/reporte"), KeyboardButton("/posiciones")],
         [KeyboardButton("/flywheel"), KeyboardButton("/liqcalc")],
         [KeyboardButton("/timeline"), KeyboardButton("/tesis")],
-        [KeyboardButton("/hf"), KeyboardButton("/pnl")],
-        [KeyboardButton("/log"), KeyboardButton("/alertas")],
-        [KeyboardButton("/start")],
+        [KeyboardButton("/hf"), KeyboardButton("/kill")],
+        [KeyboardButton("/pnl"), KeyboardButton("/log")],
+        [KeyboardButton("/alertas"), KeyboardButton("/start")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -69,11 +71,13 @@ _alerts_enabled = {"value": ENABLE_ALERTS}
 _telethon_ok = True
 
 
-# ─── Commands ───────────────────────────────────────────────────────────────
+# ─── Commands ─────────────────────────────────────────────────────────────────────
+
+
 @authorized
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
-        "🐈‍⬛ Fondo Black Cat — analista personal\n\n"
+        "U0001f408‍⬛ Fondo Black Cat — analista personal\n\n"
         "Keyboard — todos los comandos:\n"
         "/reporte — TODO-EN-UNO: timeline + posiciones + análisis\n"
         "/posiciones — snapshot rápido (wallets + HF)\n"
@@ -82,6 +86,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/timeline — timeline X 48h (154 cuentas)\n"
         "/tesis — estado de la tesis macro\n"
         "/hf — Health Factor de HyperLend\n"
+        "/kill — kill scenarios de cada posición\n"
         "/pnl — realized PnL 7D / 30D / YTD\n"
         "/log — últimas 20 entradas del position log\n"
         "/alertas — toggle alertas automáticas (on/off)\n"
@@ -107,14 +112,15 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     """Reporte TODO-EN-UNO: timeline X + posiciones + análisis Claude.
 
     Emite 3 mensajes secuenciales:
-      1. Timeline — top 40 tweets por engagement de las últimas 48h (154 cuentas curadas)
-      2. Posiciones — snapshot rápido de wallets + HyperLend + Bounce Tech
-      3. Análisis — reporte completo generado por Claude (market + intel + tesis)
+    1. Timeline — top 40 tweets por engagement de las últimas 48h (154 cuentas curadas)
+    2. Posiciones — snapshot rápido de wallets + HyperLend + Bounce Tech
+    3. Análisis — reporte completo generado por Claude (market + intel + tesis)
     """
     await update.message.reply_text(
         "⏳ Generando reporte completo: timeline + posiciones + análisis (30-90s)...",
         reply_markup=MAIN_KEYBOARD,
     )
+
     # Todos los fetches en paralelo (Telethon separado — puede estar deshabilitado).
     portfolio, hl, market, unlocks, x_intel, gmail_intel, bt = await asyncio.gather(
         fetch_all_wallets(),
@@ -125,6 +131,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         scan_gmail_unread(),
         fetch_bounce_tech(),
     )
+
     if _telethon_ok:
         intel_legacy, intel_unread = await asyncio.gather(
             fetch_telegram_intel(hours=24),
@@ -133,22 +140,25 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     else:
         intel_legacy = {"status": "error", "error": "telethon_disabled"}
         intel_unread = {"status": "error", "error": "telethon_disabled"}
+
     # ─── Sección 1: Timeline X (48h) — omitir si todas las fuentes fallaron ──
     x_intel_ok = isinstance(x_intel, dict) and x_intel.get("status") == "ok"
     if x_intel_ok:
         timeline_text = format_timeline(x_intel, top_n=40)
         await send_long_message(
             update,
-            "📡 TIMELINE X — 48H\n" + ("─" * 30) + "\n\n" + timeline_text,
+            "U0001f4e1 TIMELINE X — 48H\n" + ("─" * 30) + "\n\n" + timeline_text,
             reply_markup=MAIN_KEYBOARD,
         )
-    # ─── Sección 2: Posiciones ───────────────────────────────────────────
+
+    # ─── Sección 2: Posiciones ─────────────────────────────────────────
     positions_text = format_quick_positions(portfolio, hl, bounce_tech=bt)
     await send_long_message(
         update,
-        "💼 POSICIONES\n" + ("─" * 30) + "\n\n" + positions_text,
+        "U0001f4bc POSICIONES\n" + ("─" * 30) + "\n\n" + positions_text,
         reply_markup=MAIN_KEYBOARD,
     )
+
     # ─── Sección 3: Análisis Claude ──────────────────────────────────────
     merged_intel: dict = {}
     if isinstance(intel_legacy, dict):
@@ -161,14 +171,18 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         merged_intel["gmail_intel"] = gmail_intel
     if bt:
         merged_intel["bounce_tech"] = bt
+
     report, thesis_update = await generate_report(portfolio, hl, market, unlocks, merged_intel)
+
     await send_long_message(
         update,
-        "🧠 ANÁLISIS COMPLETO\n" + ("─" * 30) + "\n\n" + report,
+        "U0001f9e0 ANÁLISIS COMPLETO\n" + ("─" * 30) + "\n\n" + report,
         reply_markup=MAIN_KEYBOARD,
     )
+
     if thesis_update:
         await send_long_message(update, thesis_update, reply_markup=MAIN_KEYBOARD)
+
     # Nota si timeline X no disponible
     if not x_intel_ok:
         await update.message.reply_text(
@@ -231,6 +245,17 @@ async def cmd_liqcalc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 @authorized
+async def cmd_kill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("⏳ Evaluando kill scenarios...", reply_markup=MAIN_KEYBOARD)
+    try:
+        text = await compute_kill_scenarios()
+    except Exception as exc:  # noqa: BLE001
+        log.exception("kill scenarios failed")
+        text = f"❌ /kill falló: {exc}"
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
 async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = context.args or []
     if args and args[0].lower() == "add":
@@ -276,7 +301,8 @@ async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
-# ─── Scheduler job ──────────────────────────────────────────────────────────
+# ─── Scheduler job ──────────────────────────────────────────────────────────────
+
 async def _alert_job(application: Application) -> None:
     if not _alerts_enabled["value"]:
         return
@@ -286,7 +312,8 @@ async def _alert_job(application: Application) -> None:
         log.exception("Alert cycle failed")
 
 
-# ─── Lifecycle hooks ────────────────────────────────────────────────────────
+# ─── Lifecycle hooks ────────────────────────────────────────────────────────────
+
 async def post_init(application: Application) -> None:
     global _telethon_ok
     try:
@@ -323,7 +350,9 @@ async def post_shutdown(application: Application) -> None:
     await stop_telethon()
 
 
-# ─── Main ───────────────────────────────────────────────────────────────────
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
         print("ERROR: TELEGRAM_BOT_TOKEN no configurado", file=sys.stderr)
@@ -350,6 +379,7 @@ def main() -> None:
     app.add_handler(CommandHandler("alertas", cmd_alertas))
     app.add_handler(CommandHandler("flywheel", cmd_flywheel))
     app.add_handler(CommandHandler("liqcalc", cmd_liqcalc))
+    app.add_handler(CommandHandler("kill", cmd_kill))
     app.add_handler(CommandHandler("pnl", cmd_pnl))
     app.add_handler(CommandHandler("log", cmd_log))
 
@@ -359,3 +389,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
