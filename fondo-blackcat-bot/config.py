@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ─── Telegram ───────────────────────────────────────────────────────────────
+# ─── Telegram ─────────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
@@ -18,29 +18,23 @@ TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "")
 TELEGRAM_PHONE = os.getenv("TELEGRAM_PHONE", "")
 TELETHON_SESSION = os.getenv("TELETHON_SESSION", "")
 
-# ─── APIs ───────────────────────────────────────────────────────────────────
-# Multi-provider LLM cascade (order: Gemini → OpenRouter → Groq → Anthropic)
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-
-# Anthropic (optional fallback — only used if USE_ANTHROPIC_FALLBACK=true)
+# ─── APIs ─────────────────────────────────────────────────────────────────────
+# Hybrid LLM architecture:
+#   Sonnet 4.6 (critical) + Gemini 2.5 Flash (routine) + Haiku 4.5 (fallback)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-6")
-USE_HAIKU_FALLBACK = os.getenv("USE_HAIKU_FALLBACK", "false").lower() == "true"
-HAIKU_MODEL = "claude-haiku-4-5-20251001"
-USE_ANTHROPIC_FALLBACK = os.getenv("USE_ANTHROPIC_FALLBACK", "false").lower() == "true"
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 COINGLASS_API_KEY = os.getenv("COINGLASS_API_KEY", "")
 
-# ─── X/Twitter ──────────────────────────────────────────────────────────────
+# ─── X/Twitter ────────────────────────────────────────────────────────────────
 X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN", "")
 
-# ─── Gmail (IMAP for /reporte email intel) ────────────────────────────────
+# ─── Gmail (IMAP for /reporte email intel) ────────────────────────────────────
 GMAIL_EMAIL = os.getenv("GMAIL_EMAIL", "")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
 
-# ─── Chains ─────────────────────────────────────────────────────────────────
+# ─── Chains ───────────────────────────────────────────────────────────────────
 HYPERLIQUID_API = os.getenv("HYPERLIQUID_API", "https://api.hyperliquid.xyz")
 HYPEREVM_RPC = os.getenv("HYPEREVM_RPC", "https://rpc.hyperliquid.xyz/evm")
 HYPEREVM_CHAIN_ID = 999
@@ -49,7 +43,7 @@ HYPERLEND_POOL_ADDRESS = os.getenv(
     "0x00A89d7a5A02160f20150EbEA7a2b5E4879A1A8b",
 )
 
-# ─── Fund wallets (HyperLiquid + HyperLend) — env-driven ────────────────────
+# ─── Fund wallets (HyperLiquid + HyperLend) — env-driven ─────────────────────
 def _load_fund_wallets() -> dict[str, str]:
     wallets: dict[str, str] = {}
     for i in range(1, 6):
@@ -58,9 +52,9 @@ def _load_fund_wallets() -> dict[str, str]:
         if addr and addr.startswith("0x") and len(addr) == 42:
             wallets[addr.lower()] = label
     if not wallets:
-        print("⚠️ WARNING: No FUND_WALLET_N env vars set. /posiciones will return empty.")
+        print("\u26a0\ufe0f WARNING: No FUND_WALLET_N env vars set. /posiciones will return empty.")
     else:
-        print(f"✅ Loaded {len(wallets)} fund wallets from env:")
+        print(f"\u2705 Loaded {len(wallets)} fund wallets from env:")
         for addr, label in wallets.items():
             print(f"   - {label}: {addr}")
     return wallets
@@ -71,7 +65,7 @@ FUND_WALLETS: dict[str, str] = _load_fund_wallets()
 # Wallet usada para HyperLend flywheel (colateral kHYPE) — env-driven
 HYPERLEND_WALLET = os.getenv("HYPERLEND_WALLET", "").strip().lower()
 
-# ─── Thresholds & alerts ──────────────────────────────────────────────────
+# ─── Thresholds & alerts ──────────────────────────────────────────────────────
 HF_WARN = 1.20          # HyperLend HF warning
 HF_CRITICAL = 1.10      # HyperLend HF critical
 HYPE_WARN = 34.0         # HYPE price (USD) warn
@@ -81,10 +75,10 @@ LIQ_PROXIMITY_PCT = 0.10  # Alertar si posición a <10% de liquidación
 POLL_INTERVAL_MIN = int(os.getenv("POLL_INTERVAL_MIN", "5"))
 ENABLE_ALERTS = os.getenv("ENABLE_ALERTS", "true").lower() == "true"
 
-# ─── Wallet fetch retry configuration ──────────────────────────────────────
+# ─── Wallet fetch retry configuration ────────────────────────────────────────
 WALLET_FETCH_TIMEOUT = int(os.getenv("WALLET_FETCH_TIMEOUT", "10"))  # seconds
 
-# ─── Tokens basket SHORT (ALT SHORT BLEED) ──────────────────────────────────
+# ─── Tokens basket SHORT (ALT SHORT BLEED) ───────────────────────────────────
 ALT_SHORT_BASKET = ["WLD", "STRK", "ZRO", "AVAX", "ENA"]
 WAR_LONG = ["BRENT", "GOLD", "SILVER", "PAXG"]
 WAR_SHORT = ["USA500", "NVDA", "TSLA", "HOOD"]
@@ -127,7 +121,7 @@ CHANNELS = {
 }
 CHANNEL_LIMITS = {"tier1": 200, "tier2": 50, "tier3": 20}
 
-# ─── Paths ──────────────────────────────────────────────────────────────────
+# ─── Paths ────────────────────────────────────────────────────────────────────
 DATA_DIR = os.getenv("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
 os.makedirs(DATA_DIR, exist_ok=True)
 
