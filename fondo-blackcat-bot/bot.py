@@ -24,6 +24,7 @@ from modules.alerts import run_alert_cycle
 from modules.analysis import generate_report, generate_thesis_check, _load_thesis
 from modules.hyperlend import fetch_all_hyperlend
 from modules.kill_scenarios import compute_kill_scenarios
+from modules.llm_providers import format_provider_status
 from modules.market import fetch_market_data
 from modules.portfolio import fetch_all_wallets
 from modules.telegram_intel import (
@@ -45,11 +46,13 @@ from templates.timeline import format_timeline
 from utils.security import authorized
 from utils.telegram import send_long_message
 
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s — %(message)s",
 )
 log = logging.getLogger("fondo-blackcat")
+
 
 # Persistent keyboard — todos los comandos accesibles con un tap.
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
@@ -60,7 +63,8 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton("/hf"), KeyboardButton("/kill")],
         [KeyboardButton("/pnl"), KeyboardButton("/log")],
         [KeyboardButton("/intel"), KeyboardButton("/alertas")],
-        [KeyboardButton("/start"), KeyboardButton("/debug_x")],
+        [KeyboardButton("/providers"), KeyboardButton("/debug_x")],
+        [KeyboardButton("/start")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -73,7 +77,7 @@ _alerts_enabled = {"value": ENABLE_ALERTS}
 _telethon_ok = True
 
 
-# ─── Commands ────────────────────────────────────────────────────────────────
+# ─── Commands ──────────────────────────────────────────────────────────────
 
 
 @authorized
@@ -92,6 +96,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/pnl — realized PnL 7D / 30D / YTD\n"
         "/log — últimas 20 entradas del position log\n"
         "/intel — resumen de intel memory (últimas 24h)\n"
+        "/providers — status de los LLM providers\n"
         "/debug_x — diagnóstico de conectividad X/Twitter\n"
         "/alertas — toggle alertas automáticas (on/off)\n"
     )
@@ -102,6 +107,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_posiciones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("⏳ Snapshot...", reply_markup=MAIN_KEYBOARD)
     wallets, hl, bt = await asyncio.gather(fetch_all_wallets(), fetch_all_hyperlend(), fetch_bounce_tech())
+
     # Detect Bounce Tech position closes
     bt_closes = bt_detect_closes(bt)
     for close in bt_closes:
@@ -118,6 +124,7 @@ async def cmd_posiciones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             amount_usd=0,
             wallet_label="Bounce Tech",
         )
+
     await send_long_message(update, format_quick_positions(wallets, hl, bounce_tech=bt), reply_markup=MAIN_KEYBOARD)
 
 
@@ -129,12 +136,12 @@ async def cmd_hf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 @authorized
 async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Reporte TODO-EN-UNO: timeline X + posiciones + análisis Claude.
+    """Reporte TODO-EN-UNO: timeline X + posiciones + análisis LLM.
 
     Emite 3 mensajes secuenciales:
     1. Timeline — top 40 tweets por engagement de las últimas 48h (154 cuentas curadas)
     2. Posiciones — snapshot rápido de wallets + HyperLend + Bounce Tech
-    3. Análisis — reporte completo generado por Claude (market + intel + tesis)
+    3. Análisis — reporte completo generado por LLM cascade (market + intel + tesis)
     """
     await update.message.reply_text(
         "⏳ Generando reporte completo: timeline + posiciones + análisis (30-90s)...",
@@ -163,6 +170,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # ─── Sección 1: Timeline X (48h) — omitir si todas las fuentes fallaron ──
     x_intel_ok = isinstance(x_intel, dict) and x_intel.get("status") == "ok"
+
     if x_intel_ok:
         timeline_text = format_timeline(x_intel, top_n=40)
         await send_long_message(
@@ -179,7 +187,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         reply_markup=MAIN_KEYBOARD,
     )
 
-    # ─── Sección 3: Análisis Claude ────────────────────────────────────────────
+    # ─── Sección 3: Análisis LLM cascade ──────────────────────────────────────
     merged_intel: dict = {}
     if isinstance(intel_legacy, dict):
         merged_intel.update(intel_legacy)
@@ -199,7 +207,6 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "🧠 ANÁLISIS COMPLETO\n" + ("─" * 30) + "\n\n" + report,
         reply_markup=MAIN_KEYBOARD,
     )
-
     if thesis_update:
         await send_long_message(update, thesis_update, reply_markup=MAIN_KEYBOARD)
 
@@ -274,6 +281,13 @@ async def cmd_debug_x(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 @authorized
+async def cmd_providers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show LLM provider status dashboard."""
+    text = format_provider_status()
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
 async def cmd_flywheel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("⏳ Calculando flywheel pair trade...", reply_markup=MAIN_KEYBOARD)
     try:
@@ -313,6 +327,7 @@ async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = pnl_tracker.build_cycle_summary()
         await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
         return
+
     if args and args[0].lower() == "add":
         try:
             params = pnl_tracker.parse_manual_add(args[1:])
@@ -325,6 +340,7 @@ async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except ValueError as exc:
             await update.message.reply_text(f"❌ {exc}", reply_markup=MAIN_KEYBOARD)
         return
+
     try:
         text = pnl_tracker.build_summary()
     except Exception as exc:  # noqa: BLE001
@@ -347,6 +363,7 @@ async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except ValueError as exc:
             await update.message.reply_text(f"❌ {exc}", reply_markup=MAIN_KEYBOARD)
         return
+
     try:
         entries = position_log.last_n(20)
         text = position_log.format_log(entries)
@@ -356,7 +373,8 @@ async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
-# ─── Scheduler job ────────────────────────────────────────────────────────────
+# ─── Scheduler job ──────────────────────────────────────────────────────────
+
 
 async def _alert_job(application: Application) -> None:
     if not _alerts_enabled["value"]:
@@ -367,7 +385,8 @@ async def _alert_job(application: Application) -> None:
         log.exception("Alert cycle failed")
 
 
-# ─── Lifecycle hooks ────────────────────────────────────────────────────────────
+# ─── Lifecycle hooks ──────────────────────────────────────────────────────────
+
 
 async def post_init(application: Application) -> None:
     global _telethon_ok
@@ -412,7 +431,7 @@ async def post_shutdown(application: Application) -> None:
     await stop_telethon()
 
 
-# ─── Main ──────────────────────────────────────────────────────────────────────
+# ─── Main ──────────────────────────────────────────────────────────────────
 
 
 def main() -> None:
@@ -441,6 +460,7 @@ def main() -> None:
     app.add_handler(CommandHandler("alertas", cmd_alertas))
     app.add_handler(CommandHandler("intel", cmd_intel))
     app.add_handler(CommandHandler("debug_x", cmd_debug_x))
+    app.add_handler(CommandHandler("providers", cmd_providers))
     app.add_handler(CommandHandler("flywheel", cmd_flywheel))
     app.add_handler(CommandHandler("liqcalc", cmd_liqcalc))
     app.add_handler(CommandHandler("kill", cmd_kill))
