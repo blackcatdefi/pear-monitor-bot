@@ -274,7 +274,7 @@ def _compute_cycle_section(wallets: list[dict[str, Any]]) -> str:
             (55_000, "DCA Add 3", "$1,000"),
         ]
 
-        lines.extend(["", "  DCA plan (pre-definido):"]])
+        lines.extend(["", "  DCA plan (pre-definido):"])
         for level_px, level_name, add_margin in dca_levels:
             status = "✅ TRIGGERED" if btc_current <= level_px else "⏳ pending"
             lines.append(
