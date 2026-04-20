@@ -1,9 +1,8 @@
 """LLM-powered report generation + persistent thesis.
 
-Uses multi-provider cascade (Gemini -> OpenRouter -> Groq -> Anthropic)
-via modules.llm_providers. Falls back to degraded raw-data report if all fail.
+Uses hybrid router (Sonnet for critical, Gemini for routine, Haiku fallback)
+via modules.llm_router. Falls back to degraded raw-data report if all fail.
 """
-
 from __future__ import annotations
 
 import json
@@ -16,7 +15,7 @@ from config import (
     DATA_DIR,
     LAST_ANALYSIS_FILE,
 )
-from modules.llm_providers import complete, LLMError
+from modules.llm_router import route_request, LLMError
 from templates.formatters import compile_raw_data
 from templates.system_prompt import SYSTEM_PROMPT, THESIS_PROMPT
 
@@ -26,7 +25,7 @@ THESIS_FILE = os.path.join(DATA_DIR, "thesis_state.json")
 MAX_HISTORY = 30  # keep last 30 thesis snapshots
 
 
-# ─── Persistent thesis state ────────────────────────────────────────────────
+# ─── Persistent thesis state ──────────────────────────────────────────────────
 
 
 def _load_thesis() -> dict[str, Any]:
@@ -55,6 +54,7 @@ def _thesis_context(state: dict[str, Any]) -> str:
     """Format previous thesis state for injection into the prompt."""
     if not state or not state.get("current"):
         return ""
+
     parts = [
         "\n\n═══════ ESTADO PREVIO DE LA TESIS (auto-actualizado) ═══════",
         f"Última actualización: {state.get('last_updated', 'desconocido')}",
@@ -62,6 +62,7 @@ def _thesis_context(state: dict[str, Any]) -> str:
         "",
         state["current"],
     ]
+
     # Include key learnings if present
     learnings = state.get("key_learnings", [])
     if learnings:
@@ -69,6 +70,7 @@ def _thesis_context(state: dict[str, Any]) -> str:
         parts.append("APRENDIZAJES ACUMULADOS:")
         for l in learnings[-10:]:  # last 10
             parts.append(f"  • [{l.get('date', '?')}] {l.get('text', '')}")
+
     parts.append("═══════ FIN ESTADO PREVIO ═══════")
     return "\n".join(parts)
 
@@ -121,11 +123,10 @@ def _load_last_analysis() -> dict[str, Any] | None:
 
 
 async def _update_thesis_state(report_text: str, user_data: str) -> str | None:
-    """Call LLM cascade to extract updated thesis state from the report."""
+    """Call LLM to extract updated thesis state from the report."""
     state = _load_thesis()
     prev_context = _thesis_context(state)
 
-    # Build a single-turn prompt that includes the report + thesis update request
     thesis_user_msg = (
         f"REPORTE GENERADO:\n{report_text}\n\n"
         f"DATA CRUDA UTILIZADA:\n{user_data}\n\n"
@@ -133,7 +134,8 @@ async def _update_thesis_state(report_text: str, user_data: str) -> str | None:
     )
 
     try:
-        raw, provider = await complete(
+        raw, provider = await route_request(
+            "tesis_update",
             SYSTEM_PROMPT + prev_context,
             thesis_user_msg,
             max_tokens=2000,
@@ -141,14 +143,13 @@ async def _update_thesis_state(report_text: str, user_data: str) -> str | None:
 
         # Clean up response
         raw = raw.strip()
-        # Remove any markdown code block wrapping if present
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
         if raw.endswith("```"):
             raw = raw[:-3]
         raw = raw.strip()
 
-        # Try to extract JSON from response if it contains extra text
+        # Extract JSON from response
         json_start = raw.find("{")
         json_end = raw.rfind("}") + 1
         if json_start >= 0 and json_end > json_start:
@@ -156,7 +157,7 @@ async def _update_thesis_state(report_text: str, user_data: str) -> str | None:
 
         update = json.loads(raw)
 
-        # Build the human-readable thesis summary
+        # Build thesis summary
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         components = update.get("components", {})
 
@@ -190,11 +191,8 @@ async def _update_thesis_state(report_text: str, user_data: str) -> str | None:
         for l in new_learnings:
             if l and l.strip():
                 existing_learnings.append({"date": now, "text": l.strip()})
-
-        # Trim to last 50 learnings
         existing_learnings = existing_learnings[-50:]
 
-        # Add to history
         history = state.get("history", [])
         history.append({
             "date": now,
@@ -216,7 +214,6 @@ async def _update_thesis_state(report_text: str, user_data: str) -> str | None:
         _save_thesis(new_state)
         log.info("Thesis state updated (report #%d) via %s", new_state["report_count"], provider)
 
-        # Return user-facing summary
         user_summary = update.get("summary", current_text)
         return (
             f"\U0001f9ec TESIS AUTO-ACTUALIZADA (reporte #{new_state['report_count']})"
@@ -235,7 +232,7 @@ async def _update_thesis_state(report_text: str, user_data: str) -> str | None:
         return None
 
 
-# ─── Report generation ───────────────────────────────────────────────────────
+# ─── Report generation ─────────────────────────────────────────────────────────
 
 
 async def generate_report(
@@ -245,32 +242,30 @@ async def generate_report(
     unlocks: dict[str, Any] | None,
     telegram_intel: dict[str, Any] | None,
 ) -> tuple[str, str | None]:
-    """Generate report + auto-update thesis via multi-provider LLM cascade.
+    """Generate report + auto-update thesis via hybrid LLM router.
 
     Returns (report_text, thesis_update_text_or_None).
-    Cascade: Gemini -> OpenRouter -> Groq -> Anthropic (optional).
+    Critical tasks route to Sonnet first, fallback to Haiku, then Gemini.
     If all fail: returns degraded raw data report + cached analysis.
     """
     user_content = compile_raw_data(portfolio, hyperlend, market, unlocks, telegram_intel)
 
-    # Inject previous thesis state into the system prompt
     state = _load_thesis()
     prev_thesis = _thesis_context(state)
     full_system = SYSTEM_PROMPT + prev_thesis
 
     try:
-        report_text, provider = await complete(full_system, user_content, max_tokens=8000)
+        report_text, provider = await route_request(
+            "reporte", full_system, user_content, max_tokens=8000,
+        )
 
         if not report_text.strip():
             report_text = "(reporte vac\u00edo)"
 
-        # Append provider info
         report_text += f"\n\n_An\u00e1lisis generado por: {provider}_"
 
-        # Cache successful report
         _save_last_analysis(report_text, provider)
 
-        # Auto-update thesis in the background
         thesis_update = await _update_thesis_state(report_text, user_content)
 
         return report_text, thesis_update
@@ -280,7 +275,7 @@ async def generate_report(
         degraded = _build_degraded_report(
             portfolio, hyperlend, market, unlocks, telegram_intel,
             "all_providers_failed",
-            "Configurar GEMINI_API_KEY / OPENROUTER_API_KEY / GROQ_API_KEY en Railway",
+            "Verificar ANTHROPIC_API_KEY y GEMINI_API_KEY en Railway",
         )
         return degraded, None
 
@@ -315,7 +310,6 @@ def _build_degraded_report(
         "",
     ]
 
-    # Add raw data snapshot
     if portfolio:
         lines.append("PORTFOLIO:")
         for p in portfolio:
@@ -347,7 +341,6 @@ def _build_degraded_report(
         lines.append(f"  \u2022 HYPE: ${hype_px}")
         lines.append("")
 
-    # Include cached analysis if available
     cached = _load_last_analysis()
     if cached:
         ts = cached.get("timestamp_utc", "?")[:16]
@@ -374,23 +367,23 @@ async def generate_thesis_check(
     hyperlend: dict[str, Any] | None,
     market: dict[str, Any] | None,
 ) -> str:
-    """Thesis check — uses persistent state + fresh data via LLM cascade."""
+    """Thesis check — uses persistent state + fresh data via Sonnet."""
     user_content = compile_raw_data(portfolio, hyperlend, market, None, None)
 
-    # Inject thesis state into thesis prompt
     state = _load_thesis()
     prev_thesis = _thesis_context(state)
     full_prompt = THESIS_PROMPT + prev_thesis
 
     try:
-        text, provider = await complete(full_prompt, user_content, max_tokens=2000)
+        text, provider = await route_request(
+            "tesis", full_prompt, user_content, max_tokens=2000,
+        )
         result = text.strip() if text else "(an\u00e1lisis vac\u00edo)"
         result += f"\n\n_Tesis generada por: {provider}_"
         return result
 
     except LLMError:
         log.warning("All LLM providers failed for thesis check")
-        # Fallback: return cached state if available
         if state.get("current"):
             return (
                 "\u26a0\ufe0f Usando estado previo de la tesis (an\u00e1lisis en vivo no disponible):\n\n"
@@ -398,7 +391,7 @@ async def generate_thesis_check(
             )
         return (
             "\u274c Todos los providers de IA fallaron. "
-            "Configurar GEMINI_API_KEY / OPENROUTER_API_KEY / GROQ_API_KEY en Railway."
+            "Verificar ANTHROPIC_API_KEY y GEMINI_API_KEY en Railway."
         )
 
     except Exception as exc:  # noqa: BLE001
