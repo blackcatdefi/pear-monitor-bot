@@ -583,3 +583,60 @@ async def fetch_x_intel(
         "nitter_errors": nitter_errors[:10],
         "rsshub_errors": rsshub_errors[:10],
     }
+
+
+# ─── Diagnostic function ──────────────────────────────────────────────────
+
+
+async def debug_x_status() -> str:
+    """Diagnostic info for X/Twitter connectivity."""
+    lines = ["🔍 X/TWITTER DEBUG STATUS\n"]
+
+    # Check token
+    token = X_BEARER_TOKEN or ""
+    if not token:
+        lines.append("❌ X_BEARER_TOKEN: NO CONFIGURADO")
+    else:
+        lines.append(f"✅ X_BEARER_TOKEN: {token[:4]}...{token[-4:]} ({len(token)} chars)")
+
+    # Test X API v2
+    if token:
+        try:
+            async with httpx.AsyncClient() as client:
+                headers = {"Authorization": f"Bearer {token}"}
+                resp = await client.get(
+                    "https://api.twitter.com/2/users/me",
+                    headers=headers,
+                    timeout=10.0
+                )
+                body = await resp.aread()
+                lines.append(f"\nX API v2 /users/me: HTTP {resp.status_code}")
+                lines.append(f"  Response: {body[:200].decode('utf-8', errors='ignore')}")
+        except Exception as e:
+            lines.append(f"\nX API v2: ERROR — {e}")
+
+    # Test Nitter instances
+    nitter_instances = _nitter_instances()
+    for instance in nitter_instances[:3]:  # Test first 3
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"{instance}/elonmusk/rss",
+                    timeout=10.0
+                )
+                lines.append(f"\nNitter {instance}: HTTP {resp.status_code}")
+        except Exception as e:
+            lines.append(f"\nNitter {instance}: ERROR — {e}")
+
+    # Test RSSHub
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{RSSHUB_BASE}/twitter/user/elonmusk",
+                timeout=10.0
+            )
+            lines.append(f"\nRSSHub ({RSSHUB_BASE}): HTTP {resp.status_code}")
+    except Exception as e:
+        lines.append(f"\nRSSHub ({RSSHUB_BASE}): ERROR — {e}")
+
+    return "\n".join(lines)
