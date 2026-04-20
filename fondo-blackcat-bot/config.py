@@ -21,6 +21,8 @@ TELETHON_SESSION = os.getenv("TELETHON_SESSION", "")
 # ─── APIs ───────────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-6")
+USE_HAIKU_FALLBACK = os.getenv("USE_HAIKU_FALLBACK", "false").lower() == "true"
+HAIKU_MODEL = "claude-haiku-4-5-20251001"
 COINGLASS_API_KEY = os.getenv("COINGLASS_API_KEY", "")
 
 # ─── Gmail (IMAP for /reporte email intel) ─────────────────────────────────
@@ -72,6 +74,10 @@ POLL_INTERVAL_MIN = int(os.getenv("POLL_INTERVAL_MIN", "5"))
 ENABLE_ALERTS = os.getenv("ENABLE_ALERTS", "true").lower() == "true"
 
 
+# ─── Wallet fetch retry configuration ────────────────────────────────────────
+WALLET_FETCH_TIMEOUT = int(os.getenv("WALLET_FETCH_TIMEOUT", "10"))  # seconds
+
+
 # ─── Tokens basket SHORT (ALT SHORT BLEED) ──────────────────────────────────
 ALT_SHORT_BASKET = ["WLD", "STRK", "ZRO", "AVAX", "ENA"]
 WAR_LONG = ["BRENT", "GOLD", "SILVER", "PAXG"]
@@ -121,3 +127,5 @@ CHANNEL_LIMITS = {"tier1": 200, "tier2": 50, "tier3": 20}
 # ─── Paths ──────────────────────────────────────────────────────────────────
 DATA_DIR = os.getenv("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
 os.makedirs(DATA_DIR, exist_ok=True)
+
+LAST_ANALYSIS_FILE = os.path.join(DATA_DIR, "last_successful_analysis.json")
