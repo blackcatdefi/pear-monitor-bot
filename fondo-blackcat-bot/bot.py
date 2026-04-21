@@ -95,7 +95,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/posiciones \u2014 snapshot r\u00e1pido (wallets + HF)\n"
         "/flywheel \u2014 pair trade HL (LONG HYPE / SHORT UETH)\n"
         "/liqcalc \u2014 matriz liq HYPE \u00d7 deuda\n"
-        "/timeline \u2014 timeline X 48h (154 cuentas)\n"
+        "/timeline \u2014 timeline X 48h (tu X list)\n"
         "/tesis \u2014 estado de la tesis macro\n"
         "/hf \u2014 Health Factor de HyperLend\n"
         "/kill \u2014 kill scenarios de cada posici\u00f3n\n"
@@ -146,7 +146,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     """Reporte TODO-EN-UNO: timeline X + posiciones + an\u00e1lisis LLM.
 
     Emite 3 mensajes secuenciales:
-    1. Timeline \u2014 top 40 tweets por engagement de las \u00faltimas 48h (154 cuentas curadas)
+    1. Timeline \u2014 top 40 tweets por engagement de las \u00faltimas 48h (tu X list curada)
     2. Posiciones \u2014 snapshot r\u00e1pido de wallets + HyperLend + Bounce Tech
     3. An\u00e1lisis \u2014 reporte completo generado por Sonnet (market + intel + tesis)
     """
@@ -252,7 +252,7 @@ async def cmd_tesis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 @authorized
 async def cmd_timeline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "\u23f3 Leyendo \u00faltimas 48h de tu timeline X (154 cuentas)...",
+        "\u23f3 Leyendo \u00faltimas 48h de tu X list...",
         reply_markup=MAIN_KEYBOARD,
     )
     x_intel = await fetch_x_intel(hours=48)

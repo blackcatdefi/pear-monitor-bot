@@ -172,7 +172,13 @@ async def fetch_x_intel(hours: int = 48) -> dict[str, Any]:
             "source": "x_api_list",
             "tweets": [],
             "accounts": 0,
+            "total": 0,
+            "hours": hours,
             "note": "No tweets in time window",
+            # Aliases for templates/timeline.py legacy formatter:
+            "data": {},
+            "accounts_scanned": 0,
+            "total_tweets": 0,
         }
 
     # Sort by engagement (likes + retweets + replies)
@@ -187,6 +193,12 @@ async def fetch_x_intel(hours: int = 48) -> dict[str, Any]:
 
     unique_accounts = len(set(t["username"] for t in tweets))
 
+    # Group by username for legacy formatter (templates/timeline.py expects
+    # data: {username: [tweets...]}, accounts_scanned, total_tweets)
+    by_user: dict[str, list[dict[str, Any]]] = {}
+    for t in tweets:
+        by_user.setdefault(t["username"], []).append(t)
+
     return {
         "status": "ok",
         "source": "x_api_list",
@@ -194,6 +206,10 @@ async def fetch_x_intel(hours: int = 48) -> dict[str, Any]:
         "accounts": unique_accounts,
         "total": len(tweets),
         "hours": hours,
+        # Aliases for templates/timeline.py legacy formatter:
+        "data": by_user,
+        "accounts_scanned": unique_accounts,
+        "total_tweets": len(tweets),
     }
 
 
