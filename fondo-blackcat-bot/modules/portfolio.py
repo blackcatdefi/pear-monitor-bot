@@ -11,7 +11,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from config import FUND_WALLETS, HIP3_DEXES, HYPERLIQUID_API, WALLET_FETCH_TIMEOUT, DATA_DIR
@@ -302,3 +302,50 @@ async def get_spot_price(coin: str) -> float | None:
     except Exception as exc:  # noqa: BLE001
         log.warning("get_spot_price(%s) failed: %s", coin, exc)
         return None
+
+# ─── Recent fills (closed trades) ─────────────────────────────────────────────
+async def fetch_recent_fills(wallet: str, hours: int = 24) -> list[dict[str, Any]]:
+    """Fetch recent fills (closed trades) for a wallet within the last N hours."""
+    try:
+        fills = await user_fills(wallet)
+        if not isinstance(fills, list):
+            return []
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        recent: list[dict[str, Any]] = []
+        for f in fills:
+            try:
+                ts = f.get("time")
+                if ts:
+                    dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+                    if dt < cutoff:
+                        continue
+                recent.append({
+                    "coin": f.get("coin", "?"),
+                    "side": f.get("side", "?"),
+                    "px": float(f.get("px", 0) or 0),
+                    "sz": float(f.get("sz", 0) or 0),
+                    "time": ts,
+                    "closedPnl": float(f.get("closedPnl", 0) or 0),
+                    "fee": float(f.get("fee", 0) or 0),
+                    "dir": f.get("dir", ""),
+                })
+            except Exception:  # noqa: BLE001
+                continue
+        return recent
+    except Exception as exc:  # noqa: BLE001
+        log.warning("fetch_recent_fills for %s failed: %s", wallet, exc)
+        return []
+
+
+async def fetch_all_recent_fills(hours: int = 24) -> list[dict[str, Any]]:
+    """Fetch recent fills for all fund wallets."""
+    if not FUND_WALLETS:
+        return []
+    results: list[dict[str, Any]] = []
+    for wallet, label in FUND_WALLETS.items():
+        fills = await fetch_recent_fills(wallet, hours)
+        for f in fills:
+            f["_wallet_label"] = label
+        results.extend(fills)
+    results.sort(key=lambda x: x.get("time", 0), reverse=True)
+    return results
