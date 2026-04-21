@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
@@ -35,7 +36,12 @@ from modules.telegram_intel import (
 from modules.unlocks import fetch_unlocks
 from modules.bounce_tech import detect_closes as bt_detect_closes, fetch_bounce_tech
 from modules.gmail_intel import scan_gmail_unread
-from modules.x_intel import fetch_x_intel, debug_x_status
+from modules.x_intel import (
+    debug_x_status,
+    fetch_x_intel,
+    format_intel_sources,
+    poll_and_cache_timeline,
+)
 from modules.flywheel import compute_flywheel
 from modules.liq_calc import compute_liq_matrix
 from modules.intel_memory import format_intel_summary, cleanup_old as intel_cleanup, get_unprocessed_count
@@ -64,7 +70,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton("/pnl"), KeyboardButton("/log")],
         [KeyboardButton("/intel"), KeyboardButton("/alertas")],
         [KeyboardButton("/providers"), KeyboardButton("/debug_x")],
-        [KeyboardButton("/start")],
+        [KeyboardButton("/intel_sources"), KeyboardButton("/start")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -98,6 +104,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/intel \u2014 resumen de intel memory (\u00faltimas 24h)\n"
         "/providers \u2014 status de los LLM providers\n"
         "/debug_x \u2014 diagn\u00f3stico de conectividad X/Twitter\n"
+        "/intel_sources \u2014 top 20 cuentas activas en la list X (24h)\n"
         "/alertas \u2014 toggle alertas autom\u00e1ticas (on/off)\n"
     )
     await update.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
@@ -283,6 +290,21 @@ async def cmd_debug_x(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 @authorized
+async def cmd_intel_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Top 20 most active accounts in the X list over the last 24h."""
+    await update.message.reply_text(
+        "\u23f3 Leyendo la list X \u2014 top 20 cuentas \u00faltimas 24h...",
+        reply_markup=MAIN_KEYBOARD,
+    )
+    try:
+        text = await format_intel_sources(hours=24)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("intel_sources failed")
+        text = f"\u274c /intel_sources fall\u00f3: {exc}"
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
 async def cmd_providers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show LLM provider status dashboard with cost tracking."""
     text = format_provider_status()
@@ -397,6 +419,14 @@ async def _intel_processor_job() -> None:
         log.exception("Intel processor job failed")
 
 
+async def _x_timeline_cache_job() -> None:
+    """Scheduled job: refresh the X list timeline cache every 2 hours."""
+    try:
+        await poll_and_cache_timeline()
+    except Exception:  # noqa: BLE001
+        log.exception("X timeline cache job failed")
+
+
 # ─── Lifecycle hooks ─────────────────────────────────────────────────────────
 
 
@@ -433,9 +463,22 @@ async def post_init(application: Application) -> None:
             max_instances=1,
             coalesce=True,
         )
+        # X list timeline cache — refresh every 2h (Addendum 2: ~$1.80/mo PPU cost)
+        scheduler.add_job(
+            _x_timeline_cache_job,
+            "interval",
+            hours=2,
+            id="x_timeline_cache",
+            max_instances=1,
+            coalesce=True,
+            next_run_time=datetime.now(timezone.utc) + timedelta(seconds=30),
+        )
         scheduler.start()
         application.bot_data["scheduler"] = scheduler
-        log.info("Scheduler started: alerts every %dmin, intel processor every 30min.", POLL_INTERVAL_MIN)
+        log.info(
+            "Scheduler started: alerts %dmin, intel processor 30min, X timeline cache 2h.",
+            POLL_INTERVAL_MIN,
+        )
 
     # Cleanup old intel memory entries (7+ days old)
     try:
@@ -481,6 +524,7 @@ def main() -> None:
     app.add_handler(CommandHandler("alertas", cmd_alertas))
     app.add_handler(CommandHandler("intel", cmd_intel))
     app.add_handler(CommandHandler("debug_x", cmd_debug_x))
+    app.add_handler(CommandHandler("intel_sources", cmd_intel_sources))
     app.add_handler(CommandHandler("providers", cmd_providers))
     app.add_handler(CommandHandler("flywheel", cmd_flywheel))
     app.add_handler(CommandHandler("liqcalc", cmd_liqcalc))
