@@ -9,9 +9,9 @@ from typing import Any
 
 def _fmt_usd(v: float | None) -> str:
     if v is None:
-        return "—"
+        return "â"
     if math.isinf(v):
-        return "∞"
+        return "â"
     sign = "-" if v < 0 else ""
     v = abs(v)
     if v >= 1_000_000:
@@ -23,10 +23,26 @@ def _fmt_usd(v: float | None) -> str:
 
 def _fmt_hf(v: float | None) -> str:
     if v is None:
-        return "—"
+        return "â"
     if math.isinf(v):
-        return "∞ (sin deuda)"
+        return "â (sin deuda)"
     return f"{v:.3f}"
+
+
+def _estimate_spot_usd(spot_balances: list[dict[str, Any]]) -> float:
+    """Estimate USD value of spot token balances."""
+    total = 0.0
+    for sb in spot_balances:
+        coin = (sb.get("coin") or "").upper()
+        amount = sb.get("total", 0) or 0
+        if coin in ("USDC", "USDH", "USDT", "DAI"):
+            total += amount
+        else:
+            # Use entry_ntl (cost basis) as rough USD estimate
+            entry_ntl = sb.get("entry_ntl", 0) or 0
+            if entry_ntl > 0:
+                total += entry_ntl
+    return total
 
 
 def format_quick_positions(wallets: list[dict[str, Any]],
@@ -35,41 +51,87 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                            recent_fills: list[dict[str, Any]] | None = None) -> str:
     lines: list[str] = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    lines.append(f"📊 Snapshot Fondo Black Cat — {now}")
+    lines.append(f"ð Snapshot Fondo Black Cat â {now}")
     lines.append("")
-    lines.append("PORTFOLIO HYPERLIQUID")
 
-    # Sort wallets by equity descending
+    # ââ Build HyperLend collateral map: wallet_addr (lower) â data ââ
+    hl_list = hyperlend if isinstance(hyperlend, list) else [hyperlend]
+    hl_by_wallet: dict[str, dict[str, float]] = {}
+    for hl in hl_list:
+        if hl.get("status") == "ok":
+            h = hl["data"]
+            addr = (h.get("wallet") or "").lower()
+            coll = h.get("total_collateral_usd", 0.0) or 0.0
+            debt = h.get("total_debt_usd", 0.0) or 0.0
+            if addr:
+                hl_by_wallet[addr] = {
+                    "collateral_usd": coll,
+                    "debt_usd": debt,
+                    "net_usd": coll - debt,
+                }
+
+    # ââ Compute total capital per wallet (perp + spot + HyperLend collateral) ââ
+    for w in wallets:
+        if w.get("status") != "ok":
+            continue
+        d = w["data"]
+        wallet_addr = (d.get("wallet") or "").lower()
+        perp_eq = d.get("account_value") or 0.0
+        spot_usd = _estimate_spot_usd(d.get("spot_balances") or [])
+        hl_data = hl_by_wallet.get(wallet_addr, {})
+        hl_coll = hl_data.get("collateral_usd", 0.0)
+        hl_debt = hl_data.get("debt_usd", 0.0)
+        total_capital = perp_eq + spot_usd + hl_coll
+        d["_total_capital"] = total_capital
+        d["_perp_equity"] = perp_eq
+        d["_spot_usd"] = spot_usd
+        d["_hl_collateral_usd"] = hl_coll
+        d["_hl_debt_usd"] = hl_debt
+
+    # Sort wallets by total capital descending (dynamic ordering)
     wallets = sorted(wallets,
-                     key=lambda w: (w.get("data", {}).get("account_value") or 0)
+                     key=lambda w: (w.get("data", {}).get("_total_capital") or 0)
                      if w.get("status") == "ok" else 0,
                      reverse=True)
 
-    total_eq = 0.0
+    # Dynamic wallet labels based on capital rank
+    RANK_LABELS = ["PRINCIPAL", "SECUNDARIA"]
+
+    lines.append("PORTFOLIO CONSOLIDADO")
+
+    total_fund_capital = 0.0
     total_upnl = 0.0
     all_spot: list[dict[str, Any]] = []
-    cycle_positions: list[dict[str, Any]] = []  # Trade del Ciclo BTC LONGs
+    cycle_positions: list[dict[str, Any]] = []
+    wallet_rank = 0
 
     for w in wallets:
         if w.get("status") != "ok":
             label = w.get("label", "?")
-            short = (w.get("wallet") or "")[:6] + "…"
+            short = (w.get("wallet") or "")[:6] + "â¦"
             error_msg = w.get("error", "error")
-            # Check if stale cache
             if w.get("stale"):
-                lines.append(f"  • {label} ({short}): ⚠️ {error_msg} (usando cache)")
+                lines.append(f"  â¢ {label} ({short}): â ï¸ {error_msg} (usando cache)")
             else:
-                lines.append(f"  • {label} ({short}): ❌ {error_msg}")
+                lines.append(f"  â¢ {label} ({short}): â {error_msg}")
             continue
         d = w["data"]
-        short = d["wallet"][:6] + "…" + d["wallet"][-4:]
-        eq_val = d.get("account_value") or 0.0
+        short = d["wallet"][:6] + "â¦" + d["wallet"][-4:]
+        tc = d.get("_total_capital") or 0.0
+        perp_eq = d.get("_perp_equity") or 0.0
+        spot_usd = d.get("_spot_usd") or 0.0
+        hl_coll = d.get("_hl_collateral_usd") or 0.0
+        hl_debt = d.get("_hl_debt_usd") or 0.0
         upnl_val = d.get("unrealized_pnl_total") or 0.0
-        total_eq += eq_val
+        total_fund_capital += tc
         total_upnl += upnl_val
-        eq = _fmt_usd(eq_val)
-        upnl = _fmt_usd(upnl_val)
-        ntl = _fmt_usd(d.get("total_ntl_pos"))
+
+        # Dynamic label: PRINCIPAL / SECUNDARIA / original label
+        if wallet_rank < len(RANK_LABELS) and tc > 0.01:
+            display_label = f"ð° {RANK_LABELS[wallet_rank]}"
+        else:
+            display_label = d["label"]
+        wallet_rank += 1
 
         positions = d.get("positions") or []
         if positions:
@@ -77,8 +139,23 @@ def format_quick_positions(wallets: list[dict[str, Any]],
         else:
             pos_summary = "sin posiciones perp"
 
-        lines.append(f"  • {d['label']} {short}")
-        lines.append(f"    Equity: {eq} | UPnL: {upnl} | Notional: {ntl}")
+        lines.append(f"  â¢ {display_label} {short}")
+        lines.append(f"    Capital Total: {_fmt_usd(tc)}")
+
+        # Breakdown only if multiple components have value
+        parts: list[str] = []
+        if perp_eq > 0.01:
+            parts.append(f"Perp {_fmt_usd(perp_eq)}")
+        if spot_usd > 0.01:
+            parts.append(f"Spot {_fmt_usd(spot_usd)}")
+        if hl_coll > 0.01:
+            parts.append(f"HL Coll {_fmt_usd(hl_coll)}")
+        if hl_debt > 0.01:
+            parts.append(f"HL Debt -{_fmt_usd(hl_debt)}")
+        if len(parts) > 0:
+            lines.append(f"    ({' | '.join(parts)})")
+        if upnl_val != 0:
+            lines.append(f"    UPnL: {_fmt_usd(upnl_val)}")
         lines.append(f"    {pos_summary}")
 
         # Collect spot balances
@@ -94,9 +171,9 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                 p["_wallet_short"] = short
                 cycle_positions.append(p)
 
-    lines.append(f"  TOTAL: Equity {_fmt_usd(total_eq)} | UPnL {_fmt_usd(total_upnl)}")
+    lines.append(f"  TOTAL FONDO: Capital {_fmt_usd(total_fund_capital)} | UPnL {_fmt_usd(total_upnl)}")
 
-    # ── Trade del Ciclo (BTC LONG 3x) — always visible ──
+    # ââ Trade del Ciclo (BTC LONG 3x) â always visible ââ
     lines.append("")
     lines.append("TRADE DEL CICLO (BTC LONG 3x)")
     if cycle_positions:
@@ -118,7 +195,6 @@ def format_quick_positions(wallets: list[dict[str, Any]],
             if liq:
                 lines.append(f"    Liq: ${liq:,.0f}")
 
-            # DCA status
             if mark:
                 btc_current = mark
             elif entry:
@@ -135,21 +211,19 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                 pending = [f"${l[0]:,} ({l[1]})" for l in dca_levels if btc_current > l[0]]
                 triggered = [f"${l[0]:,} ({l[1]})" for l in dca_levels if btc_current <= l[0]]
                 if triggered:
-                    lines.append(f"    ⚠️ DCA triggered: {', '.join(triggered)}")
+                    lines.append(f"    â ï¸ DCA triggered: {', '.join(triggered)}")
                 if pending:
                     lines.append(f"    Pending DCA: {', '.join(pending)}")
                 if btc_current >= 150_000:
-                    lines.append("    🎯 TP ZONE — evaluar cierre parcial")
+                    lines.append("    ð¯ TP ZONE â evaluar cierre parcial")
     else:
-        # No cycle positions — show section as inactive
-        lines.append("  Status: PENDIENTE — sin posición abierta")
+        lines.append("  Status: PENDIENTE â sin posiciÃ³n abierta")
         lines.append("  DCA plan activo: $70K / $63K / $55K")
 
-    # ── Spot token balances (kHYPE, PEAR, etc.) ──
+    # ââ Spot token balances (kHYPE, PEAR, etc.) ââ
     if all_spot:
         lines.append("")
         lines.append("SPOT TOKENS")
-        # Group by coin
         by_coin: dict[str, list[dict[str, Any]]] = {}
         for sb in all_spot:
             coin = sb.get("coin", "?")
@@ -159,7 +233,6 @@ def format_quick_positions(wallets: list[dict[str, Any]],
             total_amount = sum(e.get("total", 0) for e in entries)
             total_entry = sum(e.get("entry_ntl", 0) for e in entries)
 
-            # USDC special handling: show balance as cost basis
             if coin == "USDC":
                 cost_basis_display = f"${total_amount:,.2f}"
             else:
@@ -167,18 +240,16 @@ def format_quick_positions(wallets: list[dict[str, Any]],
 
             if len(entries) == 1:
                 wallet_label = entries[0].get("_wallet_label", "")
-                lines.append(f"  • {coin}: {total_amount:.4f} (cost basis: {cost_basis_display}) [{wallet_label}]")
+                lines.append(f"  â¢ {coin}: {total_amount:.4f} (cost basis: {cost_basis_display}) [{wallet_label}]")
             else:
-                lines.append(f"  • {coin}: {total_amount:.4f} total (cost basis: {cost_basis_display})")
+                lines.append(f"  â¢ {coin}: {total_amount:.4f} total (cost basis: {cost_basis_display})")
                 for e in entries:
                     lines.append(f"      {e.get('_wallet_label','?')}: {e.get('total',0):.4f}")
 
-    # HyperLend section — supports both list (new) and dict (legacy) format
+    # HyperLend section â detailed view with HF, collateral breakdown, debt
     lines.append("")
     lines.append("HYPERLEND")
-    hl_list = hyperlend if isinstance(hyperlend, list) else [hyperlend]
 
-    # Sort HyperLend by collateral descending
     hl_list = sorted(hl_list,
                      key=lambda hl: (hl.get("data", {}).get("total_collateral_usd") or 0)
                      if hl.get("status") == "ok" else 0,
@@ -190,15 +261,14 @@ def format_quick_positions(wallets: list[dict[str, Any]],
             coll = h.get("total_collateral_usd", 0.0) or 0.0
             if coll < 0.01:
                 continue
-            label = h.get("label") or hl.get("label") or "—"
+            label = h.get("label") or hl.get("label") or "â"
             wallet_short = (h.get("wallet") or "")[:6]
             if wallet_short:
-                wallet_short = wallet_short + "…" + (h.get("wallet") or "")[-4:]
+                wallet_short = wallet_short + "â¦" + (h.get("wallet") or "")[-4:]
             header = f"  [{label}]" + (f" {wallet_short}" if wallet_short else "")
             lines.append(header)
             lines.append(f"    HF: {_fmt_hf(h.get('health_factor'))}")
 
-            # Colateral — show asset symbol + balance when available
             coll_sym = h.get("collateral_symbol")
             coll_bal = h.get("collateral_balance") or 0.0
             if coll_sym and coll_bal:
@@ -208,7 +278,6 @@ def format_quick_positions(wallets: list[dict[str, Any]],
             else:
                 lines.append(f"    Colateral: {_fmt_usd(h.get('total_collateral_usd'))}")
 
-            # Borrowed — show actual asset symbol (UETH, USDH, ...) + balance
             debt_sym = h.get("debt_symbol")
             debt_bal = h.get("debt_balance") or 0.0
             if debt_sym and debt_bal:
@@ -221,9 +290,9 @@ def format_quick_positions(wallets: list[dict[str, Any]],
             lines.append(f"    Available borrow: {_fmt_usd(h.get('available_borrows_usd'))}")
             lines.append(f"    LTV: {(h.get('ltv') or 0)*100:.1f}% | LiqThr: {(h.get('current_liquidation_threshold') or 0)*100:.1f}%")
         else:
-            lines.append(f"  ❌ {hl.get('error','error')}")
+            lines.append(f"  â {hl.get('error','error')}")
 
-    # ── Bounce Tech leveraged tokens ──
+    # ââ Bounce Tech leveraged tokens ââ
     if bounce_tech is not None:
         bt_positions = []
         for bw in bounce_tech:
@@ -237,18 +306,17 @@ def format_quick_positions(wallets: list[dict[str, Any]],
         if bt_positions:
             bt_total = 0.0
             for p in bt_positions:
-                direction = "🟢 LONG" if p.get("is_long") else "🔴 SHORT"
+                direction = "ð¢ LONG" if p.get("is_long") else "ð´ SHORT"
                 asset = p.get("asset", "?")
                 lev = p.get("leverage", "?")
                 val = p.get("value_usd", 0.0)
                 bt_total += val
-                lines.append(f"  {direction} {asset} {lev} — {_fmt_usd(val)}")
+                lines.append(f"  {direction} {asset} {lev} â {_fmt_usd(val)}")
             lines.append(f"  Total BT: {_fmt_usd(bt_total)}")
         else:
-            lines.append("  INACTIVA — sin posiciones abiertas")
+            lines.append("  INACTIVA â sin posiciones abiertas")
 
-
-    # ── Trades cerrados últimas 24h ──
+    # ââ Trades cerrados Ãºltimas 24h ââ
     if recent_fills:
         lines.append("")
         lines.append("TRADES CERRADOS (24h)")
@@ -265,7 +333,7 @@ def format_quick_positions(wallets: list[dict[str, Any]],
             label = f.get("_wallet_label", "")
             total_pnl += pnl
             total_fees += fee
-            icon = "🟢" if pnl >= 0 else "🔴"
+            icon = "ð¢" if pnl >= 0 else "ð´"
             ts = f.get("time")
             time_str = ""
             if ts:
@@ -278,10 +346,9 @@ def format_quick_positions(wallets: list[dict[str, Any]],
 
 
 def format_hf(hyperlend: list[dict[str, Any]] | dict[str, Any]) -> str:
-    """Format HF for /hf command — supports both list and single dict."""
+    """Format HF for /hf command â supports both list and single dict."""
     hl_list = hyperlend if isinstance(hyperlend, list) else [hyperlend]
 
-    # Sort HyperLend by collateral descending
     hl_list = sorted(hl_list,
                      key=lambda hl: (hl.get("data", {}).get("total_collateral_usd") or 0)
                      if hl.get("status") == "ok" else 0,
@@ -290,7 +357,7 @@ def format_hf(hyperlend: list[dict[str, Any]] | dict[str, Any]) -> str:
     parts: list[str] = []
     for hl in hl_list:
         if hl.get("status") != "ok":
-            parts.append(f"❌ HyperLend: {hl.get('error','error')}")
+            parts.append(f"â HyperLend: {hl.get('error','error')}")
             continue
         h = hl["data"]
         coll = h.get("total_collateral_usd", 0.0) or 0.0
@@ -298,14 +365,14 @@ def format_hf(hyperlend: list[dict[str, Any]] | dict[str, Any]) -> str:
             continue
 
         hf = h.get("health_factor")
-        icon = "🟢"
+        icon = "ð¢"
         if hf is not None and not math.isinf(hf):
             if hf < 1.10:
-                icon = "🚨"
+                icon = "ð¨"
             elif hf < 1.20:
-                icon = "⚠️"
+                icon = "â ï¸"
 
-        label = h.get("label") or hl.get("label") or "—"
+        label = h.get("label") or hl.get("label") or "â"
         coll_sym = h.get("collateral_symbol")
         coll_bal = h.get("collateral_balance") or 0.0
         debt_sym = h.get("debt_symbol")
@@ -330,7 +397,7 @@ def format_hf(hyperlend: list[dict[str, Any]] | dict[str, Any]) -> str:
             f"  Available: {_fmt_usd(h.get('available_borrows_usd'))}"
         )
 
-    return "\n".join(parts) if parts else "— Sin posiciones HyperLend activas"
+    return "\n".join(parts) if parts else "â Sin posiciones HyperLend activas"
 
 
 def compile_raw_data(
@@ -346,7 +413,6 @@ def compile_raw_data(
 
     now = datetime.now(timezone.utc).isoformat()
 
-    # Extract bounce_tech from telegram_intel if not passed separately
     bt = bounce_tech
     if not bt and isinstance(telegram_intel, dict) and "bounce_tech" in telegram_intel:
         bt = telegram_intel.pop("bounce_tech", None)
@@ -365,5 +431,5 @@ def compile_raw_data(
         "DATA CRUDA (timestamp UTC " + now + "):\n\n"
         "```json\n" + pretty + "\n```\n\n"
         "Genera el reporte siguiendo el formato del system prompt. "
-        "Sin relleno, números específicos, conclusiones accionables."
+        "Sin relleno, nÃºmeros especÃ­ficos, conclusiones accionables."
     )
