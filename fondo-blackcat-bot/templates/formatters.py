@@ -31,7 +31,8 @@ def _fmt_hf(v: float | None) -> str:
 
 def format_quick_positions(wallets: list[dict[str, Any]],
                            hyperlend: list[dict[str, Any]] | dict[str, Any],
-                           bounce_tech: list[dict[str, Any]] | None = None) -> str:
+                           bounce_tech: list[dict[str, Any]] | None = None,
+                           recent_fills: list[dict[str, Any]] | None = None) -> str:
     lines: list[str] = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines.append(f"📊 Snapshot Fondo Black Cat — {now}")
@@ -245,6 +246,33 @@ def format_quick_positions(wallets: list[dict[str, Any]],
             lines.append(f"  Total BT: {_fmt_usd(bt_total)}")
         else:
             lines.append("  INACTIVA — sin posiciones abiertas")
+
+
+    # ── Trades cerrados últimas 24h ──
+    if recent_fills:
+        lines.append("")
+        lines.append("TRADES CERRADOS (24h)")
+        total_pnl = 0.0
+        total_fees = 0.0
+        for f in recent_fills:
+            coin = f.get("coin", "?")
+            side = f.get("side", "?").upper()
+            sz = f.get("sz", 0)
+            px = f.get("px", 0)
+            pnl = f.get("closedPnl", 0)
+            fee = f.get("fee", 0)
+            direction = f.get("dir", "")
+            label = f.get("_wallet_label", "")
+            total_pnl += pnl
+            total_fees += fee
+            icon = "🟢" if pnl >= 0 else "🔴"
+            ts = f.get("time")
+            time_str = ""
+            if ts:
+                from datetime import datetime as _dt, timezone as _tz
+                time_str = _dt.fromtimestamp(ts / 1000, tz=_tz.utc).strftime("%H:%M")
+            lines.append(f"  {icon} {side} {coin} {sz:.4f} @ ${px:,.2f} | PnL: {_fmt_usd(pnl)} | {time_str} [{label}]")
+        lines.append(f"  TOTAL PnL: {_fmt_usd(total_pnl)} | Fees: {_fmt_usd(total_fees)} | Net: {_fmt_usd(total_pnl - total_fees)}")
 
     return "\n".join(lines)
 
