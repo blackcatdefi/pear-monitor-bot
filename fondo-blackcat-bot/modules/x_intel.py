@@ -43,17 +43,13 @@ DEFAULT_ACCOUNTS: list[str] = [
     "DeFiDad",
 ]
 
-# Public Nitter instances — rotated list, verified Apr 2026. Dead ones removed.
-# If an instance fails, we fall through to the next one inside _nitter_fetch_all.
+# Verified alive Apr 2026: xcancel.com + nitter.net working. Others dead/broken.
+# Probe picks first working instance, so put known-good ones first.
 DEFAULT_NITTER_INSTANCES = [
-    "https://nitter.poast.org",
-    "https://nitter.privacydev.net",
-    "https://nitter.cz",
     "https://xcancel.com",
-    "https://nitter.kavin.rocks",
-    "https://nitter.unixfox.eu",
-    "https://nitter.woodland.cafe",
-    "https://nitter.in.projectsegfau.lt",
+    "https://nitter.net",
+    "https://nitter.poast.org",
+    "https://nitter.cz",
 ]
 
 # RSSHub — public RSS bridge that supports Twitter/X
