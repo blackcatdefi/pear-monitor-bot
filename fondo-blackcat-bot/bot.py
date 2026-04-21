@@ -25,7 +25,7 @@ from modules.hyperlend import fetch_all_hyperlend
 from modules.kill_scenarios import compute_kill_scenarios
 from modules.llm_providers import format_provider_status
 from modules.market import fetch_market_data
-from modules.portfolio import fetch_all_wallets
+from modules.portfolio import fetch_all_wallets, fetch_all_recent_fills
 from modules.telegram_intel import (
     fetch_telegram_intel,
     get_client as get_telethon,
@@ -149,7 +149,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
     # Todos los fetches en paralelo (Telethon separado — puede estar deshabilitado).
-    portfolio, hl, market, unlocks, x_intel, gmail_intel, bt = await asyncio.gather(
+    portfolio, hl, market, unlocks, x_intel, gmail_intel, bt, recent_fills = await asyncio.gather(
         fetch_all_wallets(),
         fetch_all_hyperlend(),
         fetch_market_data(),
@@ -157,6 +157,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         fetch_x_intel(hours=48),
         scan_gmail_unread(),
         fetch_bounce_tech(),
+        fetch_all_recent_fills(hours=24),
     )
 
     if _telethon_ok:
@@ -180,7 +181,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
 
     # ─── Sección 2: Posiciones ──────────────────────────────────────────────────
-    positions_text = format_quick_positions(portfolio, hl, bounce_tech=bt)
+    positions_text = format_quick_positions(portfolio, hl, bounce_tech=bt, recent_fills=recent_fills)
     await send_long_message(
         update,
         "\U0001f4bc POSICIONES\n" + ("\u2500" * 30) + "\n\n" + positions_text,
