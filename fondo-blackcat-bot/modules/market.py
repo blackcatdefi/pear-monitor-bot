@@ -1,4 +1,11 @@
-"""Market data aggregator: CoinGecko, Fear&Greed, CoinGlass, DefiLlama."""
+"""Market data aggregator: CoinGecko, Fear&Greed, CoinGlass, DefiLlama.
+
+Round 7 additions:
+    - Integrates `modules.coinglass.get_basket_oi_funding()` for the fund's
+      basket (BTC/ETH/HYPE + SHORT basket WLD/STRK/AVAX/ZRO/ENA).
+    - Exposes `coinglass_basket` key in fetch_market_data() so the raw-data
+      payload to the LLM carries OI + funding across the basket.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -8,6 +15,7 @@ from typing import Any
 
 from config import COINGLASS_API_KEY
 from utils.http import get_json
+from modules.coinglass import get_basket_oi_funding
 
 log = logging.getLogger(__name__)
 
@@ -123,7 +131,7 @@ async def fear_greed() -> dict[str, Any]:
         return {}
 
 
-# ─── CoinGlass (requires API key for v3) ────────────────────────────────────
+# ─── CoinGlass (v3 legacy endpoints, BTC-only) ──────────────────────────────
 COINGLASS_BASE = "https://open-api-v3.coinglass.com/api"
 
 
@@ -162,6 +170,20 @@ async def coinglass_metrics() -> dict[str, Any]:
         log.warning("CoinGlass aggregate failed: %s", exc)
         out["error"] = str(exc)
     return out
+
+
+async def coinglass_basket() -> dict[str, Any]:
+    """Round 7: OI + funding across the fund's basket via Coinglass v4."""
+    cached = _cache_get("coinglass_basket", 300)
+    if cached is not None:
+        return cached
+    try:
+        result = await get_basket_oi_funding()
+        _cache_set("coinglass_basket", result)
+        return result
+    except Exception as exc:  # noqa: BLE001
+        log.warning("coinglass_basket failed: %s", exc)
+        return {"available": False, "reason": str(exc), "basket": []}
 
 
 # ─── DefiLlama ──────────────────────────────────────────────────────────────
@@ -222,11 +244,12 @@ async def defillama_stablecoin_supply() -> dict[str, Any]:
 
 # ─── Aggregate ──────────────────────────────────────────────────────────────
 async def fetch_market_data() -> dict[str, Any]:
-    prices, glob, fng, cg, fees, stables = await asyncio.gather(
+    prices, glob, fng, cg, cg_basket, fees, stables = await asyncio.gather(
         coingecko_prices(),
         coingecko_global(),
         fear_greed(),
         coinglass_metrics(),
+        coinglass_basket(),
         defillama_top_fees(),
         defillama_stablecoin_supply(),
     )
@@ -237,6 +260,7 @@ async def fetch_market_data() -> dict[str, Any]:
             "global": glob,
             "fear_greed": fng,
             "coinglass": cg,
+            "coinglass_basket": cg_basket,
             "top_fees": fees,
             "stablecoins": stables,
         },

@@ -2,28 +2,14 @@
 
 Primary source: official X API v2 via bearer token in X_BEARER_TOKEN env var.
 Fallbacks (in order, when API fails):
-    1. Nitter RSS (multiple public instances)
+    1. Nitter RSS (multiple public instances — Round 7 expanded + rotated list)
     2. RSSHub (public instance rsshub.app or custom RSSHUB_BASE)
     3. None — return empty but with a clear error message
 
-The previous version silently returned `could_not_resolve_any_user` when the
-bearer token was rate-limited / expired, leaving /reporte without any X intel.
-This version logs the actual HTTP status + body, and falls through to Nitter.
-
-Env vars:
-    X_BEARER_TOKEN  — OAuth 2.0 Bearer token (app-only auth).  Optional.
-    X_ACCOUNTS      — optional comma-separated list of X handles without @.
-                      Defaults to DEFAULT_ACCOUNTS below.
-    NITTER_INSTANCES — optional comma-separated list of nitter hosts to try.
-
-Output shape (on success):
-    {
-        "status": "ok",
-        "source": "x_api" | "nitter",
-        "data": {"<username>": [{"id","created_at","text","metrics"}, ...], ...},
-        "accounts_scanned": N,
-        "total_tweets": N,
-    }
+Round 7 changes:
+    - Expanded Nitter instance list (verified alive Apr 2026).
+    - Per-instance + per-cascade-step logging (CASCADE STEP X / source / error).
+    - Exposes failure detail inside the returned dict for /timeline UI.
 """
 from __future__ import annotations
 
@@ -57,12 +43,17 @@ DEFAULT_ACCOUNTS: list[str] = [
     "DeFiDad",
 ]
 
-# Public Nitter instances — updated Apr 2026. Dead instances removed.
+# Public Nitter instances — rotated list, verified Apr 2026. Dead ones removed.
+# If an instance fails, we fall through to the next one inside _nitter_fetch_all.
 DEFAULT_NITTER_INSTANCES = [
     "https://nitter.poast.org",
     "https://nitter.privacydev.net",
     "https://nitter.cz",
     "https://xcancel.com",
+    "https://nitter.kavin.rocks",
+    "https://nitter.unixfox.eu",
+    "https://nitter.woodland.cafe",
+    "https://nitter.in.projectsegfau.lt",
 ]
 
 # RSSHub — public RSS bridge that supports Twitter/X
@@ -97,7 +88,6 @@ _USER_ID_CACHE: dict[str, str] = {}
 async def _resolve_user_ids(
     client: httpx.AsyncClient, usernames: list[str]
 ) -> tuple[dict[str, str], list[str]]:
-    """Return ({username_lower: user_id}, [raw_errors]). Uses /users/by."""
     missing = [u for u in usernames if u.lower() not in _USER_ID_CACHE]
     errors: list[str] = []
     for i in range(0, len(missing), 100):
@@ -108,7 +98,7 @@ async def _resolve_user_ids(
                 params={"usernames": ",".join(batch)},
             )
             log.info(
-                "X users/by batch %d status=%d bytes=%d",
+                "[CASCADE] X users/by batch %d status=%d bytes=%d",
                 i // 100, resp.status_code, len(resp.content),
             )
             if resp.status_code == 200:
@@ -119,8 +109,7 @@ async def _resolve_user_ids(
                     log.warning("X users/by 200 but empty data — body: %s", resp.text[:400])
             elif resp.status_code == 429:
                 log.warning(
-                    "X users/by rate limited at batch %d, pausing 60s; headers=%s",
-                    i // 100,
+                    "[CASCADE] X users/by rate limited, pause 60s; headers=%s",
                     {k: v for k, v in resp.headers.items() if "limit" in k.lower() or "reset" in k.lower()},
                 )
                 await asyncio.sleep(60)
@@ -128,24 +117,21 @@ async def _resolve_user_ids(
                     f"{API_BASE}/users/by",
                     params={"usernames": ",".join(batch)},
                 )
-                log.info("X users/by retry status=%d", resp2.status_code)
+                log.info("[CASCADE] X users/by retry status=%d", resp2.status_code)
                 if resp2.status_code == 200:
                     for u in resp2.json().get("data") or []:
                         _USER_ID_CACHE[u["username"].lower()] = u["id"]
                 else:
                     errors.append(f"batch {i//100} retry {resp2.status_code}: {resp2.text[:200]}")
-                    log.warning("X users/by retry failed %d: %s", resp2.status_code, resp2.text[:400])
             else:
                 errors.append(f"batch {i//100} status {resp.status_code}: {resp.text[:200]}")
                 log.warning(
-                    "X users/by failed status=%d body=%s headers=%s",
-                    resp.status_code,
-                    resp.text[:400],
-                    dict(resp.headers),
+                    "[CASCADE] X users/by failed status=%d body=%s",
+                    resp.status_code, resp.text[:400],
                 )
         except Exception as exc:  # noqa: BLE001
             errors.append(f"batch {i//100} exception: {exc}")
-            log.warning("X users/by exception batch %d: %s", i // 100, exc)
+            log.warning("[CASCADE] X users/by exception batch %d: %s", i // 100, exc)
         if i + 100 < len(missing):
             await asyncio.sleep(1)
 
@@ -174,15 +160,16 @@ async def _fetch_user_tweets(
             },
         )
     except Exception as exc:  # noqa: BLE001
-        log.warning("X tweets %s exception: %s", username, exc)
+        log.warning("[CASCADE] X tweets %s exception: %s", username, exc)
         return []
 
     if resp.status_code == 429:
-        log.warning("X tweets %s rate limited, skipping", username)
+        log.warning("[CASCADE] X tweets %s rate limited, skipping", username)
         return []
     if resp.status_code != 200:
         log.warning(
-            "X tweets %s failed %d: %s", username, resp.status_code, resp.text[:200]
+            "[CASCADE] X tweets %s failed %d: %s",
+            username, resp.status_code, resp.text[:200],
         )
         return []
 
@@ -197,19 +184,16 @@ async def _fetch_user_tweets(
                     continue
             except Exception:  # noqa: BLE001
                 pass
-        out.append(
-            {
-                "id": t.get("id"),
-                "created_at": created,
-                "text": (t.get("text") or "").strip(),
-                "metrics": t.get("public_metrics") or {},
-            }
-        )
+        out.append({
+            "id": t.get("id"),
+            "created_at": created,
+            "text": (t.get("text") or "").strip(),
+            "metrics": t.get("public_metrics") or {},
+        })
     return out
 
 
 # ─── Nitter RSS fallback ────────────────────────────────────────────────
-_NITTER_STARS_RE = re.compile(r"(\d[\d,]*)")
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 
@@ -229,7 +213,6 @@ async def _fetch_nitter_rss_one(
     if resp.status_code != 200 or not resp.content:
         return f"{instance}: status {resp.status_code}", []
     body = resp.content
-    # Some instances return HTML error pages with 200 — quick sniff for <rss
     if b"<rss" not in body[:200] and b"<feed" not in body[:200]:
         return f"{instance}: non-rss body", []
 
@@ -239,10 +222,8 @@ async def _fetch_nitter_rss_one(
         return f"{instance}: parse {exc}", []
 
     items: list[dict[str, Any]] = []
-    # RSS 2.0 structure: root -> channel -> item*
     channel = root.find("channel")
     if channel is None:
-        # Atom
         for entry in root.findall("{http://www.w3.org/2005/Atom}entry"):
             items.append(_parse_atom_entry(entry))
     else:
@@ -280,12 +261,7 @@ def _parse_rss_item(item: ET.Element) -> dict[str, Any]:
         if m:
             tid = m.group(1)
 
-    return {
-        "id": tid,
-        "created_at": created,
-        "text": text,
-        "metrics": {},  # Nitter RSS doesn't give us engagement counts
-    }
+    return {"id": tid, "created_at": created, "text": text, "metrics": {}}
 
 
 def _parse_atom_entry(entry: ET.Element) -> dict[str, Any]:
@@ -302,32 +278,27 @@ def _parse_atom_entry(entry: ET.Element) -> dict[str, Any]:
         m = re.search(r"(\d+)", id_el.text)
         if m:
             tid = m.group(1)
-    return {
-        "id": tid,
-        "created_at": created,
-        "text": text,
-        "metrics": {},
-    }
+    return {"id": tid, "created_at": created, "text": text, "metrics": {}}
 
 
 async def _nitter_fetch_all(
     client: httpx.AsyncClient, usernames: list[str], cutoff: datetime
 ) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
     instances = _nitter_instances()
-    # Find a working instance by probing the first username
     working_instance: str | None = None
     probe_errors: list[str] = []
     probe_user = usernames[0] if usernames else "jack"
     for inst in instances:
-        status, items = await _fetch_nitter_rss_one(client, inst, probe_user)
+        status, _ = await _fetch_nitter_rss_one(client, inst, probe_user)
         if status == "ok":
             working_instance = inst
-            log.info("Nitter fallback: using instance %s", inst)
+            log.info("[CASCADE] STEP 2 Nitter picked working instance %s", inst)
             break
         probe_errors.append(f"{inst}: {status}")
+        log.warning("[CASCADE] STEP 2 Nitter probe %s -> %s", inst, status)
 
     if not working_instance:
-        log.warning("All Nitter instances failed probes: %s", probe_errors)
+        log.warning("[CASCADE] STEP 2 ALL Nitter instances failed probes: %s", probe_errors[:5])
         return {}, probe_errors
 
     sem = asyncio.Semaphore(4)
@@ -336,14 +307,13 @@ async def _nitter_fetch_all(
         async with sem:
             status, items = await _fetch_nitter_rss_one(client, working_instance, uname)
         if status != "ok":
+            log.debug("[CASCADE] STEP 2 nitter %s %s -> %s", working_instance, uname, status)
             return uname, []
         filtered: list[dict[str, Any]] = []
         for it in items:
             if it.get("created_at"):
                 try:
-                    dt = datetime.fromisoformat(
-                        str(it["created_at"]).replace("Z", "+00:00")
-                    )
+                    dt = datetime.fromisoformat(str(it["created_at"]).replace("Z", "+00:00"))
                     if dt < cutoff:
                         continue
                 except Exception:  # noqa: BLE001
@@ -365,7 +335,6 @@ async def _nitter_fetch_all(
 async def _rsshub_fetch_one(
     client: httpx.AsyncClient, username: str
 ) -> tuple[str, list[dict[str, Any]]]:
-    """Fetch tweets for one user via RSSHub RSS bridge."""
     url = f"{RSSHUB_BASE}/twitter/user/{username}"
     try:
         resp = await client.get(url, follow_redirects=True, timeout=10.0)
@@ -399,8 +368,6 @@ async def _rsshub_fetch_one(
 async def _rsshub_fetch_all(
     client: httpx.AsyncClient, usernames: list[str], cutoff: datetime
 ) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
-    """Fetch tweets via RSSHub for all usernames with rate-limited concurrency."""
-    # Quick probe: test if RSSHub is reachable at all
     probe_user = usernames[0] if usernames else "jack"
     probe_status, _ = await _rsshub_fetch_one(client, probe_user)
     if probe_status != "ok":
@@ -408,7 +375,7 @@ async def _rsshub_fetch_all(
         return {}, [f"rsshub probe: {probe_status}"]
 
     log.info("[CASCADE] STEP 3 RSSHub probe OK, fetching %d accounts...", len(usernames))
-    sem = asyncio.Semaphore(3)  # gentle on public RSSHub
+    sem = asyncio.Semaphore(3)
 
     async def _one(uname: str) -> tuple[str, list[dict[str, Any]]]:
         async with sem:
@@ -419,9 +386,7 @@ async def _rsshub_fetch_all(
         for it in items:
             if it.get("created_at"):
                 try:
-                    dt = datetime.fromisoformat(
-                        str(it["created_at"]).replace("Z", "+00:00")
-                    )
+                    dt = datetime.fromisoformat(str(it["created_at"]).replace("Z", "+00:00"))
                     if dt < cutoff:
                         continue
                 except Exception:  # noqa: BLE001
@@ -449,7 +414,7 @@ async def fetch_x_intel(
 ) -> dict[str, Any]:
     """Fetch last `hours` of tweets from `accounts`.
 
-    Tries X API first, falls back to Nitter RSS.  Never raises.
+    Cascades X API → Nitter RSS → RSSHub. Never raises.
     """
     handles = accounts or _accounts_from_env()
     if not handles:
@@ -474,7 +439,6 @@ async def fetch_x_intel(
                     await asyncio.sleep(2.5)
                     uids, more_errors = await _resolve_user_ids(client, handles)
                     api_errors.extend(more_errors)
-                    log.info("[CASCADE] STEP 1 retry: %d users resolved", len(uids))
 
                 if uids:
                     sem = asyncio.Semaphore(10)
@@ -517,7 +481,7 @@ async def fetch_x_intel(
     log.warning("[CASCADE] STEP 1 FAILED. Errors: %s", api_errors[:5])
 
     # ── STEP 2: Nitter RSS ──
-    log.info("[CASCADE] STEP 2 Nitter RSS — trying instances: %s", _nitter_instances())
+    log.info("[CASCADE] STEP 2 Nitter RSS — trying %d instances", len(_nitter_instances()))
     nitter_errors: list[str] = []
     try:
         async with httpx.AsyncClient(
@@ -526,8 +490,6 @@ async def fetch_x_intel(
         ) as client:
             data, probe_errors = await _nitter_fetch_all(client, handles, cutoff)
             nitter_errors.extend(probe_errors)
-            if probe_errors:
-                log.warning("[CASCADE] STEP 2 Nitter probe errors: %s", probe_errors)
             if data:
                 total = sum(len(v) for v in data.values())
                 log.info("[CASCADE] STEP 2 SUCCESS — %d accounts, %d tweets via Nitter", len(data), total)
@@ -573,7 +535,6 @@ async def fetch_x_intel(
 
     log.warning("[CASCADE] STEP 3 FAILED. RSSHub errors: %s", rsshub_errors[:5])
 
-    # Nothing worked — return structured error with diagnostic detail
     log.error("[CASCADE] ALL 3 STEPS FAILED. X API: %s | Nitter: %s | RSSHub: %s",
               api_errors[:3], nitter_errors[:3], rsshub_errors[:3])
     return {
@@ -592,14 +553,12 @@ async def debug_x_status() -> str:
     """Diagnostic info for X/Twitter connectivity."""
     lines = ["🔍 X/TWITTER DEBUG STATUS\n"]
 
-    # Check token
     token = X_BEARER_TOKEN or ""
     if not token:
         lines.append("❌ X_BEARER_TOKEN: NO CONFIGURADO")
     else:
         lines.append(f"✅ X_BEARER_TOKEN: {token[:4]}...{token[-4:]} ({len(token)} chars)")
 
-    # Test X API v2
     if token:
         try:
             async with httpx.AsyncClient() as client:
@@ -615,9 +574,8 @@ async def debug_x_status() -> str:
         except Exception as e:
             lines.append(f"\nX API v2: ERROR — {e}")
 
-    # Test Nitter instances
     nitter_instances = _nitter_instances()
-    for instance in nitter_instances[:3]:  # Test first 3
+    for instance in nitter_instances[:5]:
         try:
             async with httpx.AsyncClient() as client:
                 resp = await client.get(
@@ -628,7 +586,6 @@ async def debug_x_status() -> str:
         except Exception as e:
             lines.append(f"\nNitter {instance}: ERROR — {e}")
 
-    # Test RSSHub
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
