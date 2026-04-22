@@ -72,6 +72,13 @@ _DIAG_403 = (
     "HTTP 403 — Bearer sin permisos para la list. "
     "Verificá que la app pertenezca a @BlackCatDeFi y que la list sea accesible."
 )
+_DIAG_403_SPEND_CAP = (
+    "HTTP 403 SpendCapReached — tu cuenta tiene créditos ($4.51 visibles) "
+    "PERO alcanzó el SPEND CAP del ciclo de billing. "
+    "Fix: developer.x.com → Products → Usage → AUMENTAR Spend Cap "
+    "(NO es top-up, NO es payment method — es una cap separada). "
+    "Reset automático: consultar 'reset_date' en response."
+)
 _DIAG_404 = (
     "HTTP 404 — List ID no encontrada. "
     "Verificá X_LIST_ID en Railway (actual ID: Fondo Black Cat Intel = 2046698139873378486)."
@@ -149,8 +156,23 @@ async def fetch_timeline_via_list(
                 break
 
             if resp.status_code != 200:
-                body_snip = resp.text[:200]
+                body_snip = resp.text[:300]
                 log.error("X API %d: %s", resp.status_code, body_snip)
+                # Parse body for X-specific error types (SpendCapReached etc.)
+                try:
+                    body_json = resp.json()
+                except Exception:
+                    body_json = {}
+                title = (body_json.get("title") or "").lower()
+                err_type = (body_json.get("type") or "").lower()
+                reset_date = body_json.get("reset_date") or ""
+
+                if resp.status_code == 403 and ("spendcap" in title or "credits" in err_type):
+                    diag = _DIAG_403_SPEND_CAP
+                    if reset_date:
+                        diag += f" reset_date={reset_date}."
+                    return None, diag
+
                 diag = _diag_for_status(resp.status_code)
                 # Include body snippet for non-standard errors
                 if resp.status_code not in (401, 402, 403, 404, 429):
@@ -285,6 +307,21 @@ async def debug_x_status() -> str:
     lines.append(f"  Cost: {stats['cost_str']}")
     lines.append("")
 
+    # Cache state (scheduler)
+    cs = get_cache_state()
+    lines.append("💾 Cache scheduler (every 2h):")
+    lines.append(f"  Last success: {cs.get('last_success_at') or '— nunca'}")
+    lines.append(f"  Last attempt: {cs.get('last_attempt_at') or '— nunca'}")
+    tc = cs.get("last_tweet_count", 0)
+    ac = cs.get("last_account_count", 0)
+    lines.append(f"  Last cache content: {tc} tweets de {ac} cuentas")
+    succ_fail = cs.get("successive_failures", 0)
+    if succ_fail > 0:
+        lines.append(f"  ⚠️ {succ_fail} failures consecutivos")
+    if cs.get("last_error"):
+        lines.append(f"  Last error: {cs['last_error'][:300]}")
+    lines.append("")
+
     # Live test
     if X_LIST_ID and X_API_BEARER_TOKEN:
         lines.append("🧪 Test en vivo...")
@@ -328,26 +365,59 @@ async def format_intel_sources(hours: int = 24, max_tweets: int = 500) -> str:
 
 # ─── Cached timeline for scheduler ─────────────────────────────────────────
 _cached_timeline: dict[str, Any] | None = None
+_cache_state: dict[str, Any] = {
+    "last_success_at": None,     # ISO datetime of last successful cache refresh
+    "last_attempt_at": None,     # ISO datetime of last attempt (success or fail)
+    "last_error": None,          # diagnostic string of last error
+    "last_tweet_count": 0,
+    "last_account_count": 0,
+    "successive_failures": 0,
+}
 
 
 async def poll_and_cache_timeline() -> None:
-    """Scheduler job: fetch timeline and cache it for quick access."""
+    """Scheduler job: fetch timeline and cache it for quick access.
+
+    Never re-raises — the scheduler must keep running. All failures
+    populate _cache_state["last_error"] with a diagnostic string.
+    """
     global _cached_timeline
+    log.info("[X_CACHE] Starting scheduled refresh")
+    _cache_state["last_attempt_at"] = datetime.now(timezone.utc).isoformat()
     try:
         result = await fetch_x_intel(hours=48)
         if result.get("status") == "ok":
             _cached_timeline = result
+            _cache_state["last_success_at"] = datetime.now(timezone.utc).isoformat()
+            _cache_state["last_error"] = None
+            _cache_state["last_tweet_count"] = result.get("total", 0)
+            _cache_state["last_account_count"] = result.get("accounts", 0)
+            _cache_state["successive_failures"] = 0
             log.info(
-                "X timeline cached: %d tweets from %d accounts",
+                "[X_CACHE] Success: %d tweets from %d accounts",
                 result.get("total", 0),
                 result.get("accounts", 0),
             )
         else:
-            log.warning("X timeline cache refresh failed: %s", result.get("error"))
-    except Exception:
-        log.exception("X timeline cache refresh error")
+            err = result.get("error", "unknown")
+            _cache_state["last_error"] = err
+            _cache_state["successive_failures"] += 1
+            log.warning(
+                "[X_CACHE] FAILED (%d consecutive): %s",
+                _cache_state["successive_failures"], err,
+            )
+    except Exception as e:
+        err = f"{type(e).__name__}: {str(e)[:200]}"
+        _cache_state["last_error"] = err
+        _cache_state["successive_failures"] += 1
+        log.exception("[X_CACHE] Exception (%d consecutive)", _cache_state["successive_failures"])
 
 
 def get_cached_timeline() -> dict[str, Any] | None:
     """Return the last cached timeline, or None."""
     return _cached_timeline
+
+
+def get_cache_state() -> dict[str, Any]:
+    """Return cache metadata for /debug_x."""
+    return dict(_cache_state)

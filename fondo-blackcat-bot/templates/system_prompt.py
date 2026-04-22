@@ -8,16 +8,20 @@ of which model processes the request.
 from fund_state import (
     BASKET_NOTE,
     BASKET_STATUS,
+    BLOFIN_BALANCE_AVAILABLE,
     FLYWHEEL_NOTE,
     HF_CRITICAL,
     HF_LIQUIDATION,
     HF_WARN,
     TRADE_DEL_CICLO_BLOFIN_BALANCE_USD,
+    TRADE_DEL_CICLO_LAST_CLOSE,
     TRADE_DEL_CICLO_LAST_ENTRY,
     TRADE_DEL_CICLO_LAST_UPDATE,
     TRADE_DEL_CICLO_LEVERAGE,
     TRADE_DEL_CICLO_NOTE,
     TRADE_DEL_CICLO_PLATFORM,
+    TRADE_DEL_CICLO_PNL_REALIZED,
+    TRADE_DEL_CICLO_STATUS,
 )
 
 
@@ -43,11 +47,14 @@ HF THRESHOLDS (regla operativa del fondo):
   • HF > 1.20 → cómodo, considerar sacar más prestado
 
 TRADE DEL CICLO:
+  • Estado: {TRADE_DEL_CICLO_STATUS}
   • Plataforma: {TRADE_DEL_CICLO_PLATFORM.upper()} (sin API pública)
   • Leverage: {TRADE_DEL_CICLO_LEVERAGE}x
-  • Último entry confirmado por BCD: ${TRADE_DEL_CICLO_LAST_ENTRY:,.2f}
-  • Balance Blofin aproximado: ${TRADE_DEL_CICLO_BLOFIN_BALANCE_USD:,.2f}
-  • Última lectura manual: {TRADE_DEL_CICLO_LAST_UPDATE}
+  • Último entry: ${TRADE_DEL_CICLO_LAST_ENTRY:,.2f}
+  • Balance Blofin: ${TRADE_DEL_CICLO_BLOFIN_BALANCE_USD:,.2f}
+  • Última actualización: {TRADE_DEL_CICLO_LAST_UPDATE}
+  • Cerrado: {TRADE_DEL_CICLO_LAST_CLOSE}  |  PnL realizado: ${TRADE_DEL_CICLO_PNL_REALIZED:+,.2f}
+  • Balance disponible para próxima entrada: ${BLOFIN_BALANCE_AVAILABLE:,.2f}
   • {TRADE_DEL_CICLO_NOTE}
 
 BASKET ALT SHORT BLEED:

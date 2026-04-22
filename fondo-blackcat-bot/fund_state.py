@@ -18,19 +18,28 @@ HF_CRITICAL = 1.10     # Fund operative action threshold (trigger action)
 HF_WARN = 1.15         # Fund operative monitoring threshold (trigger monitoreo)
 
 # ─── Trade del Ciclo (Blofin, managed outside bot) ─────────────────────────
+# BCD edita este bloque a mano cuando el trade abre/cierra. Todas las constantes
+# abajo se leen por templates/system_prompt.py + templates/formatters.py.
+TRADE_DEL_CICLO_STATUS = "CLOSED"   # "OPEN" | "CLOSED" — BCD edita
 TRADE_DEL_CICLO_PLATFORM = "blofin"
-TRADE_DEL_CICLO_LEVERAGE = 10       # 10x leverage, NOT 3x
-TRADE_DEL_CICLO_LAST_ENTRY = 75298.70  # USD — manually set by BCD
-TRADE_DEL_CICLO_LAST_UPDATE = "2026-04-20T22:00:00Z"
-TRADE_DEL_CICLO_BLOFIN_BALANCE_USD = 2234.0  # ~$1K manual + $1K copy-trading
+TRADE_DEL_CICLO_LEVERAGE = 10        # 10x leverage
+TRADE_DEL_CICLO_LAST_ENTRY = 75298.70  # USD — último entry cuando estaba OPEN
+TRADE_DEL_CICLO_LAST_UPDATE = "2026-04-22T15:00:00Z"
+TRADE_DEL_CICLO_BLOFIN_BALANCE_USD = 2800.0  # USDT disponibles post-close (22 abr)
+
+# Realized PnL + close timestamp (only meaningful when STATUS == "CLOSED")
+TRADE_DEL_CICLO_PNL_REALIZED = 577.39     # USD consolidado 3 días
+TRADE_DEL_CICLO_LAST_CLOSE = "2026-04-22T15:00:00Z"
+BLOFIN_BALANCE_AVAILABLE = 2800.0         # USDT disponibles para próxima entrada
+
 TRADE_DEL_CICLO_NOTE = (
-    "Trade del Ciclo vive en Blofin (sin API pública). El bot NO tiene acceso "
-    "a esta posición en tiempo real. Al reportar Trade del Ciclo, citar el "
-    "valor conocido de la última actualización manual y declararlo como "
-    "'último dato confirmado por BCD'. NO inventar entry/leverage/liq price. "
-    "Si hace >24h sin update manual, marcar explícitamente: "
-    "'Trade del Ciclo (Blofin, gestionado fuera del bot) — última lectura "
-    "manual: pendiente de update por BCD.'"
+    "Trade del Ciclo vive en Blofin (sin API pública). El bot NO lee esta "
+    "posición en tiempo real. Estado actual (manual): CERRADO el "
+    "2026-04-22 ~15:00 UTC con +$577.39 realizado. Copy-trading descopiado. "
+    "Balance Blofin disponible ~$2,800 USDT esperando nueva entrada. "
+    "NO reportar UPnL estimado cuando STATUS == 'CLOSED'. "
+    "Al reabrir: BCD debe setear TRADE_DEL_CICLO_STATUS='OPEN', actualizar "
+    "LAST_ENTRY, LAST_UPDATE, y vaciar LAST_CLOSE."
 )
 
 # ─── Basket SHORT status (Alt Short Bleed) ─────────────────────────────────

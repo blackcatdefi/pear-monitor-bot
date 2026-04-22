@@ -9,11 +9,15 @@ from typing import Any
 from fund_state import (
     ALT_SHORT_BLEED_WALLETS,
     BASKET_STATUS,
+    BLOFIN_BALANCE_AVAILABLE,
     TRADE_DEL_CICLO_BLOFIN_BALANCE_USD,
+    TRADE_DEL_CICLO_LAST_CLOSE,
     TRADE_DEL_CICLO_LAST_ENTRY,
     TRADE_DEL_CICLO_LAST_UPDATE,
     TRADE_DEL_CICLO_LEVERAGE,
     TRADE_DEL_CICLO_PLATFORM,
+    TRADE_DEL_CICLO_PNL_REALIZED,
+    TRADE_DEL_CICLO_STATUS,
     classify_fill,
 )
 
@@ -85,15 +89,35 @@ def _current_usd_value(coin: str, amount: float, entry_ntl: float,
 
 
 def _fmt_cycle_upnl_block(lines_out: list[str], market: dict[str, Any] | None) -> None:
-    """Append Trade del Ciclo block with estimated UPnL using current BTC price."""
+    """Append Trade del Ciclo block — handles OPEN (UPnL estimate) and CLOSED (realized)."""
+    status = (TRADE_DEL_CICLO_STATUS or "OPEN").upper()
     lines_out.append("")
-    lines_out.append(f"TRADE DEL CICLO (BTC LONG {TRADE_DEL_CICLO_LEVERAGE}x — {TRADE_DEL_CICLO_PLATFORM.upper()})")
+    lines_out.append(
+        f"TRADE DEL CICLO (BTC LONG {TRADE_DEL_CICLO_LEVERAGE}x — {TRADE_DEL_CICLO_PLATFORM.upper()}) · {status}"
+    )
     lines_out.append("  ⚠️ Blofin no expone API pública — el bot NO lee esta posición en tiempo real.")
+
+    if status == "CLOSED":
+        lines_out.append(f"  ✅ CERRADO: {TRADE_DEL_CICLO_LAST_CLOSE}")
+        lines_out.append(
+            f"  PnL realizado: {_fmt_usd(TRADE_DEL_CICLO_PNL_REALIZED)} "
+            f"(desde entry ${TRADE_DEL_CICLO_LAST_ENTRY:,.2f})"
+        )
+        lines_out.append(
+            f"  Balance Blofin disponible: {_fmt_usd(BLOFIN_BALANCE_AVAILABLE)} USDT "
+            "(copy-trading descopiado, esperando nueva entrada)"
+        )
+        lines_out.append(
+            "  Próxima entrada: pendiente orden manual BCD. "
+            "Edit fund_state.py → STATUS=OPEN + nuevo LAST_ENTRY al reabrir."
+        )
+        return
+
+    # STATUS == OPEN → render UPnL estimate
     lines_out.append(f"  Último entry confirmado por BCD: ${TRADE_DEL_CICLO_LAST_ENTRY:,.2f}")
     lines_out.append(f"  Balance Blofin (manual + copy-trading): {_fmt_usd(TRADE_DEL_CICLO_BLOFIN_BALANCE_USD)}")
     lines_out.append(f"  Última lectura manual: {TRADE_DEL_CICLO_LAST_UPDATE}")
 
-    # ── Estimated UPnL using current BTC price from market feed ──
     btc_price: float | None = None
     if isinstance(market, dict):
         prices = (market.get("data") or {}).get("prices") or market.get("prices") or {}
@@ -108,8 +132,6 @@ def _fmt_cycle_upnl_block(lines_out: list[str], market: dict[str, Any] | None) -
     if btc_price:
         pct_move = (btc_price - TRADE_DEL_CICLO_LAST_ENTRY) / TRADE_DEL_CICLO_LAST_ENTRY
         pct_pnl = pct_move * TRADE_DEL_CICLO_LEVERAGE
-        # Estimate margin in the position: conservative — assume 50% of total Blofin balance
-        # is allocated to the BTC long (the other 50% is copy-trading idle per fund_state).
         assumed_margin = TRADE_DEL_CICLO_BLOFIN_BALANCE_USD * 0.5
         est_pnl_usd = assumed_margin * pct_pnl
         lines_out.append(

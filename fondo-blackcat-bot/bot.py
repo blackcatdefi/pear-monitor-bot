@@ -276,7 +276,22 @@ async def cmd_timeline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         reply_markup=MAIN_KEYBOARD,
     )
     x_intel = await fetch_x_intel(hours=48)
-    text = format_timeline(x_intel, top_n=40)
+    # Fallback to cached timeline when live fetch fails (SpendCap etc.)
+    if isinstance(x_intel, dict) and x_intel.get("status") != "ok":
+        from modules.x_intel import get_cached_timeline, get_cache_state
+        cached = get_cached_timeline()
+        if cached and cached.get("status") == "ok":
+            cs = get_cache_state()
+            prefix = (
+                f"\u26a0\ufe0f Live API falló: {x_intel.get('error','')[:200]}\n"
+                f"Mostrando cache del scheduler (last success: {cs.get('last_success_at') or 'n/a'}).\n"
+                f"\u2500" * 30 + "\n\n"
+            )
+            text = prefix + format_timeline(cached, top_n=40)
+        else:
+            text = format_timeline(x_intel, top_n=40)
+    else:
+        text = format_timeline(x_intel, top_n=40)
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
