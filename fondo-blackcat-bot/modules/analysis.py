@@ -22,6 +22,12 @@ from templates.system_prompt import SYSTEM_PROMPT, THESIS_PROMPT, build_fund_sta
 log = logging.getLogger(__name__)
 
 THESIS_FILE = os.path.join(DATA_DIR, "thesis_state.json")
+# Plain-text, always-written thesis snapshot. Lives alongside thesis_state.json
+# but survives even when the structured LLM-JSON update fails (which was the
+# root cause of /tesis returning "No hay tesis guardada" on 2026-04-22 after
+# a successful /reporte). /tesis falls back to this file when thesis_state.json
+# has no `components` key.
+THESIS_LATEST_FILE = os.path.join(DATA_DIR, "tesis_latest.md")
 MAX_HISTORY = 30  # keep last 30 thesis snapshots
 
 
@@ -92,6 +98,82 @@ Respondé EXCLUSIVAMENTE en este formato JSON (sin markdown, sin backticks, solo
   "thesis_evolution": "1-2 oraciones: cómo cambió la tesis respecto al reporte anterior (o 'primera ejecución' si no hay previo)",
   "summary": "Resumen ejecutivo de la tesis actualizada en 3-4 líneas para mostrar al usuario"
 }"""
+
+
+def _extract_report_sections(report_text: str) -> dict[str, str]:
+    """Slice numbered sections 3 (MACRO) and 6 (RESUMEN EJECUTIVO) from a report.
+
+    The system prompt pins the report format: sections are prefixed with
+    '3. MACRO & GUERRA' / '6. RESUMEN EJECUTIVO' etc. We cut between headers.
+    Falls back to {} if the format is not recognised.
+    """
+    import re
+
+    out: dict[str, str] = {}
+    # Numbered headers like "3. MACRO & GUERRA" or "6. RESUMEN EJECUTIVO"
+    # capture until the next numbered header or the end-of-report marker.
+    for key, label in (
+        ("macro", r"3\.\s*MACRO\s*&\s*GUERRA"),
+        ("resumen", r"6\.\s*RESUMEN\s*EJECUTIVO"),
+    ):
+        pattern = rf"{label}(.*?)(?=^\s*\d+\.\s+[A-Z\u00c0-\u024f]+|\u2550{{2,}}\s*FIN|\Z)"
+        m = re.search(pattern, report_text, flags=re.IGNORECASE | re.DOTALL | re.MULTILINE)
+        if m:
+            out[key] = m.group(1).strip()
+    return out
+
+
+def _save_tesis_latest(report_text: str, provider: str = "unknown") -> None:
+    """Persist a human-readable thesis snapshot to disk.
+
+    This is the /tesis fallback path. Always writes, even when the LLM-JSON
+    thesis update later fails (that was the 2026-04-22 bug: /tesis said "No
+    hay tesis guardada" immediately after a successful /reporte because the
+    structured thesis save depended on the LLM returning parseable JSON).
+    """
+    try:
+        sections = _extract_report_sections(report_text)
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M UTC")
+        lines = [
+            f"# Tesis \u2014 {ts}",
+            f"_Generada por /reporte (provider: {provider})_",
+            "",
+        ]
+        if sections.get("macro"):
+            lines.append("## Macro & Guerra")
+            lines.append(sections["macro"])
+            lines.append("")
+        if sections.get("resumen"):
+            lines.append("## Resumen ejecutivo")
+            lines.append(sections["resumen"])
+            lines.append("")
+        if not sections:
+            # Preserve the full report if header parsing failed — better than
+            # losing the data entirely.
+            lines.append("## Reporte completo (parse de secciones fall\u00f3)")
+            lines.append(report_text)
+            lines.append("")
+        os.makedirs(os.path.dirname(THESIS_LATEST_FILE), exist_ok=True)
+        with open(THESIS_LATEST_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        log.info("Thesis snapshot written to %s (%d sections)", THESIS_LATEST_FILE, len(sections))
+    except Exception:
+        log.exception("Could not write thesis snapshot to %s", THESIS_LATEST_FILE)
+
+
+def load_tesis_latest() -> tuple[str | None, str | None]:
+    """Return (content, last_modified_iso) or (None, None) if missing."""
+    if not os.path.isfile(THESIS_LATEST_FILE):
+        return None, None
+    try:
+        with open(THESIS_LATEST_FILE, encoding="utf-8") as f:
+            content = f.read()
+        mtime = os.path.getmtime(THESIS_LATEST_FILE)
+        iso = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        return content, iso
+    except Exception:
+        log.exception("Could not load thesis snapshot")
+        return None, None
 
 
 def _save_last_analysis(report_text: str, provider: str = "unknown") -> None:
@@ -268,6 +350,10 @@ async def generate_report(
         report_text += f"\n\n_An\u00e1lisis generado por: {provider}_"
 
         _save_last_analysis(report_text, provider)
+        # Persist plain-text thesis snapshot BEFORE the LLM-JSON update, so
+        # /tesis has something to show even if the structured update below
+        # fails (JSON parse / LLMError). Root cause fix for 2026-04-22 bug.
+        _save_tesis_latest(report_text, provider)
 
         thesis_update = await _update_thesis_state(report_text, user_content)
 

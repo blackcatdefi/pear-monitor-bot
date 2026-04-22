@@ -22,7 +22,12 @@ from config import (
     TELEGRAM_CHAT_ID,
 )
 from modules.alerts import run_alert_cycle
-from modules.analysis import generate_report, generate_thesis_check, _load_thesis
+from modules.analysis import (
+    generate_report,
+    generate_thesis_check,
+    _load_thesis,
+    load_tesis_latest,
+)
 from modules.hyperlend import fetch_all_hyperlend
 from modules.kill_scenarios import compute_kill_scenarios
 from modules.llm_providers import format_provider_status
@@ -258,18 +263,36 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 @authorized
 async def cmd_tesis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show current thesis state from disk — no fresh API call."""
+    """Show current thesis state from disk — no fresh API call.
+
+    Primary source: thesis_state.json (structured, populated when the LLM
+    returns parseable JSON after /reporte). Fallback: tesis_latest.md
+    (plain-text snapshot written unconditionally by /reporte — this saves us
+    when the structured JSON parse fails).
+    """
     state = _load_thesis()
-    if not state.get("components"):
-        await update.message.reply_text(
-            "\U0001f4ca No hay tesis guardada a\u00fan. Ejecutar /reporte primero.",
-            reply_markup=MAIN_KEYBOARD,
-        )
-        return
+    has_components = bool(state.get("components"))
 
-    from modules.analysis import _thesis_context
-
-    text = _thesis_context(state)
+    if has_components:
+        from modules.analysis import _thesis_context
+        text = _thesis_context(state)
+    else:
+        # Fallback to plain-text snapshot
+        content, last_modified = load_tesis_latest()
+        if content:
+            sep = "\u2500" * 30
+            last_mod = last_modified or "?"
+            text = (
+                "\U0001f4ca TESIS (snapshot plain-text \u2014 fallback)\n"
+                f"\u00daltima actualizaci\u00f3n: {last_mod}\n"
+                f"{sep}\n\n{content}"
+            )
+        else:
+            await update.message.reply_text(
+                "\U0001f4ca No hay tesis guardada a\u00fan. Ejecutar /reporte primero.",
+                reply_markup=MAIN_KEYBOARD,
+            )
+            return
 
     unprocessed = get_unprocessed_count()
     if unprocessed > 0:
