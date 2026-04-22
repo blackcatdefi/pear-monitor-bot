@@ -69,6 +69,28 @@ BASKET_NOTE = (
     "contratos separados'."
 )
 
+# ─── Basket v5 operational plan (PENDING_CAPITAL) ──────────────────────────
+# BCD edita este bloque a mano cuando el plan del v5 cambia o se deploya.
+# El LLM lo lee desde templates/system_prompt.build_fund_state_block().
+BASKET_V5_STATUS = "PENDING_CAPITAL"   # IDLE | PENDING_CAPITAL | DEPLOYING | ACTIVE | CLOSED
+BASKET_V5_PLAN: dict[str, object] = {
+    "capital_target_usdt": 3050,
+    "deploy_eta": "2026-04-24 to 2026-04-28",
+    "source": "blofin_withdrawal_post_bonus",
+    "leverage_max": "3x",
+    "notional_target_usdt": 9150,
+    "logic": (
+        "Hedge natural: alts caen más fuerte que HYPE en crash. Gains del "
+        "basket financian DCA kHYPE o repago UETH."
+    ),
+    "triggers_close": [
+        "BTC toca $64K–$65K (BCD BUY LIMIT)",
+        "HYPE toca $28K o $24.5K (BCD BUY LIMIT)",
+        "Ceasefire permanente + Hormuz reabierto físicamente",
+    ],
+    "bonus_blofin_unlock": "2026-04-24",  # $250 USDT libera
+}
+
 # ─── Flywheel HyperLend — by-design pair trade ─────────────────────────────
 FLYWHEEL_NOTE = (
     "El flywheel HyperLend es un pair trade INTENCIONAL LONG kHYPE / SHORT "

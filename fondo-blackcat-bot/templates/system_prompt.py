@@ -8,6 +8,8 @@ of which model processes the request.
 from fund_state import (
     BASKET_NOTE,
     BASKET_STATUS,
+    BASKET_V5_PLAN,
+    BASKET_V5_STATUS,
     BLOFIN_BALANCE_AVAILABLE,
     FLYWHEEL_NOTE,
     HF_CRITICAL,
@@ -62,6 +64,14 @@ BASKET ALT SHORT BLEED:
   • Último basket: {last} — resultado NET ${last_net:+,.2f} — cerrado {closed}
   • Próximo: {nxt}
   • {BASKET_NOTE}
+
+BASKET v5 — PLAN OPERATIVO:
+  • Status: {BASKET_V5_STATUS}
+  • Capital target: ${BASKET_V5_PLAN.get('capital_target_usdt', 0):,} USDT | Notional target: ${BASKET_V5_PLAN.get('notional_target_usdt', 0):,} USDT
+  • Leverage máx: {BASKET_V5_PLAN.get('leverage_max', '?')} | Fuente: {BASKET_V5_PLAN.get('source', '?')}
+  • Deploy ETA: {BASKET_V5_PLAN.get('deploy_eta', '?')} | Bono Blofin unlock: {BASKET_V5_PLAN.get('bonus_blofin_unlock', '?')}
+  • Lógica: {BASKET_V5_PLAN.get('logic', '?')}
+  • Triggers de cierre: {' | '.join(BASKET_V5_PLAN.get('triggers_close', []))}
 
 FLYWHEEL HYPERLEND:
   • {FLYWHEEL_NOTE}
