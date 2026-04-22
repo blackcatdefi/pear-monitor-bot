@@ -45,6 +45,11 @@ from modules.x_intel import (
 )
 from modules.flywheel import compute_flywheel
 from modules.liq_calc import compute_liq_matrix
+from modules.cycle_trade import (
+    apply_cycle_update,
+    parse_cycle_update_args,
+    render_cycle_status,
+)
 from modules.intel_memory import format_intel_summary, cleanup_old as intel_cleanup, get_unprocessed_count
 from modules.intel_processor import process_pending_intel
 from modules import pnl_tracker, position_log
@@ -68,6 +73,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton("/flywheel"), KeyboardButton("/liqcalc")],
         [KeyboardButton("/timeline"), KeyboardButton("/tesis")],
         [KeyboardButton("/hf"), KeyboardButton("/kill")],
+        [KeyboardButton("/ciclo"), KeyboardButton("/ciclo_update")],
         [KeyboardButton("/pnl"), KeyboardButton("/log")],
         [KeyboardButton("/intel"), KeyboardButton("/alertas")],
         [KeyboardButton("/providers"), KeyboardButton("/debug_x")],
@@ -100,6 +106,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/tesis \u2014 estado de la tesis macro\n"
         "/hf \u2014 Health Factor de HyperLend\n"
         "/kill \u2014 kill scenarios de cada posici\u00f3n\n"
+        "/ciclo \u2014 estado del Trade del Ciclo (Blofin, manual)\n"
+        "/ciclo_update \u2014 abrir/cerrar Trade del Ciclo (edita fund_state.py)\n"
         "/pnl \u2014 realized PnL 7D / 30D / YTD\n"
         "/log \u2014 \u00faltimas 20 entradas del position log\n"
         "/intel \u2014 resumen de intel memory (\u00faltimas 24h)\n"
@@ -381,6 +389,60 @@ async def cmd_kill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 @authorized
+async def cmd_ciclo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Trade del Ciclo status (manual Blofin, sin API)."""
+    try:
+        text = render_cycle_status()
+    except Exception as exc:  # noqa: BLE001
+        log.exception("ciclo failed")
+        text = f"\u274c /ciclo fall\u00f3: {exc}"
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+async def cmd_ciclo_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Edit fund_state.TRADE_DEL_CICLO_* constants from Telegram.
+
+    Usage examples:
+        /ciclo_update OPEN 77000
+        /ciclo_update CLOSED
+
+    Writes to fund_state.py, commits with bot identity, and pushes to master
+    so Railway redeploys automatically (requires GITHUB_TOKEN env var).
+    """
+    args = context.args or []
+    try:
+        status, entry = parse_cycle_update_args(args)
+    except ValueError as exc:
+        await update.message.reply_text(f"\u274c {exc}", reply_markup=MAIN_KEYBOARD)
+        return
+
+    await update.message.reply_text(
+        f"\u23f3 Aplicando /ciclo_update STATUS={status}"
+        + (f" entry=${entry:,.2f}" if entry is not None else "")
+        + "...",
+        reply_markup=MAIN_KEYBOARD,
+    )
+    try:
+        result = apply_cycle_update(status, entry)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("ciclo_update failed")
+        await update.message.reply_text(
+            f"\u274c /ciclo_update fall\u00f3: {exc}", reply_markup=MAIN_KEYBOARD,
+        )
+        return
+
+    icon = "\u2705" if result.get("ok") else "\u274c"
+    pushed = "pushed" if result.get("pushed") else "NO pushed"
+    text = (
+        f"{icon} /ciclo_update STATUS={status}\n"
+        f"   wrote={result.get('wrote')} · {pushed}\n\n"
+        f"{result.get('message', '')}"
+    )
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
 async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = context.args or []
     if args and args[0].lower() == "ciclo":
@@ -575,6 +637,8 @@ def main() -> None:
     app.add_handler(CommandHandler("flywheel", cmd_flywheel))
     app.add_handler(CommandHandler("liqcalc", cmd_liqcalc))
     app.add_handler(CommandHandler("kill", cmd_kill))
+    app.add_handler(CommandHandler("ciclo", cmd_ciclo))
+    app.add_handler(CommandHandler("ciclo_update", cmd_ciclo_update))
     app.add_handler(CommandHandler("pnl", cmd_pnl))
     app.add_handler(CommandHandler("log", cmd_log))
 
