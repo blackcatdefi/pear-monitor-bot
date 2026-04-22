@@ -1,9 +1,8 @@
 """X / Twitter intelligence — dynamic list-based timeline reader.
 
-Architecture (Addendum 2 — Round 9):
-    Primary & ONLY source: X API v2 List endpoint (Owned Reads — $0.001/req).
+Architecture (Addendum 2 — Round 9 + Round 12 hardening):
+    Primary & ONLY source: X API v2 List endpoint.
     The bot reads a PRIVATE X list owned by @BlackCatDeFi.
-    List composition (~156 accounts) is managed manually in the X app.
     ZERO hardcoded usernames — the bot adapts automatically when accounts
     are added/removed from the list.
 
@@ -11,7 +10,19 @@ Env vars required:
     X_API_BEARER_TOKEN  — Bearer token from X Developer Console (Pay Per Use app)
     X_LIST_ID           — numeric ID of the private list
 
-Cost: ~$1.80/month at 2h polling intervals (well under $20/cycle cap).
+Round 12 cost hardening (post Apr 22 $20.48 overrun):
+    - Realistic cost model: $0.25 per 1,000 tweets returned (NOT $0.001/req).
+      X bills per tweet data returned, not per HTTP request.
+    - Internal gate: only 1 live list fetch per FETCH_COOLDOWN_HOURS (default 4h).
+      Any caller inside the cooldown window falls back to the SQLite-persisted
+      cache. This stops /reporte, /timeline, /debug_x from triggering fresh
+      fetches on top of the scheduler.
+    - Daily cap: max 15 X API calls in any 24h window (all handlers combined).
+    - Pagination cap: 2 pages × 100 tweets = 200 tweets/fetch max.
+    - Cost persistence: each call recorded to SQLite (survives redeploy).
+    - Proactive alert: if 7d-trailing projection exceeds $5/mo, one Telegram
+      message per 24h.
+    - Target projected cost at 4h cadence, 211-member list: ≈$1.20/month.
 """
 from __future__ import annotations
 
@@ -23,37 +34,53 @@ from typing import Any
 
 import httpx
 
+from modules.intel_memory import (
+    count_x_calls_since,
+    last_successful_x_call_ts,
+    record_x_api_call,
+    should_send_cost_alert,
+    x_api_cost_projection,
+)
+
 log = logging.getLogger(__name__)
 
 # ─── Config (env-driven, zero hardcoding) ──────────────────────────────────
 X_API_BEARER_TOKEN = os.getenv("X_API_BEARER_TOKEN", "").strip()
 X_LIST_ID = os.getenv("X_LIST_ID", "").strip()
 
-# Cost tracking (in-memory, resets on restart)
-_api_calls: list[dict[str, Any]] = []
+# Round 12: cost hardening knobs (env-overridable for ops flexibility)
+FETCH_COOLDOWN_HOURS = float(os.getenv("X_API_COOLDOWN_HOURS", "4"))
+DAILY_CALL_CAP = int(os.getenv("X_API_DAILY_CAP", "15"))
+MAX_PAGES_PER_FETCH = int(os.getenv("X_API_MAX_PAGES", "2"))
+COST_ALERT_THRESHOLD_USD = float(os.getenv("X_API_ALERT_THRESHOLD_USD", "5"))
+LIST_ENDPOINT_KEY = "lists/tweets"
 
 
 def _track_call(endpoint: str, status: int) -> None:
-    """Track an X API call for cost monitoring."""
-    _api_calls.append({
-        "endpoint": endpoint,
-        "status": status,
-        "ts": datetime.now(timezone.utc).isoformat(),
-    })
+    """Back-compat shim. Real tracking now lives in intel_memory SQLite."""
+    # Intentionally thin — rate limit + cost tracking happen in
+    # fetch_timeline_via_list via record_x_api_call. Kept to avoid touching
+    # legacy call sites.
+    log.debug("x_intel._track_call: endpoint=%s status=%s", endpoint, status)
 
 
 def get_api_stats() -> dict[str, Any]:
-    """Return X API usage stats for /providers."""
-    total = len(_api_calls)
-    ok = sum(1 for c in _api_calls if 200 <= c["status"] < 300)
-    failed = total - ok
-    cost_usd = total * 0.001  # $0.001 per request (Owned Reads)
+    """Return X API usage stats for /providers and /debug_x."""
+    proj = x_api_cost_projection()
+    last_ok = last_successful_x_call_ts(LIST_ENDPOINT_KEY)
+    calls_24h = count_x_calls_since(24)
     return {
-        "total_calls": total,
-        "ok": ok,
-        "failed": failed,
-        "cost_usd": cost_usd,
-        "cost_str": f"${cost_usd:.3f}",
+        "calls_7d": proj["calls_7d"],
+        "tweets_7d": proj["tweets_7d"],
+        "cost_7d_usd": proj["cost_7d"],
+        "cost_7d_str": f"${proj['cost_7d']:.2f}",
+        "daily_avg_usd": proj["daily_avg_usd"],
+        "monthly_projection_usd": proj["monthly_projection_usd"],
+        "monthly_projection_str": f"${proj['monthly_projection_usd']:.2f}",
+        "calls_24h": calls_24h,
+        "daily_cap": DAILY_CALL_CAP,
+        "cooldown_hours": FETCH_COOLDOWN_HOURS,
+        "last_success_ts": last_ok.isoformat() if last_ok else None,
     }
 
 
@@ -99,15 +126,53 @@ def _diag_for_status(status: int) -> str:
     return mapping.get(status, f"HTTP {status} — {_DIAG_UNKNOWN}")
 
 
+_DIAG_INTERNAL_COOLDOWN = (
+    "Internal cooldown active (1 live fetch per {cool}h). "
+    "Usando cache — próxima fetch permitida: {next_allowed}."
+)
+_DIAG_INTERNAL_DAILY_CAP = (
+    "Internal daily cap hit ({used}/{cap} calls en últimas 24h). "
+    "Fallback a cache. Auto-reset sliding window."
+)
+
+
+def _within_cooldown() -> tuple[bool, datetime | None]:
+    """Return (in_cooldown, next_allowed_ts)."""
+    last_ok = last_successful_x_call_ts(LIST_ENDPOINT_KEY)
+    if last_ok is None:
+        return False, None
+    now = datetime.now(timezone.utc)
+    next_allowed = last_ok + timedelta(hours=FETCH_COOLDOWN_HOURS)
+    return now < next_allowed, next_allowed
+
+
+def _daily_cap_exceeded() -> tuple[bool, int]:
+    used = count_x_calls_since(24)
+    return used >= DAILY_CALL_CAP, used
+
+
 async def fetch_timeline_via_list(
     hours: int = 48,
-    max_tweets: int = 500,
+    max_tweets: int = 200,
+    caller: str = "",
+    bypass_cooldown: bool = False,
 ) -> tuple[list[dict] | None, str | None]:
     """Read the private X list — adaptive to user changes.
 
+    Round 12 hardening:
+        - Enforces FETCH_COOLDOWN_HOURS at code level (not just scheduler).
+          Any caller inside the window gets (None, cooldown_diag) — they
+          should fall back to cache.
+        - Enforces DAILY_CALL_CAP (rolling 24h window).
+        - Caps pagination at MAX_PAGES_PER_FETCH.
+        - Records every call (success/fail) to SQLite for cost projection.
+        - Fires a Telegram-bound cost alert when 7d projection > $5/mo.
+    `bypass_cooldown=True` is only for /debug_x test-in-vivo (max_tweets=5).
+
     Returns (tweets, error_diagnostic).
-    On success: (list[tweet_dicts], None)
-    On failure: (None, diagnostic_str) — diagnostic carries HTTP-status-specific hint.
+      On success: (list[tweet_dicts], None)
+      On cooldown/cap: (None, diagnostic) — caller should use cache
+      On failure: (None, diagnostic)
     """
     if not X_LIST_ID:
         log.error("X_LIST_ID not configured")
@@ -115,6 +180,20 @@ async def fetch_timeline_via_list(
     if not X_API_BEARER_TOKEN:
         log.error("X_API_BEARER_TOKEN not configured")
         return None, _DIAG_NO_BEARER
+
+    # ── Gate 1: cooldown ─────────────────────────────────────────────────
+    if not bypass_cooldown:
+        in_cd, next_allowed = _within_cooldown()
+        if in_cd:
+            na = next_allowed.isoformat() if next_allowed else "—"
+            log.info("[X_API_COST] cooldown active — caller=%s next_allowed=%s", caller, na)
+            return None, _DIAG_INTERNAL_COOLDOWN.format(cool=FETCH_COOLDOWN_HOURS, next_allowed=na)
+
+    # ── Gate 2: daily cap ────────────────────────────────────────────────
+    cap_hit, used = _daily_cap_exceeded()
+    if cap_hit:
+        log.warning("[X_API_COST] daily cap hit — %d/%d in 24h (caller=%s)", used, DAILY_CALL_CAP, caller)
+        return None, _DIAG_INTERNAL_DAILY_CAP.format(used=used, cap=DAILY_CALL_CAP)
 
     url = f"https://api.x.com/2/lists/{X_LIST_ID}/tweets"
     params: dict[str, Any] = {
@@ -129,9 +208,14 @@ async def fetch_timeline_via_list(
     all_tweets: list[dict] = []
     next_token: str | None = None
     last_error_diag: str | None = None
+    pages_consumed = 0
+    tweets_returned_by_api = 0  # raw count from X before time-filter (for cost)
+    last_status = 0
+
+    page_limit = max(1, min(MAX_PAGES_PER_FETCH, 10))
 
     async with httpx.AsyncClient(timeout=30) as c:
-        for page in range(10):  # max 10 pages
+        for page in range(page_limit):
             if next_token:
                 params["pagination_token"] = next_token
 
@@ -140,24 +224,36 @@ async def fetch_timeline_via_list(
             except httpx.TimeoutException as e:
                 log.error("X API timeout: %s", e)
                 _track_call("list_tweets", 0)
+                record_x_api_call(LIST_ENDPOINT_KEY, 0, pages=pages_consumed + 1,
+                                  tweets_returned=0, caller=caller)
                 last_error_diag = _DIAG_TIMEOUT
                 break
             except Exception as e:
                 log.error("X API error: %s", e)
                 _track_call("list_tweets", 0)
+                record_x_api_call(LIST_ENDPOINT_KEY, 0, pages=pages_consumed + 1,
+                                  tweets_returned=0, caller=caller)
                 last_error_diag = f"{_DIAG_UNKNOWN} ({type(e).__name__}: {str(e)[:120]})"
                 break
 
             _track_call("list_tweets", resp.status_code)
+            pages_consumed += 1
+            last_status = resp.status_code
 
             if resp.status_code == 429:
                 log.warning("X API rate limited, returning partial (%d tweets)", len(all_tweets))
+                record_x_api_call(LIST_ENDPOINT_KEY, 429, pages=pages_consumed,
+                                  tweets_returned=0, caller=caller)
                 last_error_diag = _DIAG_429
                 break
 
             if resp.status_code != 200:
                 body_snip = resp.text[:300]
                 log.error("X API %d: %s", resp.status_code, body_snip)
+                # Record the failing call (cost is zero — no tweets returned —
+                # but keeping it lets /debug_x show failure rate).
+                record_x_api_call(LIST_ENDPOINT_KEY, resp.status_code,
+                                  pages=pages_consumed, tweets_returned=0, caller=caller)
                 # Parse body for X-specific error types (SpendCapReached etc.)
                 try:
                     body_json = resp.json()
@@ -181,6 +277,7 @@ async def fetch_timeline_via_list(
 
             data = resp.json()
             batch = data.get("data", [])
+            tweets_returned_by_api += len(batch)
             users_map = {
                 u["id"]: u
                 for u in data.get("includes", {}).get("users", [])
@@ -213,6 +310,34 @@ async def fetch_timeline_via_list(
                 break
 
     unique_accounts = len(set(t["username"] for t in all_tweets))
+
+    # Round 12: record the aggregate call for cost tracking if we got a 200
+    # and haven't already recorded a status >= 400 for this fetch.
+    if last_status == 200 and tweets_returned_by_api > 0:
+        record_x_api_call(
+            LIST_ENDPOINT_KEY,
+            200,
+            pages=pages_consumed,
+            tweets_returned=tweets_returned_by_api,
+            caller=caller,
+        )
+        # Structured cost log line
+        est_cost = (tweets_returned_by_api / 1000.0) * 0.25
+        calls_24h = count_x_calls_since(24)
+        proj = x_api_cost_projection()
+        log.info(
+            "[X_API_COST] caller=%s pages=%d tweets=%d est_cost=$%.4f "
+            "calls_24h=%d/%d 7d=$%.2f mo_proj=$%.2f",
+            caller or "?",
+            pages_consumed,
+            tweets_returned_by_api,
+            est_cost,
+            calls_24h,
+            DAILY_CALL_CAP,
+            proj["cost_7d"],
+            proj["monthly_projection_usd"],
+        )
+
     log.info(
         "X timeline fetch: %d tweets de %d cuentas únicas (ventana %dh)",
         len(all_tweets),
@@ -226,10 +351,42 @@ async def fetch_timeline_via_list(
     return all_tweets, last_error_diag
 
 
+async def maybe_send_cost_alert(app=None) -> None:
+    """Round 12: fire Telegram alert if 7d projection exceeds threshold.
+
+    Called from the scheduler after every cache refresh. Throttled to one
+    alert per 24h via the intel_memory.x_api_alerts table.
+    `app` is the telegram Application; when None this is a dry-run.
+    """
+    fire, proj = should_send_cost_alert(COST_ALERT_THRESHOLD_USD)
+    if not fire:
+        return
+    msg = (
+        f"⚠️ X API cost alert\n\n"
+        f"Proyección mensual: ${proj['monthly_projection_usd']:.2f} "
+        f"(threshold ${COST_ALERT_THRESHOLD_USD:.2f})\n"
+        f"Últimos 7d: ${proj['cost_7d']:.2f} en {proj['calls_7d']} calls, "
+        f"{proj['tweets_7d']} tweets.\n\n"
+        f"Considerá subir FETCH_COOLDOWN_HOURS o reducir X_LIST_ID members."
+    )
+    log.warning("[X_API_COST] ALERT fired: %s", msg.replace("\n", " | "))
+    if app is not None:
+        try:
+            from config import TELEGRAM_CHAT_ID
+            if TELEGRAM_CHAT_ID:
+                await app.bot.send_message(chat_id=int(TELEGRAM_CHAT_ID), text=msg)
+        except Exception:
+            log.exception("maybe_send_cost_alert send failed (non-fatal)")
+
+
 # ─── Public API (consumed by bot.py, analysis.py, etc.) ────────────────────
-async def fetch_x_intel(hours: int = 48) -> dict[str, Any]:
-    """Fetch X intel from the private list. Returns standard status dict."""
-    tweets, diag = await fetch_timeline_via_list(hours=hours)
+async def fetch_x_intel(hours: int = 48, caller: str = "fetch_x_intel") -> dict[str, Any]:
+    """Fetch X intel from the private list. Returns standard status dict.
+
+    `caller` is stamped on every recorded X API call (see intel_memory) so
+    that /debug_x and the cost-audit queries can attribute spend by source.
+    """
+    tweets, diag = await fetch_timeline_via_list(hours=hours, caller=caller)
 
     if tweets is None:
         return {
@@ -300,16 +457,20 @@ async def debug_x_status() -> str:
     )
     lines.append("")
 
-    # API stats
+    # API stats (Round 12 — realistic cost model, SQLite-persisted)
     stats = get_api_stats()
-    lines.append("📊 API Stats (esta sesión):")
-    lines.append(f"  Calls: {stats['total_calls']} (ok: {stats['ok']}, fail: {stats['failed']})")
-    lines.append(f"  Cost: {stats['cost_str']}")
+    lines.append("📊 Costo X API (persistido en SQLite):")
+    lines.append(f"  7d: {stats['cost_7d_str']} en {stats['calls_7d']} calls, {stats['tweets_7d']} tweets")
+    lines.append(f"  Proyección mensual: {stats['monthly_projection_str']}")
+    lines.append(f"  24h calls: {stats['calls_24h']}/{stats['daily_cap']} (cap interno)")
+    lines.append(f"  Cooldown: {stats['cooldown_hours']}h entre fetches")
+    last_ok = stats["last_success_ts"] or "— nunca"
+    lines.append(f"  Último fetch OK: {last_ok}")
     lines.append("")
 
     # Cache state (scheduler)
     cs = get_cache_state()
-    lines.append("💾 Cache scheduler (every 2h):")
+    lines.append(f"💾 Cache scheduler (every {int(FETCH_COOLDOWN_HOURS)}h):")
     lines.append(f"  Last success: {cs.get('last_success_at') or '— nunca'}")
     lines.append(f"  Last attempt: {cs.get('last_attempt_at') or '— nunca'}")
     tc = cs.get("last_tweet_count", 0)
@@ -322,10 +483,13 @@ async def debug_x_status() -> str:
         lines.append(f"  Last error: {cs['last_error'][:300]}")
     lines.append("")
 
-    # Live test
+    # Live test — bypass cooldown so /debug_x always probes real state
+    # (max_tweets=5 keeps cost floor at ≈$0.00125 per probe)
     if X_LIST_ID and X_API_BEARER_TOKEN:
-        lines.append("🧪 Test en vivo...")
-        tweets, diag = await fetch_timeline_via_list(hours=1, max_tweets=5)
+        lines.append("🧪 Test en vivo (bypass cooldown, 5 tweets max)...")
+        tweets, diag = await fetch_timeline_via_list(
+            hours=1, max_tweets=5, caller="debug_x", bypass_cooldown=True
+        )
         if tweets is not None:
             lines.append(f"  ✅ Conectado — {len(tweets)} tweets última hora")
             if tweets:
@@ -344,7 +508,9 @@ async def debug_x_status() -> str:
 
 async def format_intel_sources(hours: int = 24, max_tweets: int = 500) -> str:
     """Format active sources for /intel_sources command."""
-    tweets, diag = await fetch_timeline_via_list(hours=hours, max_tweets=max_tweets)
+    tweets, diag = await fetch_timeline_via_list(
+        hours=hours, max_tweets=max_tweets, caller="intel_sources"
+    )
 
     if not tweets:
         return f"❌ No se pudo leer la list.\nDiag: {diag or 'sin diagnóstico'}"
@@ -375,8 +541,12 @@ _cache_state: dict[str, Any] = {
 }
 
 
-async def poll_and_cache_timeline() -> None:
+async def poll_and_cache_timeline(app=None) -> None:
     """Scheduler job: fetch timeline and cache it for quick access.
+
+    Round 12: passes caller="scheduler" for cost attribution and invokes
+    maybe_send_cost_alert(app) post-refresh so BCD receives a Telegram
+    warning if the 7d-trailing cost extrapolates above threshold.
 
     Never re-raises — the scheduler must keep running. All failures
     populate _cache_state["last_error"] with a diagnostic string.
@@ -385,7 +555,7 @@ async def poll_and_cache_timeline() -> None:
     log.info("[X_CACHE] Starting scheduled refresh")
     _cache_state["last_attempt_at"] = datetime.now(timezone.utc).isoformat()
     try:
-        result = await fetch_x_intel(hours=48)
+        result = await fetch_x_intel(hours=48, caller="scheduler")
         if result.get("status") == "ok":
             _cached_timeline = result
             _cache_state["last_success_at"] = datetime.now(timezone.utc).isoformat()
@@ -411,6 +581,12 @@ async def poll_and_cache_timeline() -> None:
         _cache_state["last_error"] = err
         _cache_state["successive_failures"] += 1
         log.exception("[X_CACHE] Exception (%d consecutive)", _cache_state["successive_failures"])
+
+    # Fire cost alert if applicable (always attempted, even on failure)
+    try:
+        await maybe_send_cost_alert(app)
+    except Exception:
+        log.exception("[X_CACHE] cost alert invocation failed (non-fatal)")
 
 
 def get_cached_timeline() -> dict[str, Any] | None:

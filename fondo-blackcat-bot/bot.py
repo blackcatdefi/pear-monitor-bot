@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -454,10 +455,14 @@ async def _intel_processor_job() -> None:
         log.exception("Intel processor job failed")
 
 
-async def _x_timeline_cache_job() -> None:
-    """Scheduled job: refresh the X list timeline cache every 2 hours."""
+async def _x_timeline_cache_job(application: Application | None = None) -> None:
+    """Scheduled job: refresh the X list timeline cache every N hours.
+
+    Round 12: receives the Application so poll_and_cache_timeline can fire
+    a Telegram cost alert when the 7d projection exceeds the threshold.
+    """
     try:
-        await poll_and_cache_timeline()
+        await poll_and_cache_timeline(app=application)
     except Exception:  # noqa: BLE001
         log.exception("X timeline cache job failed")
 
@@ -498,11 +503,16 @@ async def post_init(application: Application) -> None:
             max_instances=1,
             coalesce=True,
         )
-        # X list timeline cache — refresh every 2h (Addendum 2: ~$1.80/mo PPU cost)
+        # X list timeline cache — Round 12: default cadence moved to 4h after
+        # $20.48 / 7d overspend event. Cost model corrected to $0.25 / 1K
+        # tweets. Projected cost at 4h cadence, 211-member list ≈ $1.20/mo.
+        # Cadence is env-overridable via X_CACHE_INTERVAL_HOURS.
+        x_cache_hours = float(os.getenv("X_CACHE_INTERVAL_HOURS", "4"))
         scheduler.add_job(
             _x_timeline_cache_job,
             "interval",
-            hours=2,
+            hours=x_cache_hours,
+            args=[application],
             id="x_timeline_cache",
             max_instances=1,
             coalesce=True,
@@ -511,8 +521,9 @@ async def post_init(application: Application) -> None:
         scheduler.start()
         application.bot_data["scheduler"] = scheduler
         log.info(
-            "Scheduler started: alerts %dmin, intel processor 30min, X timeline cache 2h.",
+            "Scheduler started: alerts %dmin, intel processor 30min, X timeline cache %.1fh.",
             POLL_INTERVAL_MIN,
+            x_cache_hours,
         )
 
     # Cleanup old intel memory entries (7+ days old)
