@@ -17,7 +17,7 @@ from config import (
 )
 from modules.llm_router import route_request, LLMError
 from templates.formatters import compile_raw_data
-from templates.system_prompt import SYSTEM_PROMPT, THESIS_PROMPT
+from templates.system_prompt import SYSTEM_PROMPT, THESIS_PROMPT, build_fund_state_block
 
 log = logging.getLogger(__name__)
 
@@ -136,7 +136,7 @@ async def _update_thesis_state(report_text: str, user_data: str) -> str | None:
     try:
         raw, provider = await route_request(
             "tesis_update",
-            SYSTEM_PROMPT + prev_context,
+            build_fund_state_block() + SYSTEM_PROMPT + prev_context,
             thesis_user_msg,
             max_tokens=2000,
         )
@@ -252,7 +252,10 @@ async def generate_report(
 
     state = _load_thesis()
     prev_thesis = _thesis_context(state)
-    full_system = SYSTEM_PROMPT + prev_thesis
+    # Fund-state block is injected at the TOP so the LLM sees it before any
+    # stale prose below. Ground truth: HF thresholds, Trade del Ciclo Blofin
+    # constants, basket status, flywheel pair trade design note.
+    full_system = build_fund_state_block() + SYSTEM_PROMPT + prev_thesis
 
     try:
         report_text, provider = await route_request(
@@ -372,7 +375,7 @@ async def generate_thesis_check(
 
     state = _load_thesis()
     prev_thesis = _thesis_context(state)
-    full_prompt = THESIS_PROMPT + prev_thesis
+    full_prompt = build_fund_state_block() + THESIS_PROMPT + prev_thesis
 
     try:
         text, provider = await route_request(

@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# âââ Telegram âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ─── Telegram ───────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
@@ -17,7 +17,7 @@ TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "")
 TELEGRAM_PHONE = os.getenv("TELEGRAM_PHONE", "")
 TELETHON_SESSION = os.getenv("TELETHON_SESSION", "")
 
-# âââ APIs âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ─── APIs ───────────────────────────────────────────────────────────────────
 # Hybrid LLM architecture:
 # Sonnet 4.6 (critical) + Gemini 2.5 Flash (routine) + Haiku 4.5 (fallback)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
@@ -25,17 +25,17 @@ ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 COINGLASS_API_KEY = os.getenv("COINGLASS_API_KEY", "")
 
-# âââ X/Twitter (dynamic list â Addendum 2) âââââââââââââââââââââââââââââââââ
+# ─── X/Twitter (dynamic list — Addendum 2) ─────────────────────────────────
 # Bearer token from X Developer Console (Pay Per Use app)
 X_API_BEARER_TOKEN = os.getenv("X_API_BEARER_TOKEN", "")
-# Private list ID â bot reads list composition at fetch time (zero hardcoded usernames)
+# Private list ID — bot reads list composition at fetch time (zero hardcoded usernames)
 X_LIST_ID = os.getenv("X_LIST_ID", "")
 
-# âââ Gmail (IMAP for /reporte email intel) ââââââââââââââââââââââââââââââââââ
+# ─── Gmail (IMAP for /reporte email intel) ──────────────────────────────────
 GMAIL_EMAIL = os.getenv("GMAIL_EMAIL", "")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
 
-# âââ Chains âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ─── Chains ─────────────────────────────────────────────────────────────────
 HYPERLIQUID_API = os.getenv("HYPERLIQUID_API", "https://api.hyperliquid.xyz")
 HYPEREVM_RPC = os.getenv("HYPEREVM_RPC", "https://rpc.hyperliquid.xyz/evm")
 HYPEREVM_CHAIN_ID = 999
@@ -45,7 +45,7 @@ HYPERLEND_POOL_ADDRESS = os.getenv(
     "0x00A89d7a5A02160f20150EbEA7a2b5E4879A1A8b",
 )
 
-# âââ Fund wallets (HyperLiquid + HyperLend) â env-driven âââââââââââââââââââ
+# ─── Fund wallets (HyperLiquid + HyperLend) — env-driven ───────────────────
 def _load_fund_wallets() -> dict[str, str]:
     wallets: dict[str, str] = {}
     for i in range(1, 6):
@@ -63,12 +63,16 @@ def _load_fund_wallets() -> dict[str, str]:
 
 FUND_WALLETS: dict[str, str] = _load_fund_wallets()
 
-# Wallet usada para HyperLend flywheel (colateral kHYPE) â env-driven
+# Wallet usada para HyperLend flywheel (colateral kHYPE) — env-driven
 HYPERLEND_WALLET = os.getenv("HYPERLEND_WALLET", "").strip().lower()
 
-# âââ Thresholds & alerts ââââââââââââââââââââââââââââââââââââââââââââââââââââ
-HF_WARN = 1.20         # HyperLend HF warning
-HF_CRITICAL = 1.10     # HyperLend HF critical
+# ─── Thresholds & alerts ────────────────────────────────────────────────────
+# HyperLend real liquidation happens at HF < 1.00.
+# Fund operative rules: monitor at 1.15, act at 1.10. Zone 1.10-1.20 is normal
+# operative — do NOT raise alerts there.
+HF_LIQUIDATION = 1.00  # Real HyperLend liquidation threshold
+HF_CRITICAL = 1.10     # Fund operative action threshold
+HF_WARN = 1.15         # Fund operative monitoring threshold
 HYPE_WARN = 34.0       # HYPE price (USD) warn
 HYPE_CRITICAL = 30.0
 BTC_WARN = 62_000.0
@@ -77,10 +81,10 @@ LIQ_PROXIMITY_PCT = 0.10  # Alertar si posicion a <10% de liquidacion
 POLL_INTERVAL_MIN = int(os.getenv("POLL_INTERVAL_MIN", "5"))
 ENABLE_ALERTS = os.getenv("ENABLE_ALERTS", "true").lower() == "true"
 
-# âââ Wallet fetch retry configuration ââââââââââââââââââââââââââââââââââââââ
+# ─── Wallet fetch retry configuration ──────────────────────────────────────
 WALLET_FETCH_TIMEOUT = int(os.getenv("WALLET_FETCH_TIMEOUT", "10"))  # seconds
 
-# âââ Tokens basket SHORT (ALT SHORT BLEED) âââââââââââââââââââââââââââââââââ
+# ─── Tokens basket SHORT (ALT SHORT BLEED) ─────────────────────────────────
 ALT_SHORT_BASKET = ["WLD", "STRK", "ZRO", "AVAX", "ENA"]
 WAR_LONG = ["BRENT", "GOLD", "SILVER", "PAXG"]
 WAR_SHORT = ["USA500", "NVDA", "TSLA", "HOOD"]
@@ -88,7 +92,7 @@ WAR_SHORT = ["USA500", "NVDA", "TSLA", "HOOD"]
 # HIP-3 dexes on Hyperliquid (perps on builder-deployed dexes)
 HIP3_DEXES = ["cash", "para", "flx", "vntl", "hyna", "km", "abcd", "xyz"]
 
-# âââ Telegram channels (tiered) ââââââââââââââââââââââââââââââââââââââââââââ
+# ─── Telegram channels (tiered) ────────────────────────────────────────────
 CHANNELS = {
     "tier1": [
         {"name": "Medusa Capital", "handle": "medusa_capital_es", "focus": "Spanish macro/equity, geopolitical"},
@@ -123,7 +127,7 @@ CHANNELS = {
 }
 CHANNEL_LIMITS = {"tier1": 200, "tier2": 50, "tier3": 20}
 
-# âââ Paths ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ─── Paths ──────────────────────────────────────────────────────────────────
 DATA_DIR = os.getenv("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
 os.makedirs(DATA_DIR, exist_ok=True)
 LAST_ANALYSIS_FILE = os.path.join(DATA_DIR, "last_successful_analysis.json")
