@@ -61,10 +61,79 @@ def _estimate_spot_usd(spot_balances: list[dict[str, Any]]) -> float:
     return total
 
 
+def _current_usd_value(coin: str, amount: float, entry_ntl: float,
+                       prices: dict[str, Any] | None) -> float:
+    """Best-effort current USD valuation of a spot balance.
+
+    Order of preference:
+      1. Stablecoins (USDC/USDH/USDT0/DAI/USDT) → amount 1:1.
+      2. Current price from market.prices[COIN].price_usd when available.
+      3. Entry notional (cost basis) as last-resort proxy.
+    """
+    c = (coin or "").upper()
+    if c in {"USDC", "USDH", "USDT", "USDT0", "DAI"}:
+        return float(amount or 0)
+    if prices:
+        # market dict shape: {prices: {BTC: {price_usd, ...}}}
+        # Handle kHYPE → use HYPE price as proxy (kHYPE pegs loosely to HYPE)
+        lookup = c.removeprefix("K") if c.startswith("K") else c
+        entry = (prices.get(lookup) or prices.get(c) or {})
+        px = entry.get("price_usd")
+        if px and amount:
+            return float(amount) * float(px)
+    return float(entry_ntl or 0)
+
+
+def _fmt_cycle_upnl_block(lines_out: list[str], market: dict[str, Any] | None) -> None:
+    """Append Trade del Ciclo block with estimated UPnL using current BTC price."""
+    lines_out.append("")
+    lines_out.append(f"TRADE DEL CICLO (BTC LONG {TRADE_DEL_CICLO_LEVERAGE}x — {TRADE_DEL_CICLO_PLATFORM.upper()})")
+    lines_out.append("  ⚠️ Blofin no expone API pública — el bot NO lee esta posición en tiempo real.")
+    lines_out.append(f"  Último entry confirmado por BCD: ${TRADE_DEL_CICLO_LAST_ENTRY:,.2f}")
+    lines_out.append(f"  Balance Blofin (manual + copy-trading): {_fmt_usd(TRADE_DEL_CICLO_BLOFIN_BALANCE_USD)}")
+    lines_out.append(f"  Última lectura manual: {TRADE_DEL_CICLO_LAST_UPDATE}")
+
+    # ── Estimated UPnL using current BTC price from market feed ──
+    btc_price: float | None = None
+    if isinstance(market, dict):
+        prices = (market.get("data") or {}).get("prices") or market.get("prices") or {}
+        btc_entry = prices.get("BTC") or {}
+        p = btc_entry.get("price_usd")
+        if p:
+            try:
+                btc_price = float(p)
+            except (TypeError, ValueError):
+                btc_price = None
+
+    if btc_price:
+        pct_move = (btc_price - TRADE_DEL_CICLO_LAST_ENTRY) / TRADE_DEL_CICLO_LAST_ENTRY
+        pct_pnl = pct_move * TRADE_DEL_CICLO_LEVERAGE
+        # Estimate margin in the position: conservative — assume 50% of total Blofin balance
+        # is allocated to the BTC long (the other 50% is copy-trading idle per fund_state).
+        assumed_margin = TRADE_DEL_CICLO_BLOFIN_BALANCE_USD * 0.5
+        est_pnl_usd = assumed_margin * pct_pnl
+        lines_out.append(
+            f"  BTC actual: ${btc_price:,.2f} | Movimiento subyacente: {pct_move*100:+.2f}%"
+        )
+        lines_out.append(
+            f"  PnL estimado ({TRADE_DEL_CICLO_LEVERAGE}x sobre ~${assumed_margin:,.0f} margen): "
+            f"{pct_pnl*100:+.2f}% → {_fmt_usd(est_pnl_usd)}"
+        )
+        lines_out.append(
+            "  ⚠️ Estimación. No confirmado por API Blofin — BCD debe confirmar balance real."
+        )
+    else:
+        lines_out.append("  UPnL: no calculable (BTC price feed no disponible).")
+
+    lines_out.append("  DCA plan: $70K Add 1 ($500) / $63K Add 2 ($750) / $55K Add 3 ($1,000)")
+    lines_out.append("  SL individual = liq price (único SL). TP manual en zona $130K–$150K.")
+
+
 def format_quick_positions(wallets: list[dict[str, Any]],
                            hyperlend: list[dict[str, Any]] | dict[str, Any],
                            bounce_tech: list[dict[str, Any]] | None = None,
-                           recent_fills: list[dict[str, Any]] | None = None) -> str:
+                           recent_fills: list[dict[str, Any]] | None = None,
+                           market: dict[str, Any] | None = None) -> str:
     lines: list[str] = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines.append(f"📊 Snapshot Fondo Black Cat — {now}")
@@ -199,28 +268,49 @@ def format_quick_positions(wallets: list[dict[str, Any]],
     lines.append(f"  TOTAL FONDO: Capital {_fmt_usd(total_fund_capital)} | UPnL {_fmt_usd(total_upnl)}")
 
     # ── Trade del Ciclo (BTC LONG) — vive en Blofin, NO en Hyperliquid ──
-    lines.append("")
-    lines.append(f"TRADE DEL CICLO (BTC LONG {TRADE_DEL_CICLO_LEVERAGE}x — {TRADE_DEL_CICLO_PLATFORM.upper()})")
-    lines.append(f"  ⚠️ Blofin no expone API pública — el bot NO lee esta posición en tiempo real.")
-    lines.append(f"  Último entry confirmado por BCD: ${TRADE_DEL_CICLO_LAST_ENTRY:,.2f}")
-    lines.append(f"  Balance Blofin (manual + copy-trading): {_fmt_usd(TRADE_DEL_CICLO_BLOFIN_BALANCE_USD)}")
-    lines.append(f"  Última lectura manual: {TRADE_DEL_CICLO_LAST_UPDATE}")
-    lines.append("  DCA plan: $70K Add 1 ($500) / $63K Add 2 ($750) / $55K Add 3 ($1,000)")
-    lines.append("  SL individual = liq price (único SL). TP manual en zona $130K–$150K.")
+    _fmt_cycle_upnl_block(lines, market)
 
-    # ── Spot token balances (kHYPE, PEAR, etc.) ──
+    # ── Spot token balances (kHYPE, PEAR, etc.) con DUST threshold ──
     if all_spot:
-        lines.append("")
-        lines.append("SPOT TOKENS")
+        # Current-price map for USD valuation (kHYPE/HYPE/PEAR/etc.)
+        price_map: dict[str, Any] = {}
+        if isinstance(market, dict):
+            price_map = (market.get("data") or {}).get("prices") or market.get("prices") or {}
+
         by_coin: dict[str, list[dict[str, Any]]] = {}
         for sb in all_spot:
             coin = sb.get("coin", "?")
             by_coin.setdefault(coin, []).append(sb)
 
-        for coin, entries in sorted(by_coin.items()):
-            total_amount = sum(e.get("total", 0) for e in entries)
-            total_entry = sum(e.get("entry_ntl", 0) for e in entries)
+        # Compute per-coin total USD and split into "real" vs "dust" (<$50)
+        DUST_THRESHOLD_USD = 50.0
+        real_coins: list[tuple[str, list[dict[str, Any]], float, float]] = []  # (coin, entries, amt, usd)
+        dust_coins: list[tuple[str, float, float]] = []  # (coin, amount, usd_value)
 
+        for coin, entries in by_coin.items():
+            total_amount = sum(e.get("total", 0) for e in entries)
+            total_entry_ntl = sum(e.get("entry_ntl", 0) for e in entries)
+            # Current USD valuation (sum per-wallet to use each entry_ntl correctly)
+            total_usd_now = 0.0
+            for e in entries:
+                total_usd_now += _current_usd_value(
+                    coin,
+                    e.get("total", 0) or 0,
+                    e.get("entry_ntl", 0) or 0,
+                    price_map,
+                )
+            if total_usd_now >= DUST_THRESHOLD_USD:
+                real_coins.append((coin, entries, total_amount, total_usd_now))
+            else:
+                dust_coins.append((coin, total_amount, total_usd_now))
+
+        if real_coins or dust_coins:
+            lines.append("")
+            lines.append("SPOT TOKENS")
+
+        # Render real positions (per-wallet breakdown when multiple wallets hold)
+        for coin, entries, total_amount, total_usd_now in sorted(real_coins, key=lambda x: -x[3]):
+            total_entry = sum(e.get("entry_ntl", 0) for e in entries)
             if coin == "USDC":
                 cost_basis_display = f"${total_amount:,.2f}"
             else:
@@ -228,11 +318,32 @@ def format_quick_positions(wallets: list[dict[str, Any]],
 
             if len(entries) == 1:
                 wallet_label = entries[0].get("_wallet_label", "")
-                lines.append(f"  • {coin}: {total_amount:.4f} (cost basis: {cost_basis_display}) [{wallet_label}]")
+                lines.append(
+                    f"  • {coin}: {total_amount:.4f} · {_fmt_usd(total_usd_now)} now "
+                    f"(cost basis {cost_basis_display}) [{wallet_label}]"
+                )
             else:
-                lines.append(f"  • {coin}: {total_amount:.4f} total (cost basis: {cost_basis_display})")
+                lines.append(
+                    f"  • {coin}: {total_amount:.4f} total · {_fmt_usd(total_usd_now)} now "
+                    f"(cost basis {cost_basis_display})"
+                )
                 for e in entries:
-                    lines.append(f"      {e.get('_wallet_label','?')}: {e.get('total',0):.4f}")
+                    amt = e.get("total", 0) or 0
+                    lines.append(f"      {e.get('_wallet_label','?')}: {amt:.4f}")
+
+        # Render dust in compact single-line block
+        if dust_coins:
+            dust_total = sum(u for _, _, u in dust_coins)
+            dust_parts = []
+            for coin, amount, usd in sorted(dust_coins, key=lambda x: -x[2]):
+                dust_parts.append(f"{coin} {amount:.4f} ({_fmt_usd(usd)})")
+            lines.append(
+                f"  SPOT DUST (<${DUST_THRESHOLD_USD:.0f} c/u, residual post-trading, {_fmt_usd(dust_total)} total):"
+            )
+            # Wrap into chunks of 4 per line
+            for i in range(0, len(dust_parts), 4):
+                chunk = " | ".join(dust_parts[i:i+4])
+                lines.append(f"    {chunk}")
 
     # HyperLend section — detailed view with HF, collateral breakdown, debt
     lines.append("")
@@ -304,32 +415,67 @@ def format_quick_positions(wallets: list[dict[str, Any]],
         else:
             lines.append("  INACTIVA — sin posiciones abiertas")
 
-    # ── Trades cerrados últimas 24h ──
+    # ── Trades cerrados últimas 24h (agrupados por classify_fill) ──
     if recent_fills:
         lines.append("")
         lines.append("TRADES CERRADOS (24h)")
+
+        # Bucket fills by classification tag
+        grouped: dict[str, list[dict[str, Any]]] = {}
         total_pnl = 0.0
         total_fees = 0.0
         for f in recent_fills:
-            coin = f.get("coin", "?")
-            side = f.get("side", "?").upper()
-            sz = f.get("sz", 0) or 0
-            px = f.get("px", 0) or 0
-            pnl = f.get("closedPnl", 0) or 0
-            fee = f.get("fee", 0) or 0
             label = f.get("_wallet_label", "")
-            total_pnl += pnl
-            total_fees += fee
-            icon = "🟢" if pnl >= 0 else "🔴"
-            ts = f.get("time")
-            time_str = ""
-            if ts:
-                from datetime import datetime as _dt, timezone as _tz
-                time_str = _dt.fromtimestamp(ts / 1000, tz=_tz.utc).strftime("%H:%M")
             tag = classify_fill(f, wallet_label=label)
-            lines.append(
-                f"  {icon} {side} {coin} {sz:.4f} @ ${px:,.2f} | PnL: {_fmt_usd(pnl)} | {time_str} [{tag}]"
-            )
+            grouped.setdefault(tag, []).append(f)
+            total_pnl += f.get("closedPnl", 0) or 0
+            total_fees += f.get("fee", 0) or 0
+
+        # Render order (primary categories first, then alpha)
+        primary_order = ["Core DCA", "Basket trade", "HL perp"]
+        ordered_tags = [t for t in primary_order if t in grouped] + \
+                       [t for t in sorted(grouped.keys()) if t not in primary_order]
+
+        from datetime import datetime as _dt, timezone as _tz
+
+        for tag in ordered_tags:
+            fills = grouped[tag]
+            sub_pnl = sum(f.get("closedPnl", 0) or 0 for f in fills)
+            sub_notional = sum((f.get("sz", 0) or 0) * (f.get("px", 0) or 0) for f in fills)
+            # Aggregate by coin/side for compact subtotals inside Core DCA / Basket
+            by_coin: dict[str, dict[str, float]] = {}
+            for f in fills:
+                coin = f.get("coin", "?")
+                side = f.get("side", "?").upper()
+                key = f"{side} {coin}"
+                agg = by_coin.setdefault(key, {"sz": 0.0, "notional": 0.0, "count": 0, "last_px": 0.0})
+                agg["sz"] += f.get("sz", 0) or 0
+                agg["notional"] += (f.get("sz", 0) or 0) * (f.get("px", 0) or 0)
+                agg["count"] += 1
+                agg["last_px"] = f.get("px", 0) or 0
+
+            lines.append(f"  [{tag}]  {len(fills)} fill(s) · PnL: {_fmt_usd(sub_pnl)} · Notional: {_fmt_usd(sub_notional)}")
+
+            # Per-fill detail (top 8, rest collapsed)
+            for f in fills[:8]:
+                coin = f.get("coin", "?")
+                side = f.get("side", "?").upper()
+                sz = f.get("sz", 0) or 0
+                px = f.get("px", 0) or 0
+                pnl = f.get("closedPnl", 0) or 0
+                icon = "🟢" if pnl >= 0 else ("🔴" if pnl < 0 else "⚪")
+                ts = f.get("time")
+                time_str = ""
+                if ts:
+                    time_str = _dt.fromtimestamp(ts / 1000, tz=_tz.utc).strftime("%d %b %H:%M")
+                # For spot fills pnl is usually 0 — show notional instead
+                pnl_str = f"PnL {_fmt_usd(pnl)}" if pnl != 0 else f"Notional {_fmt_usd(sz*px)}"
+                lines.append(
+                    f"    {icon} {side} {coin} {sz:.4f} @ ${px:,.4f} | {pnl_str} | {time_str}"
+                )
+            if len(fills) > 8:
+                lines.append(f"    … +{len(fills)-8} fills más en este grupo")
+
         lines.append(
             f"  TOTAL PnL: {_fmt_usd(total_pnl)} | Fees: {_fmt_usd(total_fees)} | Net: {_fmt_usd(total_pnl - total_fees)}"
         )

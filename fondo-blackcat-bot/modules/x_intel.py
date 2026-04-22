@@ -58,22 +58,56 @@ def get_api_stats() -> dict[str, Any]:
 
 
 # ─── Primary fetch: X API v2 List endpoint ─────────────────────────────────
+_DIAG_NO_LIST_ID = "X_LIST_ID env var no configurada en Railway"
+_DIAG_NO_BEARER = "X_API_BEARER_TOKEN env var no configurada en Railway"
+_DIAG_401 = (
+    "HTTP 401 — Bearer token inválido o revocado. "
+    "Regenerar en developer.x.com y updatear X_API_BEARER_TOKEN en Railway."
+)
+_DIAG_402 = (
+    "HTTP 402 — Créditos X API agotados. "
+    "Top-up en console.x.com y cambiar auto-recharge a VISA 4463."
+)
+_DIAG_403 = (
+    "HTTP 403 — Bearer sin permisos para la list. "
+    "Verificá que la app pertenezca a @BlackCatDeFi y que la list sea accesible."
+)
+_DIAG_404 = (
+    "HTTP 404 — List ID no encontrada. "
+    "Verificá X_LIST_ID en Railway (actual ID: Fondo Black Cat Intel = 2046698139873378486)."
+)
+_DIAG_429 = "HTTP 429 — Rate limit hit. Retry en unos minutos (scheduler cachea cada 2h)."
+_DIAG_TIMEOUT = "Timeout de red contra api.x.com — probablemente transitorio."
+_DIAG_UNKNOWN = "Error no clasificado — revisar logs Railway para detalle."
+
+
+def _diag_for_status(status: int) -> str:
+    mapping = {
+        401: _DIAG_401,
+        402: _DIAG_402,
+        403: _DIAG_403,
+        404: _DIAG_404,
+        429: _DIAG_429,
+    }
+    return mapping.get(status, f"HTTP {status} — {_DIAG_UNKNOWN}")
+
+
 async def fetch_timeline_via_list(
     hours: int = 48,
     max_tweets: int = 500,
-) -> list[dict] | None:
+) -> tuple[list[dict] | None, str | None]:
     """Read the private X list — adaptive to user changes.
 
-    Returns a list of tweet dicts with keys:
-        username, name, verified, text, created_at, metrics, url
-    Or None on hard failure.
+    Returns (tweets, error_diagnostic).
+    On success: (list[tweet_dicts], None)
+    On failure: (None, diagnostic_str) — diagnostic carries HTTP-status-specific hint.
     """
     if not X_LIST_ID:
         log.error("X_LIST_ID not configured")
-        return None
+        return None, _DIAG_NO_LIST_ID
     if not X_API_BEARER_TOKEN:
         log.error("X_API_BEARER_TOKEN not configured")
-        return None
+        return None, _DIAG_NO_BEARER
 
     url = f"https://api.x.com/2/lists/{X_LIST_ID}/tweets"
     params: dict[str, Any] = {
@@ -87,6 +121,7 @@ async def fetch_timeline_via_list(
 
     all_tweets: list[dict] = []
     next_token: str | None = None
+    last_error_diag: str | None = None
 
     async with httpx.AsyncClient(timeout=30) as c:
         for page in range(10):  # max 10 pages
@@ -95,20 +130,32 @@ async def fetch_timeline_via_list(
 
             try:
                 resp = await c.get(url, params=params, headers=headers)
+            except httpx.TimeoutException as e:
+                log.error("X API timeout: %s", e)
+                _track_call("list_tweets", 0)
+                last_error_diag = _DIAG_TIMEOUT
+                break
             except Exception as e:
                 log.error("X API error: %s", e)
                 _track_call("list_tweets", 0)
+                last_error_diag = f"{_DIAG_UNKNOWN} ({type(e).__name__}: {str(e)[:120]})"
                 break
 
             _track_call("list_tweets", resp.status_code)
 
             if resp.status_code == 429:
                 log.warning("X API rate limited, returning partial (%d tweets)", len(all_tweets))
+                last_error_diag = _DIAG_429
                 break
 
             if resp.status_code != 200:
-                log.error("X API %d: %s", resp.status_code, resp.text[:200])
-                return None
+                body_snip = resp.text[:200]
+                log.error("X API %d: %s", resp.status_code, body_snip)
+                diag = _diag_for_status(resp.status_code)
+                # Include body snippet for non-standard errors
+                if resp.status_code not in (401, 402, 403, 404, 429):
+                    diag = f"{diag} Body: {body_snip}"
+                return None, diag
 
             data = resp.json()
             batch = data.get("data", [])
@@ -150,18 +197,22 @@ async def fetch_timeline_via_list(
         unique_accounts,
         hours,
     )
-    return all_tweets
+    # Partial success (rate limit mid-pagination) still returns tweets + diag
+    if all_tweets and last_error_diag:
+        log.info("X timeline partial result: %d tweets + diag: %s", len(all_tweets), last_error_diag)
+        return all_tweets, None  # prefer partial success over error
+    return all_tweets, last_error_diag
 
 
 # ─── Public API (consumed by bot.py, analysis.py, etc.) ────────────────────
 async def fetch_x_intel(hours: int = 48) -> dict[str, Any]:
     """Fetch X intel from the private list. Returns standard status dict."""
-    tweets = await fetch_timeline_via_list(hours=hours)
+    tweets, diag = await fetch_timeline_via_list(hours=hours)
 
     if tweets is None:
         return {
             "status": "error",
-            "error": "X API list fetch failed — check X_LIST_ID + X_API_BEARER_TOKEN",
+            "error": diag or "X API list fetch failed — check X_LIST_ID + X_API_BEARER_TOKEN",
             "source": "x_api_list",
             "tweets": [],
         }
@@ -237,14 +288,14 @@ async def debug_x_status() -> str:
     # Live test
     if X_LIST_ID and X_API_BEARER_TOKEN:
         lines.append("🧪 Test en vivo...")
-        tweets = await fetch_timeline_via_list(hours=1, max_tweets=5)
+        tweets, diag = await fetch_timeline_via_list(hours=1, max_tweets=5)
         if tweets is not None:
             lines.append(f"  ✅ Conectado — {len(tweets)} tweets última hora")
             if tweets:
                 usernames = set(t["username"] for t in tweets)
                 lines.append(f"  Cuentas activas: {', '.join(sorted(usernames)[:5])}...")
         else:
-            lines.append("  ❌ Fetch failed — revisar token y list ID")
+            lines.append(f"  ❌ Fetch failed: {diag}")
     else:
         lines.append("⚠️ No se puede testear — faltan env vars")
 
@@ -256,10 +307,10 @@ async def debug_x_status() -> str:
 
 async def format_intel_sources(hours: int = 24, max_tweets: int = 500) -> str:
     """Format active sources for /intel_sources command."""
-    tweets = await fetch_timeline_via_list(hours=hours, max_tweets=max_tweets)
+    tweets, diag = await fetch_timeline_via_list(hours=hours, max_tweets=max_tweets)
 
     if not tweets:
-        return "❌ No se pudo leer la list. Verificá X_LIST_ID + token."
+        return f"❌ No se pudo leer la list.\nDiag: {diag or 'sin diagnóstico'}"
 
     by_user = Counter(t["username"] for t in tweets)
     top = by_user.most_common(20)

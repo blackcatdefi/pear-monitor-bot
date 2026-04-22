@@ -33,11 +33,21 @@ def format_timeline(x_intel: dict[str, Any] | None, top_n: int = 40) -> str:
     status = x_intel.get("status")
     if status != "ok":
         err = x_intel.get("error", "unknown_error")
-        return (
-            f"🐦 Timeline X — {now}\n\n"
-            f"❌ No se pudo leer el timeline: {err}\n"
-            "(verificá X_BEARER_TOKEN en Railway)"
-        )
+        # err ya viene diagnóstico-específico de x_intel._diag_for_status
+        lines_err = [
+            f"🐦 Timeline X — {now}",
+            "",
+            "❌ No se pudo leer el timeline.",
+            "",
+            f"Diagnóstico: {err}",
+            "",
+            "Chequeos rápidos:",
+            "  1. console.x.com → balance X API > $0 (auto-recharge VISA 4463)",
+            "  2. developer.x.com → Bearer token válido (X_API_BEARER_TOKEN)",
+            "  3. Railway vars → X_LIST_ID = 2046698139873378486",
+            "  4. /debug_x para test en vivo",
+        ]
+        return "\n".join(lines_err)
 
     data: dict[str, list[dict[str, Any]]] = x_intel.get("data") or {}
     scanned = x_intel.get("accounts_scanned", 0)

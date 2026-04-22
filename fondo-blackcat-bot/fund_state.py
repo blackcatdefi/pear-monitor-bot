@@ -73,22 +73,47 @@ FLYWHEEL_NOTE = (
 # ─── Trade classifier — distinguish Core DCA vs Basket trades ──────────────
 CORE_DCA_SPOT_TOKENS = ["KHYPE", "PEAR", "BTC", "HYPE"]
 BASKET_PERP_TOKENS = ["WLD", "STRK", "ZRO", "AVAX", "ENA", "EIGEN", "SCR", "ZETA"]
+# Stablecoins legs of a spot fill (USDC/USDH/USDT0/DAI). If a fill is the
+# stablecoin leg of a pair, it is still part of the same Core DCA transaction.
+STABLE_TOKENS = {"USDC", "USDH", "USDT", "USDT0", "DAI"}
 
 
 def classify_fill(fill: dict, wallet_label: str = "") -> str:
     """Return a classification label for a recent fill.
 
-    Rules:
-      - Spot buy/sell of KHYPE/PEAR/BTC/HYPE → 'Core DCA'
-      - Perp on basket tokens (WLD/STRK/...)  → 'Basket trade'
-      - Anything else → wallet label (fallback)
+    Disambiguation: Hyperliquid fills expose a `dir` field.
+      - Spot fills:  dir == "Buy" | "Sell"          (coin is "@N" or token symbol)
+      - Perp fills:  dir contains "Long" | "Short"   (e.g. "Open Long", "Close Short")
+    We check `dir` first so BTC/HYPE perps aren't misclassified as Core DCA spot.
+
+    Rules (in order):
+      1. Perp LONG/SHORT on basket tokens → 'Basket trade'.
+      2. Perp LONG/SHORT on anything else → 'HL perp' (flywheel/hedge).
+      3. Spot '@N' index or CORE_DCA_SPOT_TOKENS → 'Core DCA'.
+      4. Spot stablecoin leg (USDC/USDH/USDT0/DAI) with spot-like side → 'Core DCA'.
+      5. Fallback → wallet_label or '?'.
     """
-    coin = (fill.get("coin") or "").upper()
+    coin_raw = (fill.get("coin") or "").strip()
+    coin = coin_raw.upper()
     side = (fill.get("side") or "").upper()
-    # Hyperliquid spot fills use side 'B' or 'A' (buy/ask); perp uses LONG/SHORT
-    is_spot_like = side in ("B", "A", "BUY", "SELL")
+    dir_ = (fill.get("dir") or "").lower()
+    is_perp = bool(dir_) and ("long" in dir_ or "short" in dir_)
+    is_spot_like = side in ("B", "A", "BUY", "SELL") and not is_perp
+
+    # Rule 1 + 2: perp first
+    if is_perp:
+        if coin in BASKET_PERP_TOKENS:
+            return "Basket trade"
+        return "HL perp"
+    # Rule 3: HL spot (coin starts with "@N" is spot-pair index; the fund only uses spot for DCA)
+    if coin_raw.startswith("@") and is_spot_like:
+        return "Core DCA"
     if coin in CORE_DCA_SPOT_TOKENS and is_spot_like:
         return "Core DCA"
+    # Rule 4: stable leg of a spot pair
+    if coin in STABLE_TOKENS and is_spot_like:
+        return "Core DCA"
+    # Rule 5: basket tokens without dir (shouldn't happen but safe)
     if coin in BASKET_PERP_TOKENS:
         return "Basket trade"
     return wallet_label or "?"

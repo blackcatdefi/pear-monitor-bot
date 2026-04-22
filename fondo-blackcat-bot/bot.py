@@ -113,7 +113,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 @authorized
 async def cmd_posiciones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\u23f3 Snapshot...", reply_markup=MAIN_KEYBOARD)
-    wallets, hl, bt = await asyncio.gather(fetch_all_wallets(), fetch_all_hyperlend(), fetch_bounce_tech())
+    wallets, hl, bt, market, recent_fills = await asyncio.gather(
+        fetch_all_wallets(),
+        fetch_all_hyperlend(),
+        fetch_bounce_tech(),
+        fetch_market_data(),
+        fetch_all_recent_fills(hours=24),
+    )
 
     # Detect Bounce Tech position closes
     bt_closes = bt_detect_closes(bt)
@@ -132,7 +138,16 @@ async def cmd_posiciones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             wallet_label="Bounce Tech",
         )
 
-    await send_long_message(update, format_quick_positions(wallets, hl, bounce_tech=bt), reply_markup=MAIN_KEYBOARD)
+    await send_long_message(
+        update,
+        format_quick_positions(
+            wallets, hl,
+            bounce_tech=bt,
+            recent_fills=recent_fills,
+            market=market,
+        ),
+        reply_markup=MAIN_KEYBOARD,
+    )
 
 
 @authorized
@@ -188,7 +203,12 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
 
     # ─── Sección 2: Posiciones ──────────────────────────────────────────────────
-    positions_text = format_quick_positions(portfolio, hl, bounce_tech=bt, recent_fills=recent_fills)
+    positions_text = format_quick_positions(
+        portfolio, hl,
+        bounce_tech=bt,
+        recent_fills=recent_fills,
+        market=market,
+    )
     await send_long_message(
         update,
         "\U0001f4bc POSICIONES\n" + ("\u2500" * 30) + "\n\n" + positions_text,
