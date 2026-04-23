@@ -28,7 +28,7 @@ from modules.analysis import (
     _load_thesis,
     load_tesis_latest,
 )
-from modules.hyperlend import fetch_all_hyperlend
+from modules.hyperlend import fetch_all_hyperlend, fetch_reserve_rates
 from modules.kill_scenarios import compute_kill_scenarios
 from modules.llm_providers import format_provider_status
 from modules.market import fetch_market_data
@@ -428,6 +428,75 @@ async def cmd_flywheel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 @authorized
+async def cmd_debug_flywheel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Dump raw HyperLend reserve rates — diagnostic for /flywheel matching.
+
+    Gated by DEBUG_MODE=true env var. Shows every reserve's canonical symbol,
+    raw chain symbol (from on-chain symbol() call), underlying asset address,
+    borrow/supply APR+APY, and deprecated flag. Use this when /flywheel
+    reports unexpected "no disponible en pool" entries to verify the
+    address→symbol map is in sync with the live protocol.
+    """
+    if os.getenv("DEBUG_MODE", "").strip().lower() != "true":
+        await update.message.reply_text(
+            "\u26a0\ufe0f /debug_flywheel est\u00e1 deshabilitado. Set "
+            "DEBUG_MODE=true en Railway vars para activar.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+
+    await update.message.reply_text(
+        "\u23f3 Dump de reservas HyperLend...", reply_markup=MAIN_KEYBOARD
+    )
+    try:
+        payload = await fetch_reserve_rates(force=True)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("debug_flywheel fetch failed")
+        await send_long_message(
+            update, f"\u274c fetch_reserve_rates fall\u00f3: {exc}",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+
+    if payload.get("status") != "ok":
+        err = payload.get("error") or "unknown"
+        await send_long_message(
+            update, f"\u274c RPC read fall\u00f3: {err}",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+
+    rates_map = payload.get("rates") or {}
+    ts = payload.get("fetched_at_iso") or "—"
+    lines: list[str] = []
+    lines.append("\U0001f50d DEBUG /flywheel \u2014 HyperLend reserves raw dump")
+    lines.append(f"Fetched: {ts}  (cache bypass)")
+    lines.append(f"Reserves: {len(rates_map)}")
+    lines.append("\u2500" * 40)
+    # Sort deprecated last, primary by APY ASC within each group
+    items = list(rates_map.values())
+    items.sort(key=lambda v: (bool(v.get("deprecated")), float(v.get("apy_borrow") or 0.0)))
+    for v in items:
+        sym = v.get("symbol") or "?"
+        chain_sym = v.get("chain_symbol") or sym
+        addr = v.get("asset") or ""
+        addr_short = (addr[:10] + "\u2026" + addr[-4:]) if addr else ""
+        apr_b = float(v.get("apr_borrow") or 0.0) * 100
+        apy_b = float(v.get("apy_borrow") or 0.0) * 100
+        apr_s = float(v.get("apr_supply") or 0.0) * 100
+        apy_s = float(v.get("apy_supply") or 0.0) * 100
+        dep = "\U0001f6ab DEP" if v.get("deprecated") else "\u2705 active"
+        chain_tag = f" chain='{chain_sym}'" if chain_sym != sym else ""
+        lines.append(
+            f"{dep}  {sym:<10}{chain_tag}\n"
+            f"    addr: {addr_short}\n"
+            f"    borrow: {apr_b:6.2f}% APR / {apy_b:6.2f}% APY\n"
+            f"    supply: {apr_s:6.2f}% APR / {apy_s:6.2f}% APY"
+        )
+    await send_long_message(update, "\n".join(lines), reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
 async def cmd_liqcalc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\u23f3 Calculando matriz de liquidaci\u00f3n...", reply_markup=MAIN_KEYBOARD)
     try:
@@ -759,6 +828,7 @@ def main() -> None:
     app.add_handler(CommandHandler("intel_sources", cmd_intel_sources))
     app.add_handler(CommandHandler("providers", cmd_providers))
     app.add_handler(CommandHandler("flywheel", cmd_flywheel))
+    app.add_handler(CommandHandler("debug_flywheel", cmd_debug_flywheel))
     app.add_handler(CommandHandler("liqcalc", cmd_liqcalc))
     app.add_handler(CommandHandler("kill", cmd_kill))
     app.add_handler(CommandHandler("ciclo", cmd_ciclo))

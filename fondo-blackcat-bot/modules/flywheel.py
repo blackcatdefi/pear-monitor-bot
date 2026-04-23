@@ -168,31 +168,19 @@ async def compute_flywheel() -> str:
     lines.append(f"  Net flywheel exposure: {_fmt_usd(net_all)}")
     lines.append("")
 
-    # ── Round 14: Costo borrow on-chain — TODAS las stables + UETH ───────
-    # Round 13 mostraba solo las monedas que el fondo tenía como deuda.
-    # Round 14 extiende a todos los stables borrow-ables (UETH + USDH +
-    # USDC + USDT0 + USDe) para que BCD pueda comparar APYs y decidir
-    # rotación de deuda cuando algún spread se dispara (ej. UETH >10%).
-    TARGET_SYMBOLS = ["UETH", "USDH", "USDC", "USDT0", "USDe"]
-    SYMBOL_ALIASES: dict[str, list[str]] = {
-        "UETH":  ["UETH"],
-        "USDH":  ["USDH", "USDhl", "USDh"],
-        "USDC":  ["USDC", "USDC.e"],
-        "USDT0": ["USDT0", "USD₮0", "USDt0", "USDT"],
-        "USDe":  ["USDe", "USDE", "sUSDe"],
-    }
-
-    def _lookup_rate(rmap: dict[str, Any], target: str):
-        aliases = SYMBOL_ALIASES.get(target, [target])
-        for alias in aliases:
-            v = rmap.get(alias)
-            if v:
-                return alias, v
-        lowered = {a.lower() for a in aliases}
-        for k, v in rmap.items():
-            if k.lower() in lowered:
-                return k, v
-        return None, None
+    # ── Round 14 hotfix: Costo borrow on-chain — dinámico + canonical syms ─
+    # Round 14 original dependía de un alias map frágil — fallaba cuando el
+    # chain devolvía "USD₮0" (U+20AE) o cuando symbol() hit RPC rate limit
+    # y volvía address[:10]. El hotfix usa el address→symbol map autoritativo
+    # definido en hyperlend.KNOWN_RESERVE_ADDRESSES, que bypassa symbol()
+    # por completo para los reserves conocidos.
+    #
+    # Lista de stables "primarias" (se muestran siempre arriba, ordenadas ASC
+    # por APY). Non-stable reserves (UBTC/wstHYPE/beHYPE/WHYPE/kHYPE) se
+    # muestran abajo como referencia si tienen borrow rate > 0. Reserves
+    # deprecated (sUSDe/USDHL/USR/PT-*) se ocultan por completo.
+    PRIMARY_STABLES = ["USDC", "USDe", "UETH", "USDT0", "USDH"]
+    NON_STABLE_REFS = ["UBTC", "wstHYPE", "beHYPE", "WHYPE", "kHYPE"]
 
     rates_ok = isinstance(rates, dict) and rates.get("status") == "ok"
     lines.append("COSTO BORROW ON-CHAIN (HyperLend live — ordenado por APY)")
@@ -208,11 +196,23 @@ async def compute_flywheel() -> str:
                     if sym:
                         fund_debt_syms.add(sym)
 
-        # Gather APY for each target, note missing ones.
+        def _entry_for(sym: str) -> dict[str, Any] | None:
+            # Direct canonical hit
+            v = rates_map.get(sym)
+            if v and not v.get("deprecated"):
+                return v
+            # Case-insensitive fallback (handles bot caches pre-hotfix)
+            sym_lc = sym.lower()
+            for k, vv in rates_map.items():
+                if k.lower() == sym_lc and not vv.get("deprecated"):
+                    return vv
+            return None
+
+        # Gather APY for each primary stable, note missing ones.
         found: list[dict[str, Any]] = []
         missing: list[str] = []
-        for tgt in TARGET_SYMBOLS:
-            resolved_sym, entry = _lookup_rate(rates_map, tgt)
+        for tgt in PRIMARY_STABLES:
+            entry = _entry_for(tgt)
             if not entry:
                 missing.append(tgt)
                 continue
@@ -220,7 +220,8 @@ async def compute_flywheel() -> str:
             apy = float(entry.get("apy_borrow") or 0.0)
             found.append({
                 "target": tgt,
-                "resolved": resolved_sym or tgt,
+                "resolved": entry.get("symbol") or tgt,
+                "chain_symbol": entry.get("chain_symbol") or tgt,
                 "apr": apr,
                 "apy": apy,
             })
@@ -258,6 +259,29 @@ async def compute_flywheel() -> str:
 
         for m in missing:
             lines.append(f"  ⚪ {m}: no disponible en pool")
+
+        # Non-stable reference block (solo si alguno tiene APR>0).
+        ref_rows: list[dict[str, Any]] = []
+        for tgt in NON_STABLE_REFS:
+            entry = _entry_for(tgt)
+            if not entry:
+                continue
+            apr = float(entry.get("apr_borrow") or 0.0)
+            apy = float(entry.get("apy_borrow") or 0.0)
+            if apr <= 0 and apy <= 0:
+                continue
+            ref_rows.append({"target": tgt, "apr": apr, "apy": apy})
+        if ref_rows:
+            ref_rows.sort(key=lambda x: x["apy"])
+            lines.append("")
+            lines.append("  ⚙️ Non-stable (solo referencia)")
+            for row in ref_rows:
+                apr_pct = row["apr"] * 100
+                apy_pct = row["apy"] * 100
+                name = f"{row['target']}:"
+                lines.append(
+                    f"     {name:<9}{apr_pct:5.2f}% APR / {apy_pct:5.2f}% APY"
+                )
 
         ts = rates.get("fetched_at_iso") or "—"
         lines.append(f"  (última lectura RPC: {ts}, cache 15min)")
