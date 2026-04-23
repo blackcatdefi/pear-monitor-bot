@@ -168,17 +168,38 @@ async def compute_flywheel() -> str:
     lines.append(f"  Net flywheel exposure: {_fmt_usd(net_all)}")
     lines.append("")
 
-    # ── Round 13: Costo real borrow on-chain ─────────────────────────────
-    # Lee currentVariableBorrowRate de cada reserve via getReserveData().
-    # UETH es la deuda real del flywheel post-17 abr; mostramos TODO lo que
-    # el fondo tiene borroweado hoy + UETH aunque no esté borroweado (para
-    # baseline).
+    # ── Round 14: Costo borrow on-chain — TODAS las stables + UETH ───────
+    # Round 13 mostraba solo las monedas que el fondo tenía como deuda.
+    # Round 14 extiende a todos los stables borrow-ables (UETH + USDH +
+    # USDC + USDT0 + USDe) para que BCD pueda comparar APYs y decidir
+    # rotación de deuda cuando algún spread se dispara (ej. UETH >10%).
+    TARGET_SYMBOLS = ["UETH", "USDH", "USDC", "USDT0", "USDe"]
+    SYMBOL_ALIASES: dict[str, list[str]] = {
+        "UETH":  ["UETH"],
+        "USDH":  ["USDH", "USDhl", "USDh"],
+        "USDC":  ["USDC", "USDC.e"],
+        "USDT0": ["USDT0", "USD₮0", "USDt0", "USDT"],
+        "USDe":  ["USDe", "USDE", "sUSDe"],
+    }
+
+    def _lookup_rate(rmap: dict[str, Any], target: str):
+        aliases = SYMBOL_ALIASES.get(target, [target])
+        for alias in aliases:
+            v = rmap.get(alias)
+            if v:
+                return alias, v
+        lowered = {a.lower() for a in aliases}
+        for k, v in rmap.items():
+            if k.lower() in lowered:
+                return k, v
+        return None, None
+
     rates_ok = isinstance(rates, dict) and rates.get("status") == "ok"
-    lines.append("COSTO BORROW ON-CHAIN (HyperLend live)")
+    lines.append("COSTO BORROW ON-CHAIN (HyperLend live — ordenado por APY)")
     if rates_ok:
         rates_map = rates.get("rates") or {}
-        # Buscar símbolos: los que el fondo efectivamente borrowea +
-        # siempre UETH como referencia del flywheel.
+
+        # Symbols the fund actually has as debt (for rotation suggestion).
         fund_debt_syms: set[str] = set()
         for r in hl_list:
             if r.get("status") == "ok":
@@ -186,37 +207,99 @@ async def compute_flywheel() -> str:
                     sym = d.get("symbol")
                     if sym:
                         fund_debt_syms.add(sym)
-        # Fuerza UETH para monitoreo aun si actualmente no hay deuda.
-        fund_debt_syms.add("UETH")
-        any_row = False
-        for sym in sorted(fund_debt_syms):
-            entry = rates_map.get(sym)
+
+        # Gather APY for each target, note missing ones.
+        found: list[dict[str, Any]] = []
+        missing: list[str] = []
+        for tgt in TARGET_SYMBOLS:
+            resolved_sym, entry = _lookup_rate(rates_map, tgt)
             if not entry:
-                # case-insensitive lookup
-                for k, v in rates_map.items():
-                    if k.lower() == sym.lower():
-                        entry = v
-                        break
-            if not entry:
-                lines.append(f"  {sym}: — (no en reserves list)")
+                missing.append(tgt)
                 continue
             apr = float(entry.get("apr_borrow") or 0.0)
             apy = float(entry.get("apy_borrow") or 0.0)
-            tag = ""
-            if apy >= 0.10:
-                tag = " 🚨 >10%"
-            elif apy >= 0.06:
-                tag = " ⚠️ >6% (threshold flywheel)"
-            lines.append(f"  {sym} borrow: {apr*100:.2f}% APR / {apy*100:.2f}% APY{tag}")
-            any_row = True
+            found.append({
+                "target": tgt,
+                "resolved": resolved_sym or tgt,
+                "apr": apr,
+                "apy": apy,
+            })
+
+        # Sort ascending by APY (cheapest first).
+        found.sort(key=lambda x: x["apy"])
+
+        if found:
+            for i, row in enumerate(found):
+                apr_pct = row["apr"] * 100
+                apy_pct = row["apy"] * 100
+                apy = row["apy"]
+                # Icon = status tier
+                if apy >= 0.10:
+                    icon = "🚨"
+                elif apy >= 0.06:
+                    icon = "⚠️"
+                else:
+                    icon = "✅"
+                # Suffix = descriptor
+                if i == 0:
+                    suffix = "  (🟢 más barato)"
+                elif apy >= 0.10:
+                    suffix = "  (>10%)"
+                elif apy >= 0.06:
+                    suffix = "  (>6%)"
+                else:
+                    suffix = ""
+                name = f"{row['target']}:"
+                lines.append(
+                    f"  {icon} {name:<7}{apr_pct:5.2f}% APR / {apy_pct:5.2f}% APY{suffix}"
+                )
+        else:
+            lines.append("  — ninguno de los target stables presente en el pool")
+
+        for m in missing:
+            lines.append(f"  ⚪ {m}: no disponible en pool")
+
         ts = rates.get("fetched_at_iso") or "—"
         lines.append(f"  (última lectura RPC: {ts}, cache 15min)")
-        if not any_row:
-            lines.append("  — sin reserves para reportar")
+        lines.append("")
+
+        # ── Rotation suggestion ─────────────────────────────────────────
+        # Solo sugerimos si (a) el fondo tiene UETH como deuda y (b) hay
+        # alguna stable >=3 puntos porcentuales más barata. Calculamos
+        # ahorro mensual sobre la deuda UETH actual en USD.
+        if found and "UETH" in fund_debt_syms:
+            ueth_row = next((r for r in found if r["target"] == "UETH"), None)
+            if ueth_row:
+                alt_rows = [r for r in found if r["target"] != "UETH"]
+                if alt_rows:
+                    best_alt = alt_rows[0]  # already ASC sorted
+                    spread = ueth_row["apy"] - best_alt["apy"]
+                    if spread >= 0.03:
+                        ueth_debt_usd = 0.0
+                        for r in hl_list:
+                            if r.get("status") == "ok":
+                                for d in r["data"].get("debt_assets", []) or []:
+                                    if (d.get("symbol") or "").upper() == "UETH":
+                                        if eth_price:
+                                            ueth_debt_usd += (d.get("balance") or 0.0) * eth_price
+                        monthly_savings = ueth_debt_usd * spread / 12 if ueth_debt_usd else 0.0
+                        save_str = (
+                            f"~${monthly_savings:,.0f}/mes"
+                            if monthly_savings >= 1
+                            else "ahorro marginal"
+                        )
+                        lines.append(
+                            f"💡 Sugerencia: {best_alt['target']} es "
+                            f"{spread*100:.2f}% más barato que UETH. Si la tesis "
+                            f"direccional ETH-short no aplica o HF está alto, "
+                            f"considerar flip parcial UETH→{best_alt['target']} "
+                            f"para reducir carry cost {save_str}."
+                        )
+                        lines.append("")
     else:
         err = rates.get("error") if isinstance(rates, dict) else "n/a"
         lines.append(f"  ⚠️ Lectura RPC falló: {err}")
-    lines.append("")
+        lines.append("")
 
     lines.append(
         "Notas: el flywheel HL gana si HYPE outperforma al asset borrowed. "
