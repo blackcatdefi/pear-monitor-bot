@@ -23,7 +23,7 @@ import math
 from typing import Any
 
 from modules.bounce_tech import fetch_bounce_tech
-from modules.hyperlend import fetch_all_hyperlend, symbol_to_ticker
+from modules.hyperlend import fetch_all_hyperlend, fetch_reserve_rates, symbol_to_ticker
 from modules.market import coingecko_prices
 
 log = logging.getLogger(__name__)
@@ -50,10 +50,11 @@ def _price(prices: dict[str, Any], ticker: str) -> float:
 
 
 async def compute_flywheel() -> str:
-    hl_list, bt_list, prices = await asyncio.gather(
+    hl_list, bt_list, prices, rates = await asyncio.gather(
         fetch_all_hyperlend(),
         fetch_bounce_tech(),
         coingecko_prices(),
+        fetch_reserve_rates(),
     )
 
     hype_price = _price(prices, "HYPE")
@@ -166,8 +167,60 @@ async def compute_flywheel() -> str:
     lines.append(f"  Total SHORT ETH (all sources): {_fmt_usd(total_short_eth_all)}")
     lines.append(f"  Net flywheel exposure: {_fmt_usd(net_all)}")
     lines.append("")
+
+    # ── Round 13: Costo real borrow on-chain ─────────────────────────────
+    # Lee currentVariableBorrowRate de cada reserve via getReserveData().
+    # UETH es la deuda real del flywheel post-17 abr; mostramos TODO lo que
+    # el fondo tiene borroweado hoy + UETH aunque no esté borroweado (para
+    # baseline).
+    rates_ok = isinstance(rates, dict) and rates.get("status") == "ok"
+    lines.append("COSTO BORROW ON-CHAIN (HyperLend live)")
+    if rates_ok:
+        rates_map = rates.get("rates") or {}
+        # Buscar símbolos: los que el fondo efectivamente borrowea +
+        # siempre UETH como referencia del flywheel.
+        fund_debt_syms: set[str] = set()
+        for r in hl_list:
+            if r.get("status") == "ok":
+                for d in r["data"].get("debt_assets", []) or []:
+                    sym = d.get("symbol")
+                    if sym:
+                        fund_debt_syms.add(sym)
+        # Fuerza UETH para monitoreo aun si actualmente no hay deuda.
+        fund_debt_syms.add("UETH")
+        any_row = False
+        for sym in sorted(fund_debt_syms):
+            entry = rates_map.get(sym)
+            if not entry:
+                # case-insensitive lookup
+                for k, v in rates_map.items():
+                    if k.lower() == sym.lower():
+                        entry = v
+                        break
+            if not entry:
+                lines.append(f"  {sym}: — (no en reserves list)")
+                continue
+            apr = float(entry.get("apr_borrow") or 0.0)
+            apy = float(entry.get("apy_borrow") or 0.0)
+            tag = ""
+            if apy >= 0.10:
+                tag = " 🚨 >10%"
+            elif apy >= 0.06:
+                tag = " ⚠️ >6% (threshold flywheel)"
+            lines.append(f"  {sym} borrow: {apr*100:.2f}% APR / {apy*100:.2f}% APY{tag}")
+            any_row = True
+        ts = rates.get("fetched_at_iso") or "—"
+        lines.append(f"  (última lectura RPC: {ts}, cache 15min)")
+        if not any_row:
+            lines.append("  — sin reserves para reportar")
+    else:
+        err = rates.get("error") if isinstance(rates, dict) else "n/a"
+        lines.append(f"  ⚠️ Lectura RPC falló: {err}")
+    lines.append("")
+
     lines.append(
         "Notas: el flywheel HL gana si HYPE outperforma al asset borrowed. "
-        "Si la deuda es ETH-denominada, es un pair trade implícito LONG HYPE / SHORT ETH."
+        "Si la deuda es ETH-denominada, es un pair trade implícito LONG HYPE / SHORT ETH. "
+        "Alerta automática dispara si UETH borrow APY > 10%."
     )
     return "\n".join(lines)

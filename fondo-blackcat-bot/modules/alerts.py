@@ -20,7 +20,7 @@ from config import (
     LIQ_PROXIMITY_PCT,
     TELEGRAM_CHAT_ID,
 )
-from modules.hyperlend import fetch_all_hyperlend
+from modules.hyperlend import fetch_all_hyperlend, fetch_reserve_rates
 from modules.portfolio import fetch_all_wallets, get_spot_price
 from utils.telegram import send_bot_message
 
@@ -164,7 +164,44 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
         else:
             _clear(state, "cycle_tp")
 
-    # 5. Liquidation proximity (per position)
+    # 5b. UETH borrow APY watchdog (Round 13)
+    # El flywheel es insostenible si UETH borrow APY > 6%. A 10% empieza a
+    # devorar profit: alerta crítica. Lectura on-chain via getReserveData().
+    try:
+        rates = await fetch_reserve_rates()
+        if rates.get("status") == "ok":
+            entry = (rates.get("rates") or {}).get("UETH")
+            if not entry:
+                for k, v in (rates.get("rates") or {}).items():
+                    if k.lower() == "ueth":
+                        entry = v
+                        break
+            if entry:
+                apy = float(entry.get("apy_borrow") or 0.0)
+                if apy >= 0.10:
+                    await _emit(
+                        bot, "ueth_borrow_critical", state,
+                        f"\U0001f6a8 [FLYWHEEL] UETH borrow APY = {apy*100:.2f}% — "
+                        "evaluar rotaci\u00f3n a stable o repay parcial inmediato "
+                        "(threshold cr\u00edtico 10%)."
+                    )
+                else:
+                    _clear(state, "ueth_borrow_critical")
+
+                if apy >= 0.06:
+                    await _emit(
+                        bot, "ueth_borrow_warn", state,
+                        f"\u26a0\ufe0f [FLYWHEEL] UETH borrow APY = {apy*100:.2f}% — "
+                        "sobre threshold 6% de la tesis. Costo del pair trade "
+                        "se hace insostenible si se mantiene."
+                    )
+                else:
+                    _clear(state, "ueth_borrow_warn")
+                    _clear(state, "ueth_borrow_critical")
+    except Exception:  # noqa: BLE001
+        log.exception("UETH borrow APY check failed (non-fatal)")
+
+    # 6. Liquidation proximity (per position)
     wallets = await fetch_all_wallets()
     for w in wallets:
         if w.get("status") != "ok":

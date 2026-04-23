@@ -179,8 +179,16 @@ class HyperLend:
                 rd = self.pool.functions.getReserveData(
                     Web3.to_checksum_address(asset)
                 ).call()
-                # rd is a tuple matching ReserveDataLegacy ordering; aToken is idx 8,
-                # stableDebtToken idx 9, variableDebtToken idx 10.
+                # rd is a tuple matching ReserveDataLegacy ordering.
+                # Index map:
+                #   0 configuration, 1 liquidityIndex, 2 currentLiquidityRate,
+                #   3 variableBorrowIndex, 4 currentVariableBorrowRate (ray),
+                #   5 currentStableBorrowRate, 6 lastUpdateTimestamp, 7 id,
+                #   8 aTokenAddress, 9 stableDebtToken, 10 variableDebtToken
+                liquidity_rate_ray = int(rd[2])
+                variable_borrow_rate_ray = int(rd[4])
+                stable_borrow_rate_ray = int(rd[5])
+                last_update_ts = int(rd[6])
                 a_token = rd[8]
                 var_debt_token = rd[10]
             except (ContractLogicError, Exception) as exc:  # noqa: BLE001
@@ -194,6 +202,13 @@ class HyperLend:
                     "decimals": self._safe_decimals(asset),
                     "a_token": a_token,
                     "variable_debt_token": var_debt_token,
+                    # Round 13: raw rates in ray (10^27) — Aave v3 semantics.
+                    # APR = rate / 1e27 (expressed per year).
+                    # APY = (1 + APR / SECONDS_PER_YEAR) ** SECONDS_PER_YEAR - 1
+                    "liquidity_rate_ray": liquidity_rate_ray,
+                    "variable_borrow_rate_ray": variable_borrow_rate_ray,
+                    "stable_borrow_rate_ray": stable_borrow_rate_ray,
+                    "last_update_ts": last_update_ts,
                 }
             )
 
@@ -441,3 +456,130 @@ async def get_health_factor(address: str = HYPERLEND_WALLET) -> float | None:
     if res["status"] == "ok":
         return res["data"]["health_factor"]
     return None
+
+
+# ─── Round 13: borrow/supply rate reader (UETH flywheel cost) ──────────────
+# Aave v3 semantics recap:
+#   currentVariableBorrowRate is a uint128 in ray (1e27) expressed per year.
+#   APR  = rate_ray / 1e27
+#   APY  = (1 + APR / SECONDS_PER_YEAR) ** SECONDS_PER_YEAR - 1
+# For UETH borrow cost monitoring, we surface both APR (raw) and APY
+# (compounded) so /flywheel can show "Costo borrow UETH: X% APR / Y% APY"
+# and modules/alerts.py can raise a warning if either exceeds 10%.
+RAY = 10**27
+SECONDS_PER_YEAR = 31_536_000  # 365 * 86_400 — matches Aave convention
+
+_RATES_CACHE: dict[str, Any] = {
+    "fetched_at": 0.0,
+    "data": {},
+}
+_RATES_TTL_SEC = 15 * 60  # 15 minutes — same cadence as /reporte cadence
+
+
+def _ray_to_apr(rate_ray: int) -> float:
+    if rate_ray <= 0:
+        return 0.0
+    return rate_ray / RAY
+
+
+def _apr_to_apy(apr: float) -> float:
+    if apr <= 0:
+        return 0.0
+    try:
+        return (1 + apr / SECONDS_PER_YEAR) ** SECONDS_PER_YEAR - 1
+    except OverflowError:
+        return apr  # degrade gracefully if extreme values appear
+
+
+def _load_rates_sync() -> dict[str, Any]:
+    """Return {symbol: {apr_borrow, apy_borrow, apr_supply, apy_supply, ...}}.
+
+    Uses the module-level reserves cache so the only RPC cost here is the
+    initial reserves scan (done once per process). Safe for every /flywheel
+    call; additional TTL cache on top (_RATES_CACHE) deduplicates bursts.
+    """
+    client = HyperLend()
+    reserves = client._load_reserves_sync()
+    out: dict[str, dict[str, Any]] = {}
+    for r in reserves:
+        sym = (r.get("symbol") or "").strip()
+        if not sym:
+            continue
+        apr_borrow = _ray_to_apr(r.get("variable_borrow_rate_ray", 0))
+        apy_borrow = _apr_to_apy(apr_borrow)
+        apr_supply = _ray_to_apr(r.get("liquidity_rate_ray", 0))
+        apy_supply = _apr_to_apy(apr_supply)
+        out[sym] = {
+            "symbol": sym,
+            "asset": r.get("asset"),
+            "apr_borrow": apr_borrow,
+            "apy_borrow": apy_borrow,
+            "apr_supply": apr_supply,
+            "apy_supply": apy_supply,
+            "last_update_ts": r.get("last_update_ts", 0),
+        }
+    return out
+
+
+async def fetch_reserve_rates(force: bool = False) -> dict[str, Any]:
+    """Return on-chain borrow/supply rates for all HyperLend reserves.
+
+    Result shape:
+        {
+          "status": "ok" | "error",
+          "fetched_at_iso": "2026-04-23T14:30:00Z",
+          "rates": {
+              "UETH": {"apr_borrow": 0.1617, "apy_borrow": 0.1759, ...},
+              "USDH": {...}, "USDT0": {...}, "USDC": {...}, ...
+          },
+          "error": "..."  # only present on error
+        }
+
+    Results cached for 15 minutes to avoid hammering the RPC; set force=True
+    to bypass the cache (used by /debug_x).
+    """
+    import time as _time
+    now = _time.time()
+    if not force and (now - _RATES_CACHE["fetched_at"]) < _RATES_TTL_SEC and _RATES_CACHE["data"]:
+        return _RATES_CACHE["data"]
+
+    try:
+        rates = await asyncio.to_thread(_load_rates_sync)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("fetch_reserve_rates failed: %s", exc)
+        return {
+            "status": "error",
+            "error": str(exc),
+            "fetched_at_iso": None,
+            "rates": {},
+        }
+
+    from datetime import datetime as _dt, timezone as _tz
+    payload = {
+        "status": "ok",
+        "fetched_at_iso": _dt.now(_tz.utc).isoformat(),
+        "rates": rates,
+    }
+    _RATES_CACHE["fetched_at"] = now
+    _RATES_CACHE["data"] = payload
+    return payload
+
+
+async def get_borrow_apy(symbol: str) -> float | None:
+    """Convenience: return compounded APY for a given debt asset.
+
+    Returns None if the reserve is not found or rates cannot be fetched.
+    """
+    data = await fetch_reserve_rates()
+    if data.get("status") != "ok":
+        return None
+    entry = (data.get("rates") or {}).get(symbol)
+    if not entry:
+        # Try case-insensitive lookup
+        for k, v in (data.get("rates") or {}).items():
+            if k.lower() == symbol.lower():
+                entry = v
+                break
+    if not entry:
+        return None
+    return float(entry.get("apy_borrow") or 0.0)
