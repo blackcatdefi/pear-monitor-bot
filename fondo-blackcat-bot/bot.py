@@ -46,6 +46,8 @@ from modules.x_intel import (
     debug_x_status,
     fetch_x_intel,
     format_intel_sources,
+    get_cache_state,
+    get_cached_timeline,
     poll_and_cache_timeline,
 )
 from modules.flywheel import compute_flywheel
@@ -205,14 +207,42 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         intel_legacy = {"status": "error", "error": "telethon_disabled"}
         intel_unread = {"status": "error", "error": "telethon_disabled"}
 
-    # ─── Sección 1: Timeline X (48h) — omitir si todas las fuentes fallaron ──
+    # ─── Sección 1: Timeline X (48h) ─────────────────────────────────────────
+    # Round 13: fallback a cache scheduler cuando el live fetch hit cooldown.
+    # Pre-Round 13 bug: si fetch_x_intel devolvía status=error (ej: internal
+    # 4h cooldown recién disparado por el scheduler), /reporte directamente
+    # saltaba la sección y mostraba el mensaje legacy de "Nitter/RSSHub".
+    # Ahora: intentar cache antes de rendirse — /timeline ya hacía esto.
     x_intel_ok = isinstance(x_intel, dict) and x_intel.get("status") == "ok"
+    x_intel_fallback_note = ""
+
+    if not x_intel_ok:
+        cached = get_cached_timeline()
+        if cached and cached.get("status") == "ok":
+            cs = get_cache_state()
+            last_ok = cs.get("last_success_at") or "—"
+            live_err = ""
+            if isinstance(x_intel, dict):
+                live_err = str(x_intel.get("error") or "")[:200]
+            x_intel_fallback_note = (
+                f"\u26a0\ufe0f Live API fall\u00f3: {live_err}\n"
+                f"Mostrando cache scheduler (last success UTC: {last_ok}).\n"
+            )
+            x_intel = cached
+            x_intel_ok = True
 
     if x_intel_ok:
         timeline_text = format_timeline(x_intel, top_n=40)
+        header = "\U0001f4e1 TIMELINE X \u2014 48H\n" + ("\u2500" * 30) + "\n\n"
+        if x_intel_fallback_note:
+            header = (
+                "\U0001f4e1 TIMELINE X \u2014 48H (cache)\n"
+                + ("\u2500" * 30) + "\n"
+                + x_intel_fallback_note + "\n"
+            )
         await send_long_message(
             update,
-            "\U0001f4e1 TIMELINE X \u2014 48H\n" + ("\u2500" * 30) + "\n\n" + timeline_text,
+            header + timeline_text,
             reply_markup=MAIN_KEYBOARD,
         )
 
@@ -252,11 +282,17 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if thesis_update:
         await send_long_message(update, thesis_update, reply_markup=MAIN_KEYBOARD)
 
-    # Nota si timeline X no disponible
+    # Nota si timeline X no disponible (ni live ni cache)
+    # Round 13: mensaje actualizado — ya no usamos Nitter/RSSHub, el error
+    # legacy era confuso. Ahora apunta al Spend Cap / balance X API / /debug_x.
     if not x_intel_ok:
+        live_err = ""
+        if isinstance(x_intel, dict):
+            live_err = str(x_intel.get("error") or "")[:300]
         await update.message.reply_text(
-            "\u2139\ufe0f Nota: Timeline X no disponible en este reporte (todas las fuentes fallaron). "
-            "Verificar X_BEARER_TOKEN y disponibilidad de Nitter/RSSHub.",
+            "\u2139\ufe0f Timeline X no disponible (live + cache fallaron).\n"
+            f"   Error live: {live_err or '—'}\n"
+            "   Diagn\u00f3stico: correr /debug_x para probe en vivo (bypass cooldown).",
             reply_markup=MAIN_KEYBOARD,
         )
 
@@ -310,7 +346,6 @@ async def cmd_timeline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     x_intel = await fetch_x_intel(hours=48)
     # Fallback to cached timeline when live fetch fails (SpendCap etc.)
     if isinstance(x_intel, dict) and x_intel.get("status") != "ok":
-        from modules.x_intel import get_cached_timeline, get_cache_state
         cached = get_cached_timeline()
         if cached and cached.get("status") == "ok":
             cs = get_cache_state()
