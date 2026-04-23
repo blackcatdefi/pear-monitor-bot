@@ -109,6 +109,61 @@ BASKET_PERP_TOKENS = ["WLD", "STRK", "ZRO", "AVAX", "ENA", "EIGEN", "SCR", "ZETA
 STABLE_TOKENS = {"USDC", "USDH", "USDT", "USDT0", "DAI"}
 
 
+# ─── BCD DCA tranched plan (Round 13) ──────────────────────────────────────
+# BCD plan de compra por tramos para BTC / ETH / HYPE — cycle bottom esperado
+# Sep–Nov 2026. El bot usa este bloque para:
+#   1. Inyectarlo al system prompt del LLM (templates/system_prompt.py) para
+#      que el analyzer sepa dónde están las zonas y sugiera cuándo tocan.
+#   2. Disparar alertas Telegram edge-triggered cuando el precio entra en una
+#      tranch con status="pending" (modules/alerts.py + data/alert_state.json).
+# Las tranches se mantienen como "pending" hasta que:
+#   (a) BCD ejecuta la compra y actualiza manualmente (o vía /dca_mark)
+#   (b) el precio sale de la zona sin fill — se resetea a pending tras 24h.
+# Nota arquitectónica: el status runtime vive en alert_state.json (NO en este
+# archivo) para no spamear git con commits automáticos. Este dict define el
+# PLAN inmutable; alert_state.json lleva la traza de qué alertas ya se
+# dispararon (edge-triggered, igual que HF/HYPE/BTC alerts).
+BCD_DCA_PLAN: dict[str, dict] = {
+    "BTC": {
+        "tranches": [
+            {"pct": 20, "range": [63000, 65000], "status": "pending"},
+            {"pct": 25, "range": [55000, 60000], "status": "pending"},
+            {"pct": 30, "range": [48000, 52000], "status": "pending"},
+            {"pct": 25, "range": [43000, 45000], "status": "pending"},
+        ],
+    },
+    "ETH": {
+        "tranches": [
+            {"pct": 18, "range": [1800, 1900], "status": "pending"},
+            {"pct": 25, "range": [1500, 1600], "status": "pending"},
+            {"pct": 32, "range": [1100, 1200], "status": "pending"},
+            {"pct": 25, "range": [900, 1000], "status": "pending"},
+        ],
+        # Zona donde flipeamos UETH debt a stable (USDT0/USDC) para
+        # congelar el short ETH y evitar mark-to-market adverso en el piso.
+        "debt_flip_range": [900, 1200],
+    },
+    "HYPE": {
+        "tranches": [
+            {"pct": 17, "range": [27, 28], "status": "pending"},
+            {"pct": 25, "range": [24, 25], "status": "pending"},
+            {"pct": 33, "range": [19, 20], "status": "pending"},
+            {"pct": 25, "range": [15, 16], "status": "pending"},
+        ],
+    },
+    "cycle_bottom_expected": "2026-09 to 2026-11",
+    "sources": ["Norber", "Lady Market", "LMEC", "BCD gut"],
+}
+
+
+def dca_tranches_for(asset: str) -> list[dict]:
+    """Return the tranches list for an asset, or [] if not defined."""
+    plan = BCD_DCA_PLAN.get(asset.upper(), {})
+    if not isinstance(plan, dict):
+        return []
+    return list(plan.get("tranches") or [])
+
+
 def classify_fill(fill: dict, wallet_label: str = "") -> str:
     """Return a classification label for a recent fill.
 

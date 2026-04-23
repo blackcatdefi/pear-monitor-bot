@@ -10,6 +10,7 @@ from fund_state import (
     BASKET_STATUS,
     BASKET_V5_PLAN,
     BASKET_V5_STATUS,
+    BCD_DCA_PLAN,
     BLOFIN_BALANCE_AVAILABLE,
     FLYWHEEL_NOTE,
     HF_CRITICAL,
@@ -76,8 +77,45 @@ BASKET v5 — PLAN OPERATIVO:
 FLYWHEEL HYPERLEND:
   • {FLYWHEEL_NOTE}
 
+PLAN DCA TRAMIFICADO BCD (ground truth — usar en vez de inventar niveles):
+{_build_dca_block()}
+
 ═══════ FIN ESTADO AUTORITATIVO ═══════
 """
+
+
+def _build_dca_block() -> str:
+    """Render BCD_DCA_PLAN as a compact prompt block for the LLM."""
+    lines: list[str] = []
+    for asset in ("BTC", "ETH", "HYPE"):
+        plan = BCD_DCA_PLAN.get(asset) or {}
+        tranches = plan.get("tranches") or []
+        if not tranches:
+            continue
+        rendered = []
+        for t in tranches:
+            rng = t.get("range") or [0, 0]
+            rendered.append(
+                f"{t.get('pct', 0)}% @ ${rng[0]:,}-${rng[1]:,} ({t.get('status', '?')})"
+            )
+        lines.append(f"  • {asset}: " + " | ".join(rendered))
+        if asset == "ETH":
+            flip = plan.get("debt_flip_range")
+            if flip:
+                lines.append(
+                    f"         debt_flip_range (rotar UETH→stable): ${flip[0]:,}-${flip[1]:,}"
+                )
+    bottom = BCD_DCA_PLAN.get("cycle_bottom_expected", "?")
+    sources = ", ".join(BCD_DCA_PLAN.get("sources") or [])
+    lines.append(f"  • Cycle bottom esperado: {bottom}")
+    if sources:
+        lines.append(f"  • Fuentes: {sources}")
+    lines.append(
+        "  • REGLA: si el precio actual entra en el range de una tranch, "
+        "flaggearlo como ZONA DCA y sugerir la acción (Telegram ya manda "
+        "alerta edge-triggered)."
+    )
+    return "\n".join(lines)
 
 
 SYSTEM_PROMPT = """INSTRUCCIONES CRÍTICAS DEL FORMATO (seguir AL PIE DE LA LETRA):
