@@ -32,7 +32,7 @@ from modules.hyperlend import fetch_all_hyperlend
 from modules.kill_scenarios import compute_kill_scenarios
 from modules.llm_providers import format_provider_status
 from modules.market import fetch_market_data
-from modules.portfolio import fetch_all_wallets, fetch_all_recent_fills
+from modules.portfolio import fetch_all_wallets, fetch_all_recent_fills, get_spot_price
 from modules.telegram_intel import (
     fetch_telegram_intel,
     get_client as get_telethon,
@@ -52,6 +52,7 @@ from modules.x_intel import (
 )
 from modules.flywheel import compute_flywheel
 from modules.liq_calc import compute_liq_matrix
+from fund_state import BCD_DCA_PLAN
 from modules.cycle_trade import (
     apply_cycle_update,
     parse_cycle_update_args,
@@ -81,8 +82,9 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton("/timeline"), KeyboardButton("/tesis")],
         [KeyboardButton("/hf"), KeyboardButton("/kill")],
         [KeyboardButton("/ciclo"), KeyboardButton("/ciclo_update")],
-        [KeyboardButton("/pnl"), KeyboardButton("/log")],
-        [KeyboardButton("/intel"), KeyboardButton("/alertas")],
+        [KeyboardButton("/dca"), KeyboardButton("/pnl")],
+        [KeyboardButton("/log"), KeyboardButton("/intel")],
+        [KeyboardButton("/alertas"), KeyboardButton("/help")],
         [KeyboardButton("/providers"), KeyboardButton("/debug_x")],
         [KeyboardButton("/intel_sources"), KeyboardButton("/start")],
     ],
@@ -115,6 +117,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/kill \u2014 kill scenarios de cada posici\u00f3n\n"
         "/ciclo \u2014 estado del Trade del Ciclo (Blofin, manual)\n"
         "/ciclo_update \u2014 abrir/cerrar Trade del Ciclo (edita fund_state.py)\n"
+        "/dca \u2014 plan DCA tramificado BTC/ETH/HYPE + zona actual\n"
         "/pnl \u2014 realized PnL 7D / 30D / YTD\n"
         "/log \u2014 \u00faltimas 20 entradas del position log\n"
         "/intel \u2014 resumen de intel memory (\u00faltimas 24h)\n"
@@ -501,6 +504,69 @@ async def cmd_ciclo_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 @authorized
+async def cmd_dca(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show BCD DCA plan + current prices + which zones are active right now.
+
+    Round 13: no arguments. Muestra los 4 tranches por asset con su status
+    computado sobre el precio spot actual (BTC/ETH/HYPE). Útil como sanity
+    check antes de que las alertas automáticas disparen.
+    """
+    from modules.alerts import _dca_alerted_within_window  # runtime peek
+    from modules.alerts import _load_state as load_alert_state
+    state = load_alert_state()
+    lines = ["\U0001f3af PLAN DCA TRAMIFICADO BCD", "\u2500" * 40]
+    for asset in ("BTC", "ETH", "HYPE"):
+        plan = BCD_DCA_PLAN.get(asset) or {}
+        tranches = plan.get("tranches") or []
+        if not tranches:
+            continue
+        try:
+            px = await get_spot_price(asset)
+        except Exception:
+            px = None
+        px_str = f"${px:,.2f}" if px else "(sin precio)"
+        lines.append(f"\n{asset} — spot {px_str}")
+        for idx, t in enumerate(tranches):
+            rng = t.get("range") or [0, 0]
+            low, high = float(rng[0]), float(rng[1])
+            in_zone = (px is not None) and (low <= px <= high)
+            alerted_key = f"dca_{asset}_{idx}_alerted_at"
+            already_alerted = _dca_alerted_within_window(state, alerted_key)
+            status = "pending"
+            tag = ""
+            if in_zone and already_alerted:
+                status = "alerted"
+                tag = " \U0001f514"
+            elif in_zone:
+                status = "IN ZONE"
+                tag = " \u2705"
+            lines.append(
+                f"  [{idx+1}] {t.get('pct', 0):>3}% @ ${low:,.0f}-${high:,.0f} "
+                f"\u2192 {status}{tag}"
+            )
+        if asset == "ETH":
+            flip = plan.get("debt_flip_range")
+            if flip and len(flip) == 2:
+                in_flip = (px is not None) and (float(flip[0]) <= px <= float(flip[1]))
+                tag = " \u2705 IN ZONE" if in_flip else ""
+                lines.append(
+                    f"  debt_flip (UETH\u2192stable): "
+                    f"${float(flip[0]):,.0f}-${float(flip[1]):,.0f}{tag}"
+                )
+    lines.append("")
+    lines.append(f"Cycle bottom esperado: {BCD_DCA_PLAN.get('cycle_bottom_expected', '?')}")
+    sources = ", ".join(BCD_DCA_PLAN.get("sources") or [])
+    if sources:
+        lines.append(f"Fuentes: {sources}")
+    lines.append("")
+    lines.append(
+        "Alertas autom\u00e1ticas edge-triggered cada "
+        f"{POLL_INTERVAL_MIN}min si el precio entra en un range. Rearm 24h."
+    )
+    await send_long_message(update, "\n".join(lines), reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
 async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = context.args or []
     if args and args[0].lower() == "ciclo":
@@ -697,6 +763,7 @@ def main() -> None:
     app.add_handler(CommandHandler("kill", cmd_kill))
     app.add_handler(CommandHandler("ciclo", cmd_ciclo))
     app.add_handler(CommandHandler("ciclo_update", cmd_ciclo_update))
+    app.add_handler(CommandHandler("dca", cmd_dca))
     app.add_handler(CommandHandler("pnl", cmd_pnl))
     app.add_handler(CommandHandler("log", cmd_log))
 

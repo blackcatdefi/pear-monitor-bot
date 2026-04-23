@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from config import (
@@ -20,6 +21,7 @@ from config import (
     LIQ_PROXIMITY_PCT,
     TELEGRAM_CHAT_ID,
 )
+from fund_state import BCD_DCA_PLAN
 from modules.hyperlend import fetch_all_hyperlend, fetch_reserve_rates
 from modules.portfolio import fetch_all_wallets, get_spot_price
 from utils.telegram import send_bot_message
@@ -227,4 +229,96 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
             else:
                 _clear(state, key)
 
+    # 7. BCD DCA zone watchdog (Round 13)
+    # Para cada asset en BCD_DCA_PLAN chequear si el precio entra en un range
+    # con status lógico "pending" (= sin alerta activa en las últimas 24h).
+    # Estado por zona en alert_state.json:
+    #   dca_<asset>_<idx>_alerted_at:  ISO ts del último emit
+    #   dca_<asset>_<idx>_in_zone:     bool — currently inside el range
+    # Reset a "pending": si el precio salió de la zona Y pasaron 24h desde
+    # alerted_at — la próxima entrada re-emite.
+    try:
+        await _run_dca_zone_alerts(bot, state)
+    except Exception:  # noqa: BLE001
+        log.exception("DCA zone alerts failed (non-fatal)")
+
     _save_state(state)
+
+
+# ─── Round 13: BCD DCA zone watchdog ───────────────────────────────────────
+_DCA_ASSETS_TO_CHECK = ("BTC", "ETH", "HYPE")
+_DCA_ALERT_REARM_HOURS = 24
+
+
+def _dca_alerted_within_window(state: dict[str, Any], key: str) -> bool:
+    """Return True if the alerted_at timestamp is within the rearm window."""
+    ts_raw = state.get(key)
+    if not ts_raw:
+        return False
+    try:
+        ts = datetime.fromisoformat(str(ts_raw))
+    except ValueError:
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - ts) < timedelta(hours=_DCA_ALERT_REARM_HOURS)
+
+
+async def _run_dca_zone_alerts(bot, state: dict[str, Any]) -> None:
+    for asset in _DCA_ASSETS_TO_CHECK:
+        plan = BCD_DCA_PLAN.get(asset) or {}
+        tranches = plan.get("tranches") or []
+        if not tranches:
+            continue
+        px = await get_spot_price(asset)
+        if px is None or px <= 0:
+            continue
+
+        for idx, t in enumerate(tranches):
+            rng = t.get("range") or []
+            if len(rng) != 2:
+                continue
+            low, high = float(rng[0]), float(rng[1])
+            in_zone = low <= px <= high
+            alerted_key = f"dca_{asset}_{idx}_alerted_at"
+            zone_key = f"dca_{asset}_{idx}_in_zone"
+
+            if in_zone:
+                if not _dca_alerted_within_window(state, alerted_key):
+                    pct = t.get("pct", 0)
+                    msg = (
+                        f"\U0001f3af [DCA ALERT] {asset} @ ${px:,.2f} "
+                        f"entr\u00f3 en zona {pct}% (${low:,.0f}-${high:,.0f}). "
+                        f"Evaluar compra."
+                    )
+                    log.warning("DCA ZONE: %s", msg)
+                    if TELEGRAM_CHAT_ID:
+                        await send_bot_message(bot, TELEGRAM_CHAT_ID, msg)
+                    state[alerted_key] = datetime.now(timezone.utc).isoformat()
+                state[zone_key] = True
+
+                # Asset-specific companion alert: ETH entró en debt_flip_range
+                if asset == "ETH":
+                    flip = plan.get("debt_flip_range") or []
+                    if len(flip) == 2:
+                        flow, fhigh = float(flip[0]), float(flip[1])
+                        if flow <= px <= fhigh:
+                            flip_key = "dca_ETH_debt_flip_alerted_at"
+                            if not _dca_alerted_within_window(state, flip_key):
+                                msg = (
+                                    f"\U0001f501 [FLYWHEEL] ETH @ ${px:,.2f} entr\u00f3 "
+                                    f"en debt_flip_range (${flow:,.0f}-${fhigh:,.0f}). "
+                                    f"Considerar rotar deuda UETH a stable "
+                                    f"(USDT0/USDC) antes del rebote."
+                                )
+                                log.warning("ETH DEBT FLIP: %s", msg)
+                                if TELEGRAM_CHAT_ID:
+                                    await send_bot_message(bot, TELEGRAM_CHAT_ID, msg)
+                                state[flip_key] = datetime.now(timezone.utc).isoformat()
+            else:
+                # Fuera de la zona: si ya pasó la ventana de rearm, limpiar
+                # alerted_at para que la próxima entrada pueda re-emitir.
+                if state.get(zone_key):
+                    state[zone_key] = False
+                if state.get(alerted_key) and not _dca_alerted_within_window(state, alerted_key):
+                    state.pop(alerted_key, None)
