@@ -50,6 +50,15 @@ async def start_health_server(port: Optional[int] = None) -> None:
     app = web.Application()
     app.router.add_get("/health", health_handler)
     app.router.add_get("/", health_handler)
+
+    # Round 17: optional dashboard at /dashboard?token=XXX
+    try:
+        from modules.dashboard import dashboard_handler  # local import to avoid cycle
+        app.router.add_get("/dashboard", dashboard_handler)
+        log.info("dashboard route mounted at /dashboard")
+    except Exception:  # noqa: BLE001
+        log.exception("dashboard mount failed (non-fatal)")
+
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", bind_port)

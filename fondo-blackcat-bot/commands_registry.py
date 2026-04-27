@@ -26,8 +26,10 @@ COMMANDS: List[BotCommand] = [
     # ─── CORE ───
     BotCommand("reporte", "TODO-EN-UNO: timeline + posiciones + análisis", "core", "cmd_reporte"),
     BotCommand("posiciones", "Snapshot rápido (wallets + HF + Bounce Tech)", "core", "cmd_posiciones"),
+    BotCommand("status", "R17 quick status (sin LLM, <3s)", "core", "cmd_status"),
     BotCommand("flywheel", "Pair trade HL (LONG HYPE / SHORT UETH)", "core", "cmd_flywheel"),
     BotCommand("tesis", "Estado de la tesis macro", "core", "cmd_tesis"),
+    BotCommand("calendar", "Próximos catalysts (macro + unlocks + TGEs)", "core", "cmd_calendar"),
     BotCommand("start", "Mostrar este menú completo", "core", "cmd_start"),
     BotCommand("help", "Alias de /start", "core", "cmd_start"),
 
@@ -35,15 +37,18 @@ COMMANDS: List[BotCommand] = [
     BotCommand("liqcalc", "Matriz liq HYPE × deuda", "trading", "cmd_liqcalc"),
     BotCommand("hf", "Health Factor de HyperLend", "trading", "cmd_hf"),
     BotCommand("kill", "Kill scenarios de cada posición", "trading", "cmd_kill"),
+    BotCommand("kill_status", "Estado de los 5 kill triggers (R17)", "trading", "cmd_kill_status"),
     BotCommand("ciclo", "Estado del Trade del Ciclo (Blofin manual)", "trading", "cmd_ciclo"),
     BotCommand("ciclo_update", "Abrir/cerrar Trade del Ciclo", "trading", "cmd_ciclo_update"),
     BotCommand("dca", "Plan DCA tramificado BTC/ETH/HYPE + zona actual", "trading", "cmd_dca"),
     BotCommand("pnl", "Realized PnL 7D / 30D / YTD", "trading", "cmd_pnl"),
+    BotCommand("pretrade", "Checklist 5-puntos pre-trade <SYMBOL>", "trading", "cmd_pretrade"),
 
     # ─── INTEL ───
     BotCommand("timeline", "Timeline X 48h (tu X list)", "intel", "cmd_timeline"),
     BotCommand("intel", "Resumen de intel memory (últimas 24h)", "intel", "cmd_intel"),
     BotCommand("intel_sources", "Top 20 cuentas activas en X (24h)", "intel", "cmd_intel_sources"),
+    BotCommand("intel_search", "Buscar palabra clave en intel_memory <kw>", "intel", "cmd_intel_search"),
 
     # ─── ADMIN ───
     BotCommand("log", "Últimas 20 entradas del position log", "admin", "cmd_log"),
@@ -51,6 +56,10 @@ COMMANDS: List[BotCommand] = [
     BotCommand("providers", "Status de los LLM providers", "admin", "cmd_providers"),
     BotCommand("reload_commands", "Re-sincronizar lista de comandos con Telegram", "admin", "cmd_reload_commands"),
     BotCommand("test_alerts", "Disparar alerta de test al chat", "admin", "cmd_test_alerts"),
+    BotCommand("reconcile", "Reconciliar fund_state vs on-chain (R17)", "admin", "cmd_reconcile"),
+    BotCommand("add_event", "Agregar evento a calendar <id> <ISO> <cat> <imp> | <name>", "admin", "cmd_add_event"),
+    BotCommand("remove_event", "Borrar evento del calendar <event_id>", "admin", "cmd_remove_event"),
+    BotCommand("export", "Export CSV <tipo> <periodo> (fills|pnl|positions|intel|errors × 7d|30d|90d|ytd|all)", "admin", "cmd_export"),
 
     # ─── DEBUG / OBSERVABILIDAD ───
     BotCommand("debug_x", "Diagnóstico de conectividad X/Twitter", "debug", "cmd_debug_x"),

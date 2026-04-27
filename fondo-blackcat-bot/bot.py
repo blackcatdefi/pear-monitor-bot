@@ -92,6 +92,31 @@ from modules.cycle_trade import (
 from modules.intel_memory import format_intel_summary, cleanup_old as intel_cleanup, get_unprocessed_count
 from modules.intel_processor import process_pending_intel
 from modules import pnl_tracker, position_log
+# Round 17 modules
+from modules.status_quick import build_status_block
+from modules.macro_calendar import (
+    add_event as cal_add_event,
+    check_and_dispatch_alerts as cal_check_alerts,
+    format_calendar as cal_format,
+    parse_add_event_args as cal_parse_args,
+    remove_event as cal_remove_event,
+    seed_initial_events as cal_seed,
+)
+from modules.fund_state_reconciler import (
+    format_reconcile_report,
+    reconcile_fund_state,
+    scheduled_reconcile,
+)
+from modules.basket_killer import (
+    evaluate_all as kill_evaluate_all,
+    format_kill_status,
+    scheduled_check as kill_scheduled_check,
+)
+from modules.rates_monitor import scheduled_check as rates_scheduled_check
+from modules.pretrade_checklist import build_pretrade_checklist
+from modules.intel_search import format_search_results, search_intel
+from modules.exports import export_dispatch
+from modules.weekly_summary import scheduled_summary as weekly_scheduled_summary
 from templates.formatters import format_hf, format_quick_positions
 from templates.timeline import format_timeline
 from utils.security import authorized
@@ -706,6 +731,167 @@ async def cmd_reload_commands(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 
+# ─── Round 17 handlers ──────────────────────────────────────────────────────
+
+
+@authorized
+@with_error_logging
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R17 — Quick status (no LLM, no X API, <3s)."""
+    text = await build_status_block()
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_reconcile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R17 — Reconciliar fund_state vs on-chain."""
+    await update.message.reply_text("⏳ Reconciliando fund_state vs on-chain...", reply_markup=MAIN_KEYBOARD)
+    discrepancies = await reconcile_fund_state()
+    text = format_reconcile_report(discrepancies)
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R17 — Próximos catalysts del macro calendar."""
+    text = cal_format()
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_add_event(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R17 — Agregar evento al macro calendar.
+
+    Uso: /add_event <event_id> <YYYY-MM-DDTHH:MMZ> <category> <impact> | <name>
+    """
+    raw = " ".join(context.args or [])
+    if not raw.strip():
+        await update.message.reply_text(
+            "Uso: /add_event <event_id> <YYYY-MM-DDTHH:MMZ> <category> <impact> | <name>\n"
+            "Ej: /add_event fomc_may7 2026-05-07T18:00Z fomc high | FOMC May rate decision",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    try:
+        ev = cal_parse_args(raw)
+        cal_add_event(ev)
+        await update.message.reply_text(
+            f"✅ Evento agregado: {ev.event_id} → {ev.timestamp_utc.isoformat()}",
+            reply_markup=MAIN_KEYBOARD,
+        )
+    except Exception as exc:  # noqa: BLE001
+        await update.message.reply_text(f"❌ {exc}", reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_remove_event(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R17 — Borrar evento del macro calendar."""
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Uso: /remove_event <event_id>",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    event_id = args[0].strip()
+    ok = cal_remove_event(event_id)
+    if ok:
+        await update.message.reply_text(f"🗑 {event_id} borrado.", reply_markup=MAIN_KEYBOARD)
+    else:
+        await update.message.reply_text(f"⚠️ {event_id} no encontrado.", reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_kill_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R17 — Estado de los 5 kill triggers."""
+    await update.message.reply_text("⏳ Evaluando kill triggers...", reply_markup=MAIN_KEYBOARD)
+    results = await kill_evaluate_all()
+    text = format_kill_status(results)
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_intel_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R17 — Búsqueda full-text en intel_memory."""
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Uso: /intel_search <keyword>\n"
+            "Ej: /intel_search hormuz | /intel_search BTC ATH",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    query = " ".join(args).strip()
+    results = await asyncio.to_thread(search_intel, query, 15)
+    text = format_search_results(query, results)
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R17 — Export CSV.
+
+    Uso: /export <tipo> <periodo>
+        tipos: fills, pnl, positions, intel, errors
+        periodos: 7d, 30d, 90d, ytd, all
+    """
+    args = context.args or []
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Uso: /export <tipo> <periodo>\n"
+            "  tipos: fills, pnl, positions, intel, errors\n"
+            "  periodos: 7d, 30d, 90d, ytd, all\n"
+            "Ej: /export fills 30d",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    tipo, periodo = args[0].strip().lower(), args[1].strip().lower()
+    try:
+        path, count = await asyncio.to_thread(export_dispatch, tipo, periodo)
+    except ValueError as exc:
+        await update.message.reply_text(f"❌ {exc}", reply_markup=MAIN_KEYBOARD)
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("/export failed")
+        await update.message.reply_text("❌ Export fallido — ver /errors.", reply_markup=MAIN_KEYBOARD)
+        return
+
+    caption = f"📊 {tipo} ({periodo}) — {count} filas"
+    try:
+        with open(path, "rb") as f:
+            await update.message.reply_document(document=f, filename=os.path.basename(path), caption=caption)
+    except Exception:  # noqa: BLE001
+        log.exception("send_document failed")
+        await update.message.reply_text(
+            f"{caption}\n📁 Archivo en server: {path}",
+            reply_markup=MAIN_KEYBOARD,
+        )
+
+
+@authorized
+@with_error_logging
+async def cmd_pretrade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R17 — Checklist pre-trade de 5 puntos."""
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Uso: /pretrade <SYMBOL>\nEj: /pretrade DYDX",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    symbol = args[0]
+    await update.message.reply_text(f"⏳ Pre-trade {symbol.upper()}...", reply_markup=MAIN_KEYBOARD)
+    text = await build_pretrade_checklist(symbol)
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
 # ─── Scheduler jobs ──────────────────────────────────────────────────────────
 
 
@@ -753,6 +939,57 @@ async def _weekly_cleanup_job() -> None:
         log.exception("Weekly cleanup failed")
 
 
+# ─── Round 17 scheduler jobs ────────────────────────────────────────────────
+
+
+async def _macro_calendar_job(application: Application) -> None:
+    """R17: every 1 min — fire T-24h/T-2h/T-30m alerts for upcoming events."""
+    if os.getenv("MACRO_CALENDAR_ENABLED", "true").strip().lower() == "false":
+        return
+    try:
+        await cal_check_alerts(application.bot)
+    except Exception:  # noqa: BLE001
+        log.exception("macro_calendar job failed")
+
+
+async def _reconcile_job(application: Application) -> None:
+    """R17: every 15 min — auto-detect PHANTOM/GHOST_BASKET, alert + (opt) auto-commit."""
+    if os.getenv("AUTO_RECONCILE_ENABLED", "true").strip().lower() == "false":
+        return
+    try:
+        await scheduled_reconcile(application.bot)
+    except Exception:  # noqa: BLE001
+        log.exception("reconcile job failed")
+
+
+async def _kill_triggers_job(application: Application) -> None:
+    """R17: every 5 min — evaluate 5 kill triggers, edge-trigger Telegram alerts."""
+    if os.getenv("KILL_TRIGGERS_ENABLED", "true").strip().lower() == "false":
+        return
+    try:
+        await kill_scheduled_check(application.bot)
+    except Exception:  # noqa: BLE001
+        log.exception("kill triggers job failed")
+
+
+async def _rates_monitor_job(application: Application) -> None:
+    """R17: every 30 min — UETH APY + funding + HF thresholds."""
+    if os.getenv("RATES_MONITOR_ENABLED", "true").strip().lower() == "false":
+        return
+    try:
+        await rates_scheduled_check(application.bot)
+    except Exception:  # noqa: BLE001
+        log.exception("rates monitor job failed")
+
+
+async def _weekly_summary_job(application: Application) -> None:
+    """R17: Sunday 18:00 UTC — weekly performance summary."""
+    try:
+        await weekly_scheduled_summary(application.bot)
+    except Exception:  # noqa: BLE001
+        log.exception("weekly summary job failed")
+
+
 # ─── BotFather sync ──────────────────────────────────────────────────────────
 
 
@@ -792,11 +1029,17 @@ async def post_init(application: Application) -> None:
     else:
         log.info("COMMANDS_AUTO_SYNC=false → skipping BotFather sync")
 
-    # Round 16: start aiohttp /health server
+    # Round 16: start aiohttp /health server (R17: also serves /dashboard)
     try:
         await start_health_server()
     except Exception:  # noqa: BLE001
         log.exception("health server start failed (non-fatal)")
+
+    # Round 17: seed macro_calendar with the 7 pre-roadmap events on first boot
+    try:
+        cal_seed()
+    except Exception:  # noqa: BLE001
+        log.exception("macro_calendar seed failed (non-fatal)")
 
     # Telethon
     try:
@@ -873,11 +1116,65 @@ async def post_init(application: Application) -> None:
             coalesce=True,
         )
 
+        # ─── Round 17 jobs ───────────────────────────────────────────────
+        # Macro calendar alerts T-24h/T-2h/T-30m — every 1 min
+        scheduler.add_job(
+            _macro_calendar_job,
+            "interval",
+            minutes=1,
+            args=[application],
+            id="macro_calendar",
+            max_instances=1,
+            coalesce=True,
+        )
+        # Auto-reconcile fund_state vs on-chain — every 15 min
+        scheduler.add_job(
+            _reconcile_job,
+            "interval",
+            minutes=15,
+            args=[application],
+            id="fund_state_reconcile",
+            max_instances=1,
+            coalesce=True,
+        )
+        # Kill triggers (BTC>82k 4h, DCA zone, HF<1.10, basket DD<-2k, UETH>10%) — 5 min
+        scheduler.add_job(
+            _kill_triggers_job,
+            "interval",
+            minutes=5,
+            args=[application],
+            id="kill_triggers",
+            max_instances=1,
+            coalesce=True,
+        )
+        # Rates monitor (UETH APY + funding + HF) — every 30 min
+        scheduler.add_job(
+            _rates_monitor_job,
+            "interval",
+            minutes=30,
+            args=[application],
+            id="rates_monitor",
+            max_instances=1,
+            coalesce=True,
+        )
+        # Weekly summary — Sunday 18:00 UTC
+        scheduler.add_job(
+            _weekly_summary_job,
+            "cron",
+            day_of_week="sun",
+            hour=18,
+            minute=0,
+            args=[application],
+            id="weekly_summary",
+            max_instances=1,
+            coalesce=True,
+        )
+
         scheduler.start()
         application.bot_data["scheduler"] = scheduler
         log.info(
-            "Scheduler started: alerts %dmin, intel processor 30min, X scheduler %s, "
-            "backup 03:00 UTC daily, cleanup Sun 04:00 UTC.",
+            "Scheduler started: alerts %dmin, intel 30min, X %s, backup 03:00 UTC, cleanup Sun 04:00 UTC. "
+            "R17: macro_cal 1min, reconcile 15min, kill 5min, rates 30min, weekly_summary Sun 18:00 UTC.",
             POLL_INTERVAL_MIN,
             "ON" if X_SCHEDULER_ENABLED else "OFF",
         )
@@ -935,6 +1232,16 @@ HANDLER_MAP = {
     "metrics": cmd_metrics,
     "test_alerts": cmd_test_alerts,
     "reload_commands": cmd_reload_commands,
+    # Round 17
+    "status": cmd_status,
+    "reconcile": cmd_reconcile,
+    "calendar": cmd_calendar,
+    "add_event": cmd_add_event,
+    "remove_event": cmd_remove_event,
+    "kill_status": cmd_kill_status,
+    "intel_search": cmd_intel_search,
+    "export": cmd_export,
+    "pretrade": cmd_pretrade,
 }
 
 
@@ -970,7 +1277,7 @@ def main() -> None:
         log.warning("⚠️ commands_registry drift detected: %s", issues)
     app.bot_data["validate_issues"] = issues
 
-    log.info("Fondo Black Cat bot starting (Round 16) — %d handlers, %d in registry",
+    log.info("Fondo Black Cat bot starting (Round 17) — %d handlers, %d in registry",
              len(HANDLER_MAP), len(COMMANDS))
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
