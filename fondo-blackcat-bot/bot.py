@@ -1031,6 +1031,20 @@ async def _weekly_summary_job(application: Application) -> None:
         log.exception("weekly summary job failed")
 
 
+async def _portfolio_snapshot_refresh_job() -> None:
+    """HOTFIX 2 (2026-04-27): proactive cache warmer.
+
+    Runs on a fixed interval (default 30s) and pre-fills the
+    ``portfolio_snapshot`` cache so dashboard hits always find a warm,
+    fresh snapshot. Failure is swallowed — the SWR layer already serves
+    last-good data from the cache when the fetch fails."""
+    try:
+        from modules.portfolio_snapshot import proactive_refresh
+        await proactive_refresh()
+    except Exception:  # noqa: BLE001
+        log.exception("portfolio_snapshot proactive refresh job failed")
+
+
 async def _cryexc_monitor_job(application: Application) -> None:
     """R18: every 30min — cryexc snapshot + fire alert on new notable events."""
     if not cryexc_is_enabled() or not cryexc_monitor_is_enabled():
@@ -1254,6 +1268,34 @@ async def post_init(application: Application) -> None:
             log.info("Cryexc monitor scheduler ENABLED (every 30 min)")
         else:
             log.info("Cryexc monitor scheduler DISABLED (CRYEXC_MONITOR_ENABLED=false)")
+
+        # HOTFIX 2 (2026-04-27): proactive portfolio_snapshot refresh.
+        # Keeps the dashboard cache warm so users never see an empty
+        # screen waiting on a cold-start fetch. Disable via
+        # DASHBOARD_PROACTIVE_REFRESH_ENABLED=false.
+        if os.getenv("DASHBOARD_PROACTIVE_REFRESH_ENABLED", "true").strip().lower() != "false":
+            try:
+                _refresh_interval = int(os.getenv("DASHBOARD_PROACTIVE_REFRESH_INTERVAL", "30"))
+            except ValueError:
+                _refresh_interval = 30
+            scheduler.add_job(
+                _portfolio_snapshot_refresh_job,
+                "interval",
+                seconds=_refresh_interval,
+                id="dashboard_snapshot_refresh",
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now(timezone.utc) + timedelta(seconds=10),
+            )
+            log.info(
+                "Dashboard proactive refresh ENABLED — every %ds (HOTFIX 2)",
+                _refresh_interval,
+            )
+        else:
+            log.info(
+                "Dashboard proactive refresh DISABLED "
+                "(DASHBOARD_PROACTIVE_REFRESH_ENABLED=false)"
+            )
 
         scheduler.start()
         application.bot_data["scheduler"] = scheduler

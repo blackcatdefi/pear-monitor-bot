@@ -79,7 +79,79 @@ def _fmt_token_amount(v: Any, dec: int = 2) -> str:
         return "—"
 
 
+def _staleness_badge(state: dict[str, Any]) -> str:
+    """Render the live/stale badge based on snapshot age + freshness flag.
+
+    Categories:
+    - is_fresh & age < TTL : ● live (green)
+    - is_fresh & TTL ≤ age < 60s : ● live <Ns> (green, just refreshed)
+    - !is_fresh & age < 60s : ● stale Ns (amber)
+    - !is_fresh & 60s ≤ age < 600s : ⚠ stale Nmin (amber, louder)
+    - !is_fresh & age ≥ 600s : ⚠ STALE Nmin — RPC issues (red)
+    """
+    age = state.get("snap_age_sec")
+    is_fresh = bool(state.get("is_fresh"))
+    if age is None:
+        return ('<span style="color:#888;">○ no data</span>')
+    age_int = int(age)
+    if is_fresh and age_int < 60:
+        return ('<span style="color:#00ff88;">● live</span>')
+    if is_fresh:
+        return (f'<span style="color:#00ff88;">● live {age_int}s</span>')
+    if age_int < 60:
+        return (f'<span style="color:#ffaa00;">● stale {age_int}s</span>')
+    if age_int < 600:
+        return (f'<span style="color:#ffaa00;">⚠ stale {age_int//60}min</span>')
+    return (f'<span style="color:#ff4444;">⚠ STALE {age_int//60}min — RPC issues</span>')
+
+
+def _render_loading_placeholder(error: str | None = None) -> str:
+    """Cold-start screen: cache empty AND fetch failed. Auto-refresh
+    every 10s until the cache populates."""
+    err_html = (
+        f"<p style='color:#666; font-size:11px; margin-top:24px;'>last error: {html.escape(error)}</p>"
+        if error else ""
+    )
+    return f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Fondo Black Cat — Dashboard</title>
+    <meta http-equiv="refresh" content="10">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {{
+            background:#0a0a0a; color:#00ff88;
+            font-family:'SF Mono', Menlo, Monaco, monospace;
+            padding:40px; text-align:center; line-height:1.6;
+        }}
+        h1 {{ color:#ffaa00; }}
+        .spin {{ display:inline-block; animation:spin 2s linear infinite; }}
+        @keyframes spin {{ 0%{{transform:rotate(0)}} 100%{{transform:rotate(360deg)}} }}
+    </style>
+</head>
+<body>
+    <h1>🐱‍⬛ Fondo Black Cat — Dashboard</h1>
+    <p style="color:#ffaa00; font-size:18px;"><span class="spin">⏳</span> Inicializando dashboard…</p>
+    <p style="color:#888; font-size:14px;">Cargando datos desde HyperEVM RPC. Esto puede tomar 10-25s en cold start.</p>
+    <p style="color:#888; font-size:12px;">La página se refresca automáticamente cada 10s.</p>
+    {err_html}
+</body>
+</html>"""
+
+
 def _render_html(state: dict[str, Any]) -> str:
+    # Cold-start escape hatch — no wallets, no flywheel, no market block:
+    # cache was empty AND the fetch failed. Show a clear loading screen
+    # instead of a half-rendered, all-zeros dashboard.
+    if (
+        not (state.get("wallets") or [])
+        and state.get("main_flywheel") is None
+        and state.get("btc") is None
+        and state.get("eth") is None
+    ):
+        return _render_loading_placeholder(error=state.get("last_error"))
+
     cap_total = _fmt_compact_usd(state["capital_total"])
     upnl_cls, upnl_fmt = _signed(state["upnl_perp_total"])
 
@@ -239,7 +311,7 @@ def _render_html(state: dict[str, Any]) -> str:
 </head>
 <body>
     <h1>🐱‍⬛ Fondo Black Cat — Dashboard</h1>
-    <div class="ts">{_esc(state["ts"])} · auto-refresh 60s</div>
+    <div class="ts">{_esc(state["ts"])} · auto-refresh 60s · {_staleness_badge(state)}</div>
 
     <div class="grid">
         <div class="card">
@@ -288,10 +360,12 @@ def _render_html(state: dict[str, Any]) -> str:
 
 async def _build_state() -> dict[str, Any]:
     """Translate ``PortfolioSnapshot`` into the flat dict ``_render_html`` consumes."""
+    import time as _time
     from modules.portfolio_snapshot import build_portfolio_snapshot
     from modules.macro_calendar import upcoming_events
 
     snap = await build_portfolio_snapshot()
+    snap_age = (_time.time() - snap.built_at_ts) if getattr(snap, "built_at_ts", 0) else None
 
     def _ws_to_dict(ws):
         if ws is None:
@@ -344,6 +418,10 @@ async def _build_state() -> dict[str, Any]:
             for ws in snap.wallets
         ],
         "upcoming": upcoming_events(limit=5),
+        # HOTFIX 2: staleness metadata for badge + cold-start screen
+        "snap_age_sec": snap_age,
+        "is_fresh": getattr(snap, "is_fresh", True),
+        "last_error": getattr(snap, "last_error", None),
     }
 
 
