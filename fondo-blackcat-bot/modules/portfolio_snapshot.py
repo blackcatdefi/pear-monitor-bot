@@ -180,11 +180,54 @@ def _spot_usd_value(spot_balances: list[dict[str, Any]],
     return total
 
 
+def _is_regression(new_snap: PortfolioSnapshot,
+                    prev_snap: PortfolioSnapshot | None) -> str | None:
+    """Detect a partial-fetch regression that would poison the cache.
+
+    Heuristic: if the previous snapshot had a non-trivial HL position
+    AND the new one shows < 5% of that, the HL fetch silently failed
+    (``fetch_all_hyperlend`` returning None / empty list inside the
+    ``_safe`` wrapper). Same for total capital. Returns the reason
+    string if a regression is detected, else None.
+
+    This prevents the screenshot-2 bug: after a successful refresh, the
+    dashboard would briefly show $11K capital (perp+spot only) instead
+    of $85K (with HL collateral), then flip back on the next refresh.
+    """
+    if prev_snap is None:
+        return None
+    # HL collateral disappeared
+    if prev_snap.hl_collateral_total > 1000 and new_snap.hl_collateral_total < (
+        prev_snap.hl_collateral_total * 0.05
+    ):
+        return (
+            f"HL collateral collapsed "
+            f"(${prev_snap.hl_collateral_total:,.0f} → ${new_snap.hl_collateral_total:,.0f})"
+        )
+    # Total capital halved (perp loss tolerated, but >50% drop in 30s is fetch failure)
+    if prev_snap.capital_total > 5000 and new_snap.capital_total < (
+        prev_snap.capital_total * 0.5
+    ):
+        return (
+            f"Capital halved "
+            f"(${prev_snap.capital_total:,.0f} → ${new_snap.capital_total:,.0f})"
+        )
+    # Wallet count dropped to 0/1 from 3+
+    if len(prev_snap.wallets) >= 3 and len(new_snap.wallets) < 2:
+        return (
+            f"Wallet count collapsed "
+            f"({len(prev_snap.wallets)} → {len(new_snap.wallets)})"
+        )
+    return None
+
+
 async def _do_blocking_fetch(timeout_sec: float, cached_fallback: PortfolioSnapshot | None
                               ) -> PortfolioSnapshot:
     """Blocking fetch path. Used by force_refresh=True and cold-start.
 
     On success: populate cache, return fresh snapshot.
+    On regression: REJECT the new snapshot and keep the cached one
+    (tagged stale). Prevents partial-fetch poisoning.
     On failure: return cached_fallback (tagged stale) if provided, else
     a loading placeholder. The cache is left untouched on failure so the
     next request still gets the last-good snapshot.
@@ -205,6 +248,20 @@ async def _do_blocking_fetch(timeout_sec: float, cached_fallback: PortfolioSnaps
                     cached_inside.is_fresh = True
                     return cached_inside
                 snap = await _build_portfolio_snapshot_inner()
+
+                # Regression guard: if the new snapshot looks broken vs.
+                # the previous good one, reject it and keep the cache.
+                regression = _is_regression(snap, cached_inside)
+                if regression and cached_inside is not None:
+                    log.warning(
+                        "Rejecting refreshed snapshot — %s. Keeping previous good cache.",
+                        regression,
+                    )
+                    cached_inside.is_fresh = False
+                    cached_inside.fetch_attempts = (cached_inside.fetch_attempts or 1) + 1
+                    cached_inside.last_error = f"regression: {regression}"
+                    return cached_inside
+
                 snap.built_at_ts = time.time()
                 snap.is_fresh = True
                 snap.fetch_attempts = 1
