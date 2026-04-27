@@ -49,6 +49,7 @@ COMMANDS: List[BotCommand] = [
     BotCommand("intel", "Resumen de intel memory (últimas 24h)", "intel", "cmd_intel"),
     BotCommand("intel_sources", "Top 20 cuentas activas en X (24h)", "intel", "cmd_intel_sources"),
     BotCommand("intel_search", "Buscar palabra clave en intel_memory <kw>", "intel", "cmd_intel_search"),
+    BotCommand("cryexc", "Snapshot cryexc.josedonato.com (funding+movers+HL OI)", "intel", "cmd_cryexc"),
 
     # ─── ADMIN ───
     BotCommand("log", "Últimas 20 entradas del position log", "admin", "cmd_log"),

@@ -83,6 +83,14 @@ from modules.x_intel import (
 )
 from modules.flywheel import compute_flywheel
 from modules.liq_calc import compute_liq_matrix
+from modules.cryexc_intel import (
+    fetch_cryexc,
+    filter_new_events,
+    format_for_telegram as format_cryexc_for_telegram,
+    is_enabled as cryexc_is_enabled,
+    is_monitor_enabled as cryexc_monitor_is_enabled,
+    mark_event_seen,
+)
 from fund_state import BCD_DCA_PLAN
 from modules.cycle_trade import (
     apply_cycle_update,
@@ -321,6 +329,14 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if bt:
         merged_intel["bounce_tech"] = bt
 
+    # Round 18: Cryexc snapshot (cache 5min, falls back gracefully if disabled)
+    if cryexc_is_enabled():
+        try:
+            cryexc_snap = await fetch_cryexc(force_live=False)
+            merged_intel["cryexc_intel"] = cryexc_snap.to_dict()
+        except Exception:  # noqa: BLE001
+            log.exception("cryexc fetch in /reporte failed (non-fatal)")
+
     report, thesis_update = await generate_report(portfolio, hl, market, unlocks, merged_intel)
 
     await send_long_message(
@@ -454,6 +470,31 @@ async def cmd_intel_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
     text = await format_intel_sources(hours=24)
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_cryexc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Round 18: Cryexc snapshot (intel)."""
+    if not cryexc_is_enabled():
+        await update.message.reply_text(
+            "\u26a0\ufe0f /cryexc deshabilitado (CRYEXC_ENABLED=false en Railway).",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    await update.message.reply_text(
+        "\u23f3 Fetching cryexc snapshot (funding + movers + HL OI)...",
+        reply_markup=MAIN_KEYBOARD,
+    )
+    try:
+        snap = await fetch_cryexc(force_live=False)
+        text = format_cryexc_for_telegram(snap)
+        await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+    except Exception as exc:  # noqa: BLE001
+        await update.message.reply_text(
+            f"\u274c Error fetching cryexc: {str(exc)[:200]}",
+            reply_markup=MAIN_KEYBOARD,
+        )
 
 
 @authorized
@@ -990,6 +1031,34 @@ async def _weekly_summary_job(application: Application) -> None:
         log.exception("weekly summary job failed")
 
 
+async def _cryexc_monitor_job(application: Application) -> None:
+    """R18: every 30min — cryexc snapshot + fire alert on new notable events."""
+    if not cryexc_is_enabled() or not cryexc_monitor_is_enabled():
+        return
+    try:
+        snap = await fetch_cryexc(force_live=True)
+        new_events = filter_new_events(snap.notable_events)
+        if not new_events:
+            return
+        chat_id = TELEGRAM_CHAT_ID
+        if not chat_id:
+            return
+        body_lines = ["\U0001f514 CRYEXC ALERT — eventos nuevos:"]
+        for ev in new_events[:8]:
+            body_lines.append(f"  \u2022 {ev}")
+        body_lines.append("")
+        body_lines.append(f"Source: cryexc.josedonato.com  Ts: {snap.timestamp_utc[:16]} UTC")
+        msg = "\n".join(body_lines)
+        try:
+            await send_bot_message(application.bot, chat_id, msg)
+            for ev in new_events:
+                mark_event_seen(ev)
+        except Exception:  # noqa: BLE001
+            log.exception("cryexc alert send failed")
+    except Exception:  # noqa: BLE001
+        log.exception("cryexc monitor job failed")
+
+
 # ─── BotFather sync ──────────────────────────────────────────────────────────
 
 
@@ -1170,6 +1239,22 @@ async def post_init(application: Application) -> None:
             coalesce=True,
         )
 
+        # Round 18: Cryexc monitor — every 30 min, alerts on new notable events
+        if cryexc_monitor_is_enabled():
+            scheduler.add_job(
+                _cryexc_monitor_job,
+                "interval",
+                minutes=30,
+                args=[application],
+                id="cryexc_monitor",
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now(timezone.utc) + timedelta(minutes=2),
+            )
+            log.info("Cryexc monitor scheduler ENABLED (every 30 min)")
+        else:
+            log.info("Cryexc monitor scheduler DISABLED (CRYEXC_MONITOR_ENABLED=false)")
+
         scheduler.start()
         application.bot_data["scheduler"] = scheduler
         log.info(
@@ -1242,6 +1327,8 @@ HANDLER_MAP = {
     "intel_search": cmd_intel_search,
     "export": cmd_export,
     "pretrade": cmd_pretrade,
+    # Round 18
+    "cryexc": cmd_cryexc,
 }
 
 
