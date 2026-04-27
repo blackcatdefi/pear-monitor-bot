@@ -16,7 +16,6 @@ Latency target: <3s típico.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -56,78 +55,38 @@ def _fmt_pct(v: float | None) -> str:
 
 
 async def build_status_block() -> str:
-    """Build the full /status text block. Resilient to per-source failures."""
-    from modules.hyperlend import fetch_all_hyperlend
-    from modules.market import fetch_market_data
-    from modules.portfolio import fetch_all_wallets
+    """Build the full /status text block. Resilient to per-source failures.
+
+    HOTFIX: re-routed through ``modules.portfolio_snapshot`` so /status,
+    /reporte and /dashboard quote the same numbers (capital bruto, basket
+    detection that doesn't depend on a static token list, market keys
+    aligned with ``coingecko_prices()`` shape, dynamic flywheel pick).
+    """
     from modules.errors_log import recent as recent_errors
+    from modules.portfolio_snapshot import build_portfolio_snapshot
 
-    # Concurrent fetches with per-task error swallowing
-    async def _safe(coro, label):
-        try:
-            return await coro
-        except Exception as exc:  # noqa: BLE001
-            log.warning("/status: %s failed: %s", label, exc)
-            return None
+    snap = await build_portfolio_snapshot()
 
-    hl_list, market, wallets = await asyncio.gather(
-        _safe(fetch_all_hyperlend(), "hyperlend"),
-        _safe(fetch_market_data(), "market"),
-        _safe(fetch_all_wallets(), "wallets"),
-    )
+    hl_collateral_usd = snap.hl_collateral_total
+    hl_debt_usd = snap.hl_debt_total
+    flywheel_hf = snap.main_flywheel.health_factor if snap.main_flywheel else None
+    flywheel_collateral_bal = snap.main_flywheel.collateral_balance if snap.main_flywheel else None
+    flywheel_collateral_sym = snap.main_flywheel.collateral_symbol if snap.main_flywheel else None
+    flywheel_debt_sym = snap.main_flywheel.debt_symbol if snap.main_flywheel else None
+    flywheel_debt_bal = snap.main_flywheel.debt_balance if snap.main_flywheel else None
 
-    # ─── Capital (HL + perp account values) ─────────────────────────────────
-    hl_collateral_usd = 0.0
-    hl_debt_usd = 0.0
-    flywheel_hf: float | None = None
-    flywheel_collateral_bal: float | None = None
-    flywheel_debt_sym: str | None = None
-    flywheel_debt_bal: float | None = None
-    if isinstance(hl_list, list):
-        for r in hl_list:
-            if r.get("status") != "ok":
-                continue
-            d = r["data"]
-            hl_collateral_usd += float(d.get("total_collateral_usd") or 0.0)
-            hl_debt_usd += float(d.get("total_debt_usd") or 0.0)
-            # Pick the wallet with debt as flywheel
-            if (d.get("total_debt_usd") or 0) > 0 and flywheel_hf is None:
-                flywheel_hf = d.get("health_factor")
-                flywheel_collateral_bal = d.get("collateral_balance")
-                flywheel_debt_sym = d.get("debt_symbol")
-                flywheel_debt_bal = d.get("debt_balance")
+    perp_account_value = snap.perp_equity_total
+    perp_unrealized = snap.upnl_perp_total
+    basket_positions_count = len(snap.basket_positions)
+    basket_active = basket_positions_count > 0
 
-    perp_account_value = 0.0
-    perp_unrealized = 0.0
-    basket_active = False
-    basket_positions_count = 0
-    if isinstance(wallets, list):
-        from fund_state import BASKET_PERP_TOKENS
-        for w in wallets:
-            if w.get("status") != "ok":
-                continue
-            d = w.get("data", {})
-            perp_account_value += float(d.get("account_value") or 0.0)
-            perp_unrealized += float(d.get("unrealized_pnl_total") or 0.0)
-            for pos in d.get("positions") or []:
-                coin = (pos.get("coin") or "").upper()
-                if coin in BASKET_PERP_TOKENS:
-                    basket_active = True
-                    basket_positions_count += 1
+    total_capital = snap.capital_total
 
-    total_capital = hl_collateral_usd - hl_debt_usd + perp_account_value
-
-    # ─── Market ──────────────────────────────────────────────────────────────
-    btc = eth = hype = None
-    fg_value = fg_label = None
-    if isinstance(market, dict) and market.get("status") == "ok":
-        prices = market["data"].get("prices", {})
-        btc = (prices.get("bitcoin") or {}).get("usd")
-        eth = (prices.get("ethereum") or {}).get("usd")
-        hype = (prices.get("hyperliquid") or {}).get("usd")
-        fg = market["data"].get("fear_greed") or {}
-        fg_value = fg.get("value")
-        fg_label = fg.get("classification") or fg.get("label")
+    btc = snap.market.btc
+    eth = snap.market.eth
+    hype = snap.market.hype
+    fg_value = snap.market.fear_greed_value
+    fg_label = snap.market.fear_greed_label
 
     # ─── Fund state from authoritative file ──────────────────────────────────
     try:
@@ -188,9 +147,9 @@ async def build_status_block() -> str:
         except Exception:
             hf_str = "—"
         lines.append(f"🔁 Flywheel HF: {hf_str}")
-        if flywheel_collateral_bal is not None:
+        if flywheel_collateral_bal is not None and flywheel_collateral_sym:
             lines.append(
-                f"   Colateral: {flywheel_collateral_bal:.2f} (kHYPE)"
+                f"   Colateral: {flywheel_collateral_bal:.2f} {flywheel_collateral_sym}"
             )
         if flywheel_debt_bal is not None and flywheel_debt_sym:
             lines.append(

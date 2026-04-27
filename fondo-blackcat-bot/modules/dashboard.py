@@ -6,11 +6,16 @@ endpoint devuelve 503 "disabled".
 
 Auto-refresh 60s (meta http-equiv="refresh").
 
-Reusa los mismos fetchers que /status_quick para evitar duplicar lógica.
+HOTFIX (post R17): el dashboard ahora consume ``modules.portfolio_snapshot``
+— la misma capa de agregación que /reporte. Antes leía HL/perp por separado
+con un wallet-pick ad-hoc que mostraba el flywheel chico (0xCDDF UBTC/USDT0)
+en vez del grande (0xA44E WHYPE/UETH), capital neto en vez de bruto, y
+buscaba precios con keys equivocados (``prices["bitcoin"]`` que nunca
+existió en este codebase). Single-source-of-truth ahora vive en
+``portfolio_snapshot.build_portfolio_snapshot()``.
 """
 from __future__ import annotations
 
-import asyncio
 import html
 import logging
 import os
@@ -30,14 +35,6 @@ def _enabled() -> bool:
     return bool(_get_token())
 
 
-async def _safe(coro, label: str):
-    try:
-        return await coro
-    except Exception as exc:
-        log.warning("dashboard %s failed: %s", label, exc)
-        return None
-
-
 def _esc(v: Any) -> str:
     return html.escape(str(v)) if v is not None else "—"
 
@@ -47,6 +44,21 @@ def _fmt_usd(v: Any, dec: int = 0) -> str:
         return f"${float(v):,.{dec}f}"
     except Exception:
         return "—"
+
+
+def _fmt_compact_usd(v: Any) -> str:
+    """Dashboard-friendly compact USD. ``$86,500`` → ``$86.5K``."""
+    try:
+        f = float(v)
+    except Exception:
+        return "—"
+    sign = "-" if f < 0 else ""
+    f = abs(f)
+    if f >= 1_000_000:
+        return f"{sign}${f/1_000_000:.2f}M"
+    if f >= 1_000:
+        return f"{sign}${f/1_000:.1f}K"
+    return f"{sign}${f:.2f}"
 
 
 def _signed(v: Any) -> tuple[str, str]:
@@ -60,125 +72,82 @@ def _signed(v: Any) -> tuple[str, str]:
         return "", "—"
 
 
-async def _gather_state() -> dict[str, Any]:
-    from modules.hyperlend import fetch_all_hyperlend
-    from modules.market import fetch_market_data
-    from modules.portfolio import fetch_all_wallets
-    from modules.macro_calendar import upcoming_events
-
-    hl, market, wallets = await asyncio.gather(
-        _safe(fetch_all_hyperlend(), "hyperlend"),
-        _safe(fetch_market_data(), "market"),
-        _safe(fetch_all_wallets(), "wallets"),
-    )
-
-    # Capital
-    hl_collateral = 0.0
-    hl_debt = 0.0
-    flywheel_hf = None
-    flywheel_collateral_bal = None
-    flywheel_debt_sym = None
-    flywheel_debt_bal = None
-    if isinstance(hl, list):
-        for r in hl:
-            if r.get("status") != "ok":
-                continue
-            d = r["data"]
-            hl_collateral += float(d.get("total_collateral_usd") or 0)
-            hl_debt += float(d.get("total_debt_usd") or 0)
-            if (d.get("total_debt_usd") or 0) > 0 and flywheel_hf is None:
-                flywheel_hf = d.get("health_factor")
-                flywheel_collateral_bal = d.get("collateral_balance")
-                flywheel_debt_sym = d.get("debt_symbol")
-                flywheel_debt_bal = d.get("debt_balance")
-
-    perp_acct = 0.0
-    perp_upnl = 0.0
-    basket_positions: list[dict] = []
-    if isinstance(wallets, list):
-        try:
-            from fund_state import BASKET_PERP_TOKENS
-        except Exception:
-            BASKET_PERP_TOKENS = []  # type: ignore
-        for w in wallets:
-            if w.get("status") != "ok":
-                continue
-            d = w.get("data", {})
-            perp_acct += float(d.get("account_value") or 0)
-            perp_upnl += float(d.get("unrealized_pnl_total") or 0)
-            for pos in d.get("positions") or []:
-                coin = (pos.get("coin") or "").upper()
-                if coin in BASKET_PERP_TOKENS:
-                    basket_positions.append({
-                        "symbol": coin,
-                        "upnl": float(pos.get("unrealized_pnl") or 0),
-                        "ntl": float(pos.get("position_value") or pos.get("ntl_pos") or 0),
-                    })
-
-    capital_total = hl_collateral - hl_debt + perp_acct
-
-    btc = eth = hype = None
-    fg_value = fg_label = None
-    if isinstance(market, dict) and market.get("status") == "ok":
-        prices = market["data"].get("prices", {})
-        btc = (prices.get("bitcoin") or {}).get("usd")
-        eth = (prices.get("ethereum") or {}).get("usd")
-        hype = (prices.get("hyperliquid") or {}).get("usd")
-        fg = market["data"].get("fear_greed") or {}
-        fg_value = fg.get("value")
-        fg_label = fg.get("classification") or fg.get("label")
-
-    upcoming = upcoming_events(limit=5)
-
-    return {
-        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-        "capital_total": capital_total,
-        "hl_collateral": hl_collateral,
-        "hl_debt": hl_debt,
-        "perp_acct": perp_acct,
-        "perp_upnl": perp_upnl,
-        "flywheel_hf": flywheel_hf,
-        "flywheel_collateral_bal": flywheel_collateral_bal,
-        "flywheel_debt_sym": flywheel_debt_sym,
-        "flywheel_debt_bal": flywheel_debt_bal,
-        "basket_positions": basket_positions,
-        "btc": btc,
-        "eth": eth,
-        "hype": hype,
-        "fg_value": fg_value,
-        "fg_label": fg_label,
-        "upcoming": upcoming,
-    }
+def _fmt_token_amount(v: Any, dec: int = 2) -> str:
+    try:
+        return f"{float(v):,.{dec}f}"
+    except Exception:
+        return "—"
 
 
 def _render_html(state: dict[str, Any]) -> str:
-    cap_cls, cap_fmt = _signed(state["capital_total"])  # capital is positive usually but format helper handles sign
-    cap_total = _fmt_usd(state["capital_total"])
+    cap_total = _fmt_compact_usd(state["capital_total"])
+    upnl_cls, upnl_fmt = _signed(state["upnl_perp_total"])
 
-    upnl_cls, upnl_fmt = _signed(state["perp_upnl"])
-
-    hf_str = "—"
-    if state.get("flywheel_hf") is not None:
+    # ─── Flywheel principal ───────────────────────────────────────────────
+    main = state.get("main_flywheel")
+    if main is not None:
         try:
-            hf_str = f"{float(state['flywheel_hf']):.3f}"
+            hf_str = f"{float(main['hf']):.3f}" if main.get("hf") is not None else "—"
         except Exception:
-            pass
+            hf_str = "—"
+        coll_amt = _fmt_token_amount(main.get("collateral_balance"), dec=2) \
+            if main.get("collateral_balance") else "—"
+        coll_sym = main.get("collateral_symbol") or "?"
+        debt_amt = _fmt_token_amount(main.get("debt_balance"), dec=4) \
+            if main.get("debt_balance") else "—"
+        debt_sym = main.get("debt_symbol") or "?"
+        flywheel_html = (
+            f"<p>Wallet: <span class='dim'>{_esc(main.get('short'))}</span></p>"
+            f"<p>HF: <strong>{_esc(hf_str)}</strong></p>"
+            f"<p>Colateral: {_esc(coll_amt)} {_esc(coll_sym)}"
+            f" <span class='dim'>({_esc(_fmt_compact_usd(main.get('collateral_usd')))})</span></p>"
+            f"<p>Deuda: {_esc(debt_amt)} {_esc(debt_sym)}"
+            f" <span class='dim'>({_esc(_fmt_compact_usd(main.get('debt_usd')))})</span></p>"
+        )
+    else:
+        flywheel_html = "<p class='dim'>Sin flywheel HyperLend activo (sin deuda).</p>"
 
-    coll_bal = state.get("flywheel_collateral_bal")
-    debt_bal = state.get("flywheel_debt_bal")
-    debt_sym = state.get("flywheel_debt_sym") or ""
+    # Secondary flywheel (chico) — solo si existe
+    sec = state.get("secondary_flywheel")
+    secondary_html = ""
+    if sec is not None:
+        try:
+            hf_str2 = f"{float(sec['hf']):.3f}" if sec.get("hf") is not None else "—"
+        except Exception:
+            hf_str2 = "—"
+        secondary_html = (
+            "<div class='card'>"
+            "<h2>Flywheel secundario</h2>"
+            f"<p>Wallet: <span class='dim'>{_esc(sec.get('short'))}</span></p>"
+            f"<p>HF: <strong>{_esc(hf_str2)}</strong></p>"
+            f"<p>Colateral: {_esc(_fmt_token_amount(sec.get('collateral_balance'), dec=4))}"
+            f" {_esc(sec.get('collateral_symbol') or '?')}"
+            f" <span class='dim'>({_esc(_fmt_compact_usd(sec.get('collateral_usd')))})</span></p>"
+            f"<p>Deuda: {_esc(_fmt_token_amount(sec.get('debt_balance'), dec=4))}"
+            f" {_esc(sec.get('debt_symbol') or '?')}"
+            f" <span class='dim'>({_esc(_fmt_compact_usd(sec.get('debt_usd')))})</span></p>"
+            "</div>"
+        )
 
-    basket_rows = []
-    for p in state["basket_positions"]:
-        cls, fmt = _signed(p["upnl"])
+    # ─── Basket v5 ────────────────────────────────────────────────────────
+    basket_rows: list[str] = []
+    for p in state.get("basket_positions") or []:
+        cls, fmt = _signed(p.get("upnl"))
         basket_rows.append(
-            f"<p>{_esc(p['symbol'])}: <span class='{cls}'>{_esc(fmt)}</span>"
-            f" <span class='dim'>(ntl ${abs(p['ntl']):,.0f})</span></p>"
+            f"<p>{_esc(p.get('coin'))}: <span class='{cls}'>{_esc(fmt)}</span>"
+            f" <span class='dim'>(ntl ${abs(float(p.get('notional_usd') or 0)):,.0f})</span></p>"
         )
     if not basket_rows:
         basket_rows.append("<p class='dim'>Sin posiciones SHORT activas (notional &gt;$50)</p>")
+    else:
+        bcls, bfmt = _signed(state.get("basket_upnl") or 0.0)
+        basket_rows.append(
+            f"<p class='dim'>Total: <span class='{bcls}'>{_esc(bfmt)}</span>"
+            f" · ntl ${float(state.get('basket_notional') or 0):,.0f}</p>"
+        )
 
-    upcoming_rows = []
+    # ─── Próximos catalysts (macro calendar) ──────────────────────────────
+    upcoming_rows: list[str] = []
     for ev in state.get("upcoming") or []:
         when = ev.timestamp_utc.strftime("%Y-%m-%d %H:%M UTC")
         upcoming_rows.append(
@@ -187,6 +156,48 @@ def _render_html(state: dict[str, Any]) -> str:
         )
     if not upcoming_rows:
         upcoming_rows.append("<p class='dim'>Sin eventos próximos en calendar.</p>")
+
+    # ─── Wallets breakdown ───────────────────────────────────────────────
+    wallet_rows: list[str] = []
+    for ws in state.get("wallets") or []:
+        if ws.get("capital") < 0.01:
+            continue
+        parts = []
+        if ws.get("perp", 0) > 0.01:
+            parts.append(f"Perp {_fmt_compact_usd(ws['perp'])}")
+        if ws.get("spot", 0) > 0.01:
+            parts.append(f"Spot {_fmt_compact_usd(ws['spot'])}")
+        if ws.get("hl_coll", 0) > 0.01:
+            parts.append(f"HL {_fmt_compact_usd(ws['hl_coll'])}")
+        if ws.get("hl_debt", 0) > 0.01:
+            parts.append(f"Debt -{_fmt_compact_usd(ws['hl_debt'])}")
+        wallet_rows.append(
+            f"<p><strong>{_esc(ws.get('label'))}</strong>"
+            f" <span class='dim'>{_esc(ws.get('short'))}</span> ·"
+            f" <strong>{_esc(_fmt_compact_usd(ws.get('capital')))}</strong>"
+            f"<br><span class='dim'>{' · '.join(parts) if parts else '—'}</span></p>"
+        )
+    if not wallet_rows:
+        wallet_rows.append("<p class='dim'>Sin wallets reportadas.</p>")
+
+    btc = state.get("btc")
+    eth = state.get("eth")
+    hype = state.get("hype")
+    fg_value = state.get("fg_value")
+    fg_label = state.get("fg_label")
+
+    market_loading = (btc is None and eth is None and hype is None)
+    market_html = (
+        f"<p>BTC: {_esc(_fmt_usd(btc))}</p>"
+        f"<p>ETH: {_esc(_fmt_usd(eth))}</p>"
+        f"<p>HYPE: {_esc(_fmt_usd(hype, dec=2))}</p>"
+        f"<p>F&amp;G: {_esc(fg_value)} ({_esc(fg_label)})</p>"
+    )
+    if market_loading:
+        market_html = (
+            "<p class='dim'>Cargando precios… (cache vacío o API timeout, "
+            "se refresca en 60s)</p>" + market_html
+        )
 
     html_doc = f"""<!DOCTYPE html>
 <html lang="es">
@@ -234,30 +245,33 @@ def _render_html(state: dict[str, Any]) -> str:
         <div class="card">
             <h2>Capital</h2>
             <p>Total: <strong>{_esc(cap_total)}</strong></p>
-            <p>HL collateral: {_esc(_fmt_usd(state["hl_collateral"]))}</p>
-            <p>HL debt: {_esc(_fmt_usd(state["hl_debt"]))}</p>
-            <p>Perp acct value: {_esc(_fmt_usd(state["perp_acct"]))}</p>
+            <p>HL collateral: {_esc(_fmt_compact_usd(state["hl_collateral_total"]))}</p>
+            <p>HL debt: {_esc(_fmt_compact_usd(state["hl_debt_total"]))}</p>
+            <p>Perp acct: {_esc(_fmt_compact_usd(state["perp_equity_total"]))}</p>
+            <p>Spot: {_esc(_fmt_compact_usd(state["spot_usd_total"]))}</p>
             <p>UPnL perp: <span class="{upnl_cls}">{_esc(upnl_fmt)}</span></p>
         </div>
 
         <div class="card">
-            <h2>Flywheel HyperLend</h2>
-            <p>HF: <strong>{_esc(hf_str)}</strong></p>
-            <p>Colateral: {_esc(f"{float(coll_bal):.2f}" if coll_bal else "—")} kHYPE</p>
-            <p>Deuda: {_esc(f"{float(debt_bal):.4f}" if debt_bal else "—")} {_esc(debt_sym)}</p>
+            <h2>Flywheel principal</h2>
+            {flywheel_html}
         </div>
 
+        {secondary_html}
+
         <div class="card">
-            <h2>Basket v5</h2>
+            <h2>Basket v5 (SHORTs notional &gt;$50)</h2>
             {''.join(basket_rows)}
         </div>
 
         <div class="card">
             <h2>Mercado</h2>
-            <p>BTC: {_esc(_fmt_usd(state["btc"]))}</p>
-            <p>ETH: {_esc(_fmt_usd(state["eth"]))}</p>
-            <p>HYPE: {_esc(_fmt_usd(state["hype"], dec=2))}</p>
-            <p>F&amp;G: {_esc(state["fg_value"])} ({_esc(state["fg_label"])})</p>
+            {market_html}
+        </div>
+
+        <div class="card">
+            <h2>Wallets ({len(state.get('wallets') or [])})</h2>
+            {''.join(wallet_rows)}
         </div>
 
         <div class="card" style="grid-column: 1/-1;">
@@ -266,10 +280,71 @@ def _render_html(state: dict[str, Any]) -> str:
         </div>
     </div>
 
-    <footer>Read-only · token-based auth · datos en vivo on-chain + cache</footer>
+    <footer>Read-only · single-source-of-truth con /reporte · datos en vivo on-chain + cache</footer>
 </body>
 </html>"""
     return html_doc
+
+
+async def _build_state() -> dict[str, Any]:
+    """Translate ``PortfolioSnapshot`` into the flat dict ``_render_html`` consumes."""
+    from modules.portfolio_snapshot import build_portfolio_snapshot
+    from modules.macro_calendar import upcoming_events
+
+    snap = await build_portfolio_snapshot()
+
+    def _ws_to_dict(ws):
+        if ws is None:
+            return None
+        return {
+            "address": ws.address,
+            "short": ws.short,
+            "label": ws.label,
+            "hf": ws.health_factor,
+            "collateral_symbol": ws.collateral_symbol,
+            "collateral_balance": ws.collateral_balance,
+            "collateral_usd": ws.hl_collateral_usd,
+            "debt_symbol": ws.debt_symbol,
+            "debt_balance": ws.debt_balance,
+            "debt_usd": ws.hl_debt_usd,
+        }
+
+    return {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "capital_total": snap.capital_total,
+        "hl_collateral_total": snap.hl_collateral_total,
+        "hl_debt_total": snap.hl_debt_total,
+        "perp_equity_total": snap.perp_equity_total,
+        "spot_usd_total": snap.spot_usd_total,
+        "upnl_perp_total": snap.upnl_perp_total,
+        "main_flywheel": _ws_to_dict(snap.main_flywheel),
+        "secondary_flywheel": _ws_to_dict(snap.secondary_flywheel),
+        "basket_positions": [
+            {"coin": p["coin"], "upnl": p["unrealized_pnl"], "notional_usd": p["notional_usd"]}
+            for p in snap.basket_positions
+        ],
+        "basket_upnl": snap.basket_upnl,
+        "basket_notional": snap.basket_notional,
+        "btc": snap.market.btc,
+        "eth": snap.market.eth,
+        "hype": snap.market.hype,
+        "fg_value": snap.market.fear_greed_value,
+        "fg_label": snap.market.fear_greed_label,
+        "wallets": [
+            {
+                "address": ws.address,
+                "short": ws.short,
+                "label": ws.label,
+                "capital": ws.capital_total,
+                "perp": ws.perp_equity,
+                "spot": ws.spot_usd,
+                "hl_coll": ws.hl_collateral_usd,
+                "hl_debt": ws.hl_debt_usd,
+            }
+            for ws in snap.wallets
+        ],
+        "upcoming": upcoming_events(limit=5),
+    }
 
 
 async def dashboard_handler(request):
@@ -288,7 +363,7 @@ async def dashboard_handler(request):
         return web.Response(text="Unauthorized", status=401)
 
     try:
-        state = await _gather_state()
+        state = await _build_state()
         body = _render_html(state)
         return web.Response(text=body, content_type="text/html")
     except Exception:
