@@ -43,12 +43,16 @@ from modules.unlocks import fetch_unlocks
 from modules.bounce_tech import detect_closes as bt_detect_closes, fetch_bounce_tech
 from modules.gmail_intel import scan_gmail_unread
 from modules.x_intel import (
+    cache_banner_for_report,
     debug_x_status,
     fetch_x_intel,
     format_intel_sources,
+    format_x_costos,
+    format_x_status,
     get_cache_state,
     get_cached_timeline,
     poll_and_cache_timeline,
+    X_SCHEDULER_ENABLED,
 )
 from modules.flywheel import compute_flywheel
 from modules.liq_calc import compute_liq_matrix
@@ -190,12 +194,14 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
     # Todos los fetches en paralelo (Telethon separado — puede estar deshabilitado).
+    # Round 15: pass app to fetch_x_intel so the 75pct daily-cap alert can fire
+    # via Telegram immediately after the live fetch records the call.
     portfolio, hl, market, unlocks, x_intel, gmail_intel, bt, recent_fills = await asyncio.gather(
         fetch_all_wallets(),
         fetch_all_hyperlend(),
         fetch_market_data(),
         fetch_unlocks(),
-        fetch_x_intel(hours=48),
+        fetch_x_intel(hours=48, caller="reporte", app=context.application),
         scan_gmail_unread(),
         fetch_bounce_tech(),
         fetch_all_recent_fills(hours=24),
@@ -236,11 +242,19 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if x_intel_ok:
         timeline_text = format_timeline(x_intel, top_n=40)
-        header = "\U0001f4e1 TIMELINE X \u2014 48H\n" + ("\u2500" * 30) + "\n\n"
+        # Round 15: always show cache-state banner so BCD knows whether the
+        # timeline data is fresh or cached, regardless of how it was obtained.
+        banner = cache_banner_for_report()
+        header = (
+            "\U0001f4e1 TIMELINE X \u2014 48H\n"
+            + ("\u2500" * 30) + "\n"
+            + banner + "\n\n"
+        )
         if x_intel_fallback_note:
             header = (
-                "\U0001f4e1 TIMELINE X \u2014 48H (cache)\n"
+                "\U0001f4e1 TIMELINE X \u2014 48H (cache fallback)\n"
                 + ("\u2500" * 30) + "\n"
+                + banner + "\n"
                 + x_intel_fallback_note + "\n"
             )
         await send_long_message(
@@ -346,22 +360,23 @@ async def cmd_timeline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "\u23f3 Leyendo \u00faltimas 48h de tu X list...",
         reply_markup=MAIN_KEYBOARD,
     )
-    x_intel = await fetch_x_intel(hours=48)
-    # Fallback to cached timeline when live fetch fails (SpendCap etc.)
+    x_intel = await fetch_x_intel(hours=48, caller="timeline", app=context.application)
+    banner = cache_banner_for_report()
+    # Fallback to cached timeline when live fetch fails (SpendCap, cooldown,
+    # kill switch, daily cap reached).
     if isinstance(x_intel, dict) and x_intel.get("status") != "ok":
         cached = get_cached_timeline()
         if cached and cached.get("status") == "ok":
-            cs = get_cache_state()
             prefix = (
-                f"\u26a0\ufe0f Live API falló: {x_intel.get('error','')[:200]}\n"
-                f"Mostrando cache del scheduler (last success: {cs.get('last_success_at') or 'n/a'}).\n"
-                f"\u2500" * 30 + "\n\n"
+                f"\u26a0\ufe0f Live fall\u00f3: {x_intel.get('error','')[:200]}\n"
+                f"{banner}\n"
+                + ("\u2500" * 30) + "\n\n"
             )
             text = prefix + format_timeline(cached, top_n=40)
         else:
             text = format_timeline(x_intel, top_n=40)
     else:
-        text = format_timeline(x_intel, top_n=40)
+        text = banner + "\n" + ("\u2500" * 30) + "\n\n" + format_timeline(x_intel, top_n=40)
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
@@ -391,6 +406,20 @@ async def cmd_intel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_debug_x(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show X/Twitter connectivity diagnostics."""
     text = await debug_x_status()
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+async def cmd_x_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Round 15: live dashboard for X API mode + counters + cache state."""
+    text = await format_x_status()
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+async def cmd_costos_x(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Round 15: cost dashboard with 7d / 30d breakdown by caller."""
+    text = await format_x_costos()
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
@@ -758,27 +787,42 @@ async def post_init(application: Application) -> None:
             max_instances=1,
             coalesce=True,
         )
-        # X list timeline cache — Round 12: default cadence moved to 4h after
-        # $20.48 / 7d overspend event. Cost model corrected to $0.25 / 1K
-        # tweets. Projected cost at 4h cadence, 211-member list ≈ $1.20/mo.
-        # Cadence is env-overridable via X_CACHE_INTERVAL_HOURS.
-        x_cache_hours = float(os.getenv("X_CACHE_INTERVAL_HOURS", "4"))
-        scheduler.add_job(
-            _x_timeline_cache_job,
-            "interval",
-            hours=x_cache_hours,
-            args=[application],
-            id="x_timeline_cache",
-            max_instances=1,
-            coalesce=True,
-            next_run_time=datetime.now(timezone.utc) + timedelta(seconds=30),
-        )
+        # X list timeline cache — Round 15 (Apr 27 2026): scheduler is now
+        # OPT-IN (default off). Pre-Round 15 it ran every 4h regardless,
+        # which produced ~6 fetches/day automatically + every /reporte that
+        # raced past the cooldown window. Net effect: $70+/7d cost overrun.
+        # Round 15 strategy: only /reporte triggers a live fetch. Each fetch
+        # is gated by X_LIVE_ENABLED + 2h cooldown + 15/day cap. The
+        # in-memory cache is mirrored to SQLite so redeploys don't wipe it.
+        # To reactivate the periodic refresh, set X_SCHEDULER_ENABLED=true
+        # in Railway Variables (no redeploy needed — picked up at next boot).
+        if X_SCHEDULER_ENABLED:
+            x_cache_hours = float(os.getenv("X_CACHE_INTERVAL_HOURS", "6"))
+            scheduler.add_job(
+                _x_timeline_cache_job,
+                "interval",
+                hours=x_cache_hours,
+                args=[application],
+                id="x_timeline_cache",
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now(timezone.utc) + timedelta(seconds=30),
+            )
+            log.info(
+                "X timeline cache scheduler ENABLED — every %.1fh (X_SCHEDULER_ENABLED=true)",
+                x_cache_hours,
+            )
+        else:
+            log.info(
+                "X timeline cache scheduler DISABLED (Round 15 default). "
+                "Set X_SCHEDULER_ENABLED=true to re-enable."
+            )
         scheduler.start()
         application.bot_data["scheduler"] = scheduler
         log.info(
-            "Scheduler started: alerts %dmin, intel processor 30min, X timeline cache %.1fh.",
+            "Scheduler started: alerts %dmin, intel processor 30min, X scheduler %s.",
             POLL_INTERVAL_MIN,
-            x_cache_hours,
+            "ON" if X_SCHEDULER_ENABLED else "OFF",
         )
 
     # Cleanup old intel memory entries (7+ days old)
@@ -825,6 +869,8 @@ def main() -> None:
     app.add_handler(CommandHandler("alertas", cmd_alertas))
     app.add_handler(CommandHandler("intel", cmd_intel))
     app.add_handler(CommandHandler("debug_x", cmd_debug_x))
+    app.add_handler(CommandHandler("x_status", cmd_x_status))
+    app.add_handler(CommandHandler("costos_x", cmd_costos_x))
     app.add_handler(CommandHandler("intel_sources", cmd_intel_sources))
     app.add_handler(CommandHandler("providers", cmd_providers))
     app.add_handler(CommandHandler("flywheel", cmd_flywheel))

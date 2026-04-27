@@ -36,10 +36,17 @@ import httpx
 
 from modules.intel_memory import (
     count_x_calls_since,
+    count_x_calls_today_calendar,
+    count_x_calls_today_live_only,
     last_successful_x_call_ts,
+    load_x_timeline_payload,
     record_x_api_call,
+    save_x_timeline_payload,
+    should_send_75pct_alert,
     should_send_cost_alert,
     x_api_cost_projection,
+    x_cache_hit_rate,
+    x_cost_breakdown_by_caller,
 )
 
 log = logging.getLogger(__name__)
@@ -48,11 +55,34 @@ log = logging.getLogger(__name__)
 X_API_BEARER_TOKEN = os.getenv("X_API_BEARER_TOKEN", "").strip()
 X_LIST_ID = os.getenv("X_LIST_ID", "").strip()
 
-# Round 12: cost hardening knobs (env-overridable for ops flexibility)
-FETCH_COOLDOWN_HOURS = float(os.getenv("X_API_COOLDOWN_HOURS", "4"))
-DAILY_CALL_CAP = int(os.getenv("X_API_DAILY_CAP", "15"))
+# Round 12 + Round 15: cost hardening knobs (env-overridable, no redeploy needed).
+# Defaults moved in Round 15 after $20.48/7d → $70+/7d cost regression:
+#   - cooldown 4h → 2h (BCD asked stricter; explicitly accepts slower /reporte)
+#   - daily cap stays at 15
+#   - X_LIVE_ENABLED kill switch added (default true; flip to false in Railway
+#     to force cache-only mode without redeploy)
+#   - X_RATE_LIMIT_HOURS / X_DAILY_CAP added as canonical names matching the
+#     hotfix spec; legacy names kept as aliases for back-compat with existing
+#     Railway vars.
+FETCH_COOLDOWN_HOURS = float(
+    os.getenv("X_RATE_LIMIT_HOURS", os.getenv("X_API_COOLDOWN_HOURS", "2"))
+)
+DAILY_CALL_CAP = int(
+    os.getenv("X_DAILY_CAP", os.getenv("X_API_DAILY_CAP", "15"))
+)
 MAX_PAGES_PER_FETCH = int(os.getenv("X_API_MAX_PAGES", "2"))
 COST_ALERT_THRESHOLD_USD = float(os.getenv("X_API_ALERT_THRESHOLD_USD", "5"))
+# Round 15: master kill switch — when false, the bot NEVER calls X live,
+# regardless of cooldown/cap state. Cache-only mode for emergencies.
+X_LIVE_ENABLED = os.getenv("X_LIVE_ENABLED", "true").strip().lower() not in (
+    "false", "0", "no", "off"
+)
+# Round 15: scheduler is opt-in. When ENABLE_ALERTS=true the bot still adds
+# alert + intel-processor jobs, but the X timeline cache job is gated on this
+# var. Default false → no automatic X API calls; only /reporte triggers fetch.
+X_SCHEDULER_ENABLED = os.getenv("X_SCHEDULER_ENABLED", "false").strip().lower() in (
+    "true", "1", "yes", "on"
+)
 LIST_ENDPOINT_KEY = "lists/tweets"
 
 
@@ -131,8 +161,12 @@ _DIAG_INTERNAL_COOLDOWN = (
     "Usando cache — próxima fetch permitida: {next_allowed}."
 )
 _DIAG_INTERNAL_DAILY_CAP = (
-    "Internal daily cap hit ({used}/{cap} calls en últimas 24h). "
-    "Fallback a cache. Auto-reset sliding window."
+    "Internal daily cap hit ({used}/{cap} calls hoy UTC). "
+    "Fallback a cache hasta UTC midnight."
+)
+_DIAG_KILL_SWITCH = (
+    "X_LIVE_ENABLED=false — modo cache-only forzado. "
+    "Para reactivar: Railway Variables → X_LIVE_ENABLED=true."
 )
 
 
@@ -147,7 +181,11 @@ def _within_cooldown() -> tuple[bool, datetime | None]:
 
 
 def _daily_cap_exceeded() -> tuple[bool, int]:
-    used = count_x_calls_since(24)
+    """Round 15: count by UTC calendar day (resets at midnight UTC) so that
+    a heavy trading session in the morning doesn't bleed quota into the next
+    day. Was rolling-24h pre-Round 15; that mixed two trading days.
+    """
+    used = count_x_calls_today_calendar()
     return used >= DAILY_CALL_CAP, used
 
 
@@ -181,6 +219,13 @@ async def fetch_timeline_via_list(
         log.error("X_API_BEARER_TOKEN not configured")
         return None, _DIAG_NO_BEARER
 
+    # ── Gate 0: kill switch (Round 15) ──────────────────────────────────
+    # Bypassed only by /debug_x probe (bypass_cooldown=True) so BCD can still
+    # diagnose connectivity even with X_LIVE_ENABLED=false.
+    if not X_LIVE_ENABLED and not bypass_cooldown:
+        log.info("[X_API_COST] kill switch active — caller=%s", caller)
+        return None, _DIAG_KILL_SWITCH
+
     # ── Gate 1: cooldown ─────────────────────────────────────────────────
     if not bypass_cooldown:
         in_cd, next_allowed = _within_cooldown()
@@ -189,10 +234,10 @@ async def fetch_timeline_via_list(
             log.info("[X_API_COST] cooldown active — caller=%s next_allowed=%s", caller, na)
             return None, _DIAG_INTERNAL_COOLDOWN.format(cool=FETCH_COOLDOWN_HOURS, next_allowed=na)
 
-    # ── Gate 2: daily cap ────────────────────────────────────────────────
+    # ── Gate 2: daily cap (UTC calendar day) ─────────────────────────────
     cap_hit, used = _daily_cap_exceeded()
     if cap_hit:
-        log.warning("[X_API_COST] daily cap hit — %d/%d in 24h (caller=%s)", used, DAILY_CALL_CAP, caller)
+        log.warning("[X_API_COST] daily cap hit — %d/%d today (caller=%s)", used, DAILY_CALL_CAP, caller)
         return None, _DIAG_INTERNAL_DAILY_CAP.format(used=used, cap=DAILY_CALL_CAP)
 
     url = f"https://api.x.com/2/lists/{X_LIST_ID}/tweets"
@@ -324,16 +369,18 @@ async def fetch_timeline_via_list(
         # Structured cost log line
         est_cost = (tweets_returned_by_api / 1000.0) * 0.25
         calls_24h = count_x_calls_since(24)
+        calls_today = count_x_calls_today_calendar()
         proj = x_api_cost_projection()
         log.info(
             "[X_API_COST] caller=%s pages=%d tweets=%d est_cost=$%.4f "
-            "calls_24h=%d/%d 7d=$%.2f mo_proj=$%.2f",
+            "calls_today=%d/%d (cap), calls_24h=%d, 7d=$%.2f mo_proj=$%.2f",
             caller or "?",
             pages_consumed,
             tweets_returned_by_api,
             est_cost,
-            calls_24h,
+            calls_today,
             DAILY_CALL_CAP,
+            calls_24h,
             proj["cost_7d"],
             proj["monthly_projection_usd"],
         )
@@ -354,8 +401,8 @@ async def fetch_timeline_via_list(
 async def maybe_send_cost_alert(app=None) -> None:
     """Round 12: fire Telegram alert if 7d projection exceeds threshold.
 
-    Called from the scheduler after every cache refresh. Throttled to one
-    alert per 24h via the intel_memory.x_api_alerts table.
+    Called after every successful fetch (and from the scheduler if enabled).
+    Throttled to one alert per 24h via intel_memory.x_api_alerts.
     `app` is the telegram Application; when None this is a dry-run.
     """
     fire, proj = should_send_cost_alert(COST_ALERT_THRESHOLD_USD)
@@ -367,7 +414,7 @@ async def maybe_send_cost_alert(app=None) -> None:
         f"(threshold ${COST_ALERT_THRESHOLD_USD:.2f})\n"
         f"Últimos 7d: ${proj['cost_7d']:.2f} en {proj['calls_7d']} calls, "
         f"{proj['tweets_7d']} tweets.\n\n"
-        f"Considerá subir FETCH_COOLDOWN_HOURS o reducir X_LIST_ID members."
+        f"Considerá X_LIVE_ENABLED=false en Railway para forzar cache-only."
     )
     log.warning("[X_API_COST] ALERT fired: %s", msg.replace("\n", " | "))
     if app is not None:
@@ -379,12 +426,47 @@ async def maybe_send_cost_alert(app=None) -> None:
             log.exception("maybe_send_cost_alert send failed (non-fatal)")
 
 
+async def maybe_send_75pct_alert(app=None) -> None:
+    """Round 15: notify BCD when daily cap reaches 75%.
+
+    Throttled once per UTC calendar day. Fires immediately after a successful
+    live fetch (in fetch_x_intel) so BCD knows to slow down before hitting cap.
+    """
+    used = count_x_calls_today_calendar()
+    if not should_send_75pct_alert(used, DAILY_CALL_CAP):
+        return
+    msg = (
+        f"⚠️ X API daily cap 75%\n\n"
+        f"Llevamos {used}/{DAILY_CALL_CAP} fetches hoy (UTC). "
+        f"Una vez que llegue al cap, /reporte usará cache hasta UTC midnight.\n\n"
+        f"Para forzar cache-only ya: Railway Variables → X_LIVE_ENABLED=false."
+    )
+    log.warning("[X_API_COST] 75pct ALERT: %s", msg.replace("\n", " | "))
+    if app is not None:
+        try:
+            from config import TELEGRAM_CHAT_ID
+            if TELEGRAM_CHAT_ID:
+                await app.bot.send_message(chat_id=int(TELEGRAM_CHAT_ID), text=msg)
+        except Exception:
+            log.exception("maybe_send_75pct_alert send failed (non-fatal)")
+
+
 # ─── Public API (consumed by bot.py, analysis.py, etc.) ────────────────────
-async def fetch_x_intel(hours: int = 48, caller: str = "fetch_x_intel") -> dict[str, Any]:
+async def fetch_x_intel(
+    hours: int = 48,
+    caller: str = "fetch_x_intel",
+    app=None,
+) -> dict[str, Any]:
     """Fetch X intel from the private list. Returns standard status dict.
 
     `caller` is stamped on every recorded X API call (see intel_memory) so
     that /debug_x and the cost-audit queries can attribute spend by source.
+    `app` (Telegram Application) lets us push the 75% daily-cap alert when
+    relevant; pass None for headless calls.
+
+    Round 15: on success the payload is mirrored to SQLite via
+    save_x_timeline_payload so it survives Railway redeploys (the in-memory
+    _cached_timeline used to be wiped on every restart).
     """
     tweets, diag = await fetch_timeline_via_list(hours=hours, caller=caller)
 
@@ -429,7 +511,7 @@ async def fetch_x_intel(hours: int = 48, caller: str = "fetch_x_intel") -> dict[
     for t in tweets:
         by_user.setdefault(t["username"], []).append(t)
 
-    return {
+    payload = {
         "status": "ok",
         "source": "x_api_list",
         "tweets": tweets,
@@ -441,6 +523,29 @@ async def fetch_x_intel(hours: int = 48, caller: str = "fetch_x_intel") -> dict[
         "accounts_scanned": unique_accounts,
         "total_tweets": len(tweets),
     }
+
+    # Round 15: persist to SQLite so the cache survives Railway redeploys.
+    # Pre-Round 15 the only cache was the module-global _cached_timeline.
+    try:
+        save_x_timeline_payload(payload)
+        global _cached_timeline
+        _cached_timeline = payload
+        _cache_state["last_success_at"] = datetime.now(timezone.utc).isoformat()
+        _cache_state["last_attempt_at"] = _cache_state["last_success_at"]
+        _cache_state["last_tweet_count"] = len(tweets)
+        _cache_state["last_account_count"] = unique_accounts
+        _cache_state["last_error"] = None
+        _cache_state["successive_failures"] = 0
+    except Exception:
+        log.exception("[X_CACHE] persist after fetch_x_intel failed (non-fatal)")
+
+    # Round 15: fire 75% daily-cap alert if applicable.
+    try:
+        await maybe_send_75pct_alert(app)
+    except Exception:
+        log.exception("75pct alert dispatch failed (non-fatal)")
+
+    return payload
 
 
 async def debug_x_status() -> str:
@@ -590,10 +695,166 @@ async def poll_and_cache_timeline(app=None) -> None:
 
 
 def get_cached_timeline() -> dict[str, Any] | None:
-    """Return the last cached timeline, or None."""
+    """Return the last cached timeline, or None.
+
+    Round 15: prefer the in-memory cache (fast path), but fall back to SQLite
+    when it's empty — this happens immediately after a Railway redeploy.
+    """
+    global _cached_timeline
+    if _cached_timeline is not None:
+        return _cached_timeline
+    payload, saved_at = load_x_timeline_payload()
+    if payload is None:
+        return None
+    _cached_timeline = payload
+    if saved_at:
+        _cache_state["last_success_at"] = saved_at.isoformat()
+        _cache_state["last_tweet_count"] = int(payload.get("total") or 0)
+        _cache_state["last_account_count"] = int(payload.get("accounts") or 0)
     return _cached_timeline
 
 
 def get_cache_state() -> dict[str, Any]:
-    """Return cache metadata for /debug_x."""
+    """Return cache metadata for /debug_x and /x_status.
+
+    Round 15: if the in-memory state is empty, hydrate from SQLite so the
+    state survives redeploys.
+    """
+    if not _cache_state.get("last_success_at"):
+        payload, saved_at = load_x_timeline_payload()
+        if payload is not None and saved_at is not None:
+            _cache_state["last_success_at"] = saved_at.isoformat()
+            _cache_state["last_tweet_count"] = int(payload.get("total") or 0)
+            _cache_state["last_account_count"] = int(payload.get("accounts") or 0)
     return dict(_cache_state)
+
+
+# ─── Round 15: dashboard helpers for /x_status and /costos_x ──────────────
+
+def cache_age_text() -> str:
+    """Render '4h 22min' style age for the latest cached payload, or '—'."""
+    cs = get_cache_state()
+    iso = cs.get("last_success_at")
+    if not iso:
+        return "—"
+    try:
+        ts = datetime.fromisoformat(iso)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        delta = datetime.now(timezone.utc) - ts
+        hours = int(delta.total_seconds() // 3600)
+        minutes = int((delta.total_seconds() % 3600) // 60)
+        if hours == 0:
+            return f"{minutes}min"
+        return f"{hours}h {minutes}min"
+    except Exception:
+        return "—"
+
+
+def cache_banner_for_report() -> str:
+    """Return the one-liner banner shown at the top of /reporte's timeline
+    section telling BCD whether the X timeline is live or cached.
+    """
+    cs = get_cache_state()
+    iso = cs.get("last_success_at")
+    age = cache_age_text()
+    if not iso:
+        return "📡 X Timeline: sin cache aún — primer fetch en este /reporte"
+    return (
+        f"📡 X Timeline: cache de hace {age} "
+        f"— última actualización: {iso}"
+    )
+
+
+async def format_x_status() -> str:
+    """Output for /x_status command."""
+    cs = get_cache_state()
+    proj = x_api_cost_projection()
+    used_today = count_x_calls_today_calendar()
+    successful_today = count_x_calls_today_live_only()
+    last_ok = last_successful_x_call_ts(LIST_ENDPOINT_KEY)
+    next_allowed = None
+    if last_ok:
+        next_allowed = last_ok + timedelta(hours=FETCH_COOLDOWN_HOURS)
+
+    lines: list[str] = []
+    lines.append("🛰  X API STATUS — Round 15 on-demand mode")
+    lines.append("─" * 32)
+    lines.append("")
+    lines.append("⚙️ Configuración:")
+    lines.append(f"  X_LIVE_ENABLED: {'✅ true' if X_LIVE_ENABLED else '🛑 false (cache-only)'}")
+    lines.append(f"  X_RATE_LIMIT_HOURS: {FETCH_COOLDOWN_HOURS:.1f}h")
+    lines.append(f"  X_DAILY_CAP: {DAILY_CALL_CAP}/día (UTC)")
+    lines.append(f"  X_SCHEDULER_ENABLED: {'✅ on' if X_SCHEDULER_ENABLED else '🛑 off (Round 15 default)'}")
+    lines.append("")
+    lines.append("📊 Uso hoy (UTC calendar day):")
+    lines.append(f"  Fetches usados: {used_today}/{DAILY_CALL_CAP}")
+    lines.append(f"  Successful (200): {successful_today}")
+    lines.append(f"  Last fetch OK: {last_ok.isoformat() if last_ok else '— nunca'}")
+    if next_allowed:
+        lines.append(f"  Próximo fetch permitido: {next_allowed.isoformat()}")
+    else:
+        lines.append("  Próximo fetch permitido: — sin cooldown activo")
+    lines.append("")
+    lines.append("💰 Costo (persistido SQLite):")
+    lines.append(f"  Últimos 7d: ${proj['cost_7d']:.2f} ({proj['calls_7d']} calls, {proj['tweets_7d']} tweets)")
+    lines.append(f"  Proyección mensual: ${proj['monthly_projection_usd']:.2f}")
+    lines.append("")
+    lines.append("💾 Cache state:")
+    lines.append(f"  Last cache: {cs.get('last_success_at') or '— vacío'}")
+    lines.append(f"  Last cache content: {cs.get('last_tweet_count', 0)} tweets de {cs.get('last_account_count', 0)} cuentas")
+    lines.append(f"  Cache age: {cache_age_text()}")
+    if cs.get("last_error"):
+        lines.append(f"  Last error: {str(cs.get('last_error'))[:200]}")
+    lines.append("")
+    lines.append("ℹ️ Round 15: live fetches sólo on-demand vía /reporte/timeline. "
+                 "Scheduler automático apagado por defecto.")
+    return "\n".join(lines)
+
+
+async def format_x_costos() -> str:
+    """Output for /costos_x command — cost dashboard with caller breakdown."""
+    proj = x_api_cost_projection()
+    proj30 = x_cache_hit_rate(days=30)
+    breakdown_7d = x_cost_breakdown_by_caller(days=7)
+    breakdown_30d = x_cost_breakdown_by_caller(days=30)
+    used_today = count_x_calls_today_calendar()
+
+    lines: list[str] = []
+    lines.append("💰 X API COSTOS — auditoría Round 15")
+    lines.append("─" * 32)
+    lines.append("")
+    lines.append("📅 Resumen últimos 7d:")
+    lines.append(f"  Total calls: {proj['calls_7d']}")
+    lines.append(f"  Total tweets: {proj['tweets_7d']}")
+    lines.append(f"  Costo estimado: ${proj['cost_7d']:.2f}")
+    lines.append(f"  Daily avg: ${proj['daily_avg_usd']:.4f}")
+    lines.append(f"  Proyección mensual: ${proj['monthly_projection_usd']:.2f}")
+    lines.append("")
+    lines.append("📅 Últimos 30d:")
+    lines.append(f"  Total calls: {proj30.get('total_calls', 0)} ({proj30.get('successful', 0)} successful)")
+    lines.append(f"  Calls/día promedio: {proj30.get('calls_per_day', 0):.2f}")
+    lines.append("")
+    lines.append(f"🌐 Fetches hoy (UTC): {used_today}/{DAILY_CALL_CAP}")
+    lines.append("")
+    if breakdown_7d:
+        lines.append("👤 Breakdown por caller (7d):")
+        for row in breakdown_7d[:10]:
+            lines.append(
+                f"  {row['caller']:<22} ${row['cost']:.4f}  "
+                f"calls={row['calls']} (ok={row['ok']}/fail={row['fail']}) "
+                f"tw={row['tweets']}"
+            )
+        lines.append("")
+    if breakdown_30d:
+        lines.append("👤 Breakdown por caller (30d):")
+        for row in breakdown_30d[:10]:
+            lines.append(
+                f"  {row['caller']:<22} ${row['cost']:.4f}  "
+                f"calls={row['calls']} tw={row['tweets']}"
+            )
+        lines.append("")
+    lines.append("ℹ️ Cost model X API: $0.25 / 1,000 tweets returned")
+    lines.append(f"ℹ️ Cooldown {FETCH_COOLDOWN_HOURS:.1f}h, cap {DAILY_CALL_CAP}/día")
+    lines.append("ℹ️ Para forzar cache-only: Railway → X_LIVE_ENABLED=false")
+    return "\n".join(lines)

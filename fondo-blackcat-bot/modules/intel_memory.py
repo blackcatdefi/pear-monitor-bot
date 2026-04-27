@@ -90,6 +90,21 @@ def _get_conn() -> sqlite3.Connection:
             payload TEXT
         )
     """)
+    # Round 15: persistent payload cache for X timeline.
+    # Pre-R15: timeline cache lived in module globals (_cached_timeline) which
+    # were lost on every Railway redeploy, forcing /reporte to do a live fetch
+    # right after each deploy. After R15 the scheduler is opt-in (default off),
+    # so we MUST persist the last successful payload to disk to survive
+    # restarts. Single-row table keyed on `key='latest'`.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS x_timeline_cache (
+            key TEXT PRIMARY KEY,
+            saved_at_utc TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            tweet_count INTEGER DEFAULT 0,
+            account_count INTEGER DEFAULT 0
+        )
+    """)
     conn.commit()
     return conn
 
@@ -192,6 +207,195 @@ def x_api_cost_projection() -> dict[str, Any]:
     except Exception:
         log.exception("x_api_cost_projection failed")
         return {"cost_7d": 0.0, "calls_7d": 0, "tweets_7d": 0, "daily_avg_usd": 0.0, "monthly_projection_usd": 0.0}
+
+
+def count_x_calls_today_calendar() -> int:
+    """Count X API calls (all statuses) since UTC midnight today.
+
+    Round 15: used for the strict daily cap (calendar day, not rolling 24h).
+    Rolling 24h is still available via count_x_calls_since(24).
+    """
+    try:
+        conn = _get_conn()
+        now = datetime.now(timezone.utc)
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM x_api_calls WHERE ts >= ?",
+            (day_start,),
+        ).fetchone()
+        conn.close()
+        return int(row["c"] or 0)
+    except Exception:
+        log.exception("count_x_calls_today_calendar failed")
+        return 0
+
+
+def count_x_calls_today_live_only() -> int:
+    """Count successful (200) X API calls since UTC midnight today.
+
+    Round 15: better signal than total-calls because failures (cooldown probe,
+    SpendCap) shouldn't count toward the cap.
+    """
+    try:
+        conn = _get_conn()
+        now = datetime.now(timezone.utc)
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM x_api_calls WHERE ts >= ? AND status=200",
+            (day_start,),
+        ).fetchone()
+        conn.close()
+        return int(row["c"] or 0)
+    except Exception:
+        log.exception("count_x_calls_today_live_only failed")
+        return 0
+
+
+def should_send_75pct_alert(used: int, cap: int) -> bool:
+    """Round 15: return True if we just crossed 75% of the daily cap and
+    haven't already alerted today. Throttled via x_api_alerts table.
+
+    Used by x_intel.fetch_timeline_via_list right after recording a 200.
+    """
+    if cap <= 0 or used <= 0:
+        return False
+    pct = used / float(cap)
+    if pct < 0.75:
+        return False
+    try:
+        conn = _get_conn()
+        # One alert per UTC calendar day
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        key = f"daily_cap_75pct_{today}"
+        row = conn.execute(
+            "SELECT last_sent_utc FROM x_api_alerts WHERE key=?",
+            (key,),
+        ).fetchone()
+        if row:
+            conn.close()
+            return False
+        now = datetime.now(timezone.utc)
+        conn.execute(
+            "INSERT OR REPLACE INTO x_api_alerts (key, last_sent_utc, payload) "
+            "VALUES (?, ?, ?)",
+            (key, now.isoformat(), json.dumps({"used": used, "cap": cap})),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception:
+        log.exception("should_send_75pct_alert failed")
+        return False
+
+
+# ─── Round 15: persistent X timeline payload cache ─────────────────────────
+
+def save_x_timeline_payload(payload: dict) -> None:
+    """Persist the last successful timeline fetch so it survives redeploys.
+
+    The full payload (data, total, accounts, tweets) is JSON-serialized into
+    the single-row x_timeline_cache table. Read back by load_x_timeline_payload.
+    """
+    if not isinstance(payload, dict):
+        return
+    if payload.get("status") != "ok":
+        return
+    try:
+        conn = _get_conn()
+        conn.execute(
+            "INSERT OR REPLACE INTO x_timeline_cache "
+            "(key, saved_at_utc, payload_json, tweet_count, account_count) "
+            "VALUES ('latest', ?, ?, ?, ?)",
+            (
+                datetime.now(timezone.utc).isoformat(),
+                json.dumps(payload, default=str),
+                int(payload.get("total") or payload.get("total_tweets") or 0),
+                int(payload.get("accounts") or payload.get("accounts_scanned") or 0),
+            ),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        log.exception("save_x_timeline_payload failed (non-fatal)")
+
+
+def load_x_timeline_payload() -> tuple[dict | None, datetime | None]:
+    """Return (payload, saved_at_utc) or (None, None) if no cache present."""
+    try:
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT saved_at_utc, payload_json FROM x_timeline_cache WHERE key='latest'"
+        ).fetchone()
+        conn.close()
+        if not row:
+            return None, None
+        payload = json.loads(row["payload_json"])
+        saved = datetime.fromisoformat(row["saved_at_utc"])
+        if saved.tzinfo is None:
+            saved = saved.replace(tzinfo=timezone.utc)
+        return payload, saved
+    except Exception:
+        log.exception("load_x_timeline_payload failed")
+        return None, None
+
+
+def x_cost_breakdown_by_caller(days: int = 7) -> list[dict]:
+    """Return per-caller cost breakdown over the last N days for /costos_x."""
+    try:
+        conn = _get_conn()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        rows = conn.execute(
+            "SELECT caller, COUNT(*) AS calls, "
+            "       COALESCE(SUM(tweets_returned),0) AS tweets, "
+            "       COALESCE(SUM(est_cost_usd),0) AS cost, "
+            "       SUM(CASE WHEN status=200 THEN 1 ELSE 0 END) AS ok, "
+            "       SUM(CASE WHEN status<>200 THEN 1 ELSE 0 END) AS fail "
+            "FROM x_api_calls WHERE ts >= ? "
+            "GROUP BY caller ORDER BY cost DESC",
+            (cutoff,),
+        ).fetchall()
+        conn.close()
+        return [
+            {
+                "caller": r["caller"] or "?",
+                "calls": int(r["calls"] or 0),
+                "tweets": int(r["tweets"] or 0),
+                "cost": float(r["cost"] or 0),
+                "ok": int(r["ok"] or 0),
+                "fail": int(r["fail"] or 0),
+            }
+            for r in rows
+        ]
+    except Exception:
+        log.exception("x_cost_breakdown_by_caller failed")
+        return []
+
+
+def x_cache_hit_rate(days: int = 7) -> dict[str, Any]:
+    """Round 15: best-effort cache-hit-rate proxy.
+
+    We don't store /reporte invocations, only X API calls. Therefore the
+    'hit rate' is derived as: live_fetches / max(live_fetches+expected_calls).
+    For a simpler metric, return total live fetches per day so BCD can eyeball.
+    """
+    try:
+        conn = _get_conn()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        row = conn.execute(
+            "SELECT COUNT(*) AS total, "
+            "       SUM(CASE WHEN status=200 THEN 1 ELSE 0 END) AS ok "
+            "FROM x_api_calls WHERE ts >= ?",
+            (cutoff,),
+        ).fetchone()
+        conn.close()
+        return {
+            "total_calls": int(row["total"] or 0),
+            "successful": int(row["ok"] or 0),
+            "calls_per_day": (int(row["total"] or 0) / max(days, 1)),
+        }
+    except Exception:
+        log.exception("x_cache_hit_rate failed")
+        return {"total_calls": 0, "successful": 0, "calls_per_day": 0.0}
 
 
 def should_send_cost_alert(threshold_usd: float = 5.0) -> tuple[bool, dict[str, Any]]:
