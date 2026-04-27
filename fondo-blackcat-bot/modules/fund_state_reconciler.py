@@ -214,6 +214,11 @@ async def reconcile_fund_state() -> list[Discrepancy]:
     return out
 
 
+def format_reconcile_report(discrepancies: list[Discrepancy]) -> str:
+    """Alias used by bot.py — delegates to render_discrepancies."""
+    return render_discrepancies(discrepancies)
+
+
 def render_discrepancies(discrepancies: list[Discrepancy]) -> str:
     if not discrepancies:
         return (
