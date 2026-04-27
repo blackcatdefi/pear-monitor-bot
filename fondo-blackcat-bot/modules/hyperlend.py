@@ -485,14 +485,33 @@ async def fetch_all_hyperlend() -> list[dict[str, Any]]:
 
     client = HyperLend()
 
+    # Serialize wallet queries with a semaphore to avoid hammering the
+    # HyperEVM RPC node (which rate-limits at 5+ concurrent requests
+    # with -32005 errors when multiple callers — bot polling + dashboard
+    # HTTP + /reporte — all hit it simultaneously). Concurrency=2 keeps
+    # latency reasonable while staying inside the rate envelope.
+    sem = asyncio.Semaphore(2)
+
     async def _query(addr: str, label: str) -> dict[str, Any]:
-        try:
-            data = await client.get_account_data(addr)
-            data["label"] = label
-            return {"status": "ok", "data": data, "label": label}
-        except Exception as exc:  # noqa: BLE001
-            log.warning("HyperLend fetch %s (%s) failed: %s", label, addr[:10], exc)
-            return {"status": "error", "error": str(exc), "label": label}
+        async with sem:
+            for attempt in range(3):
+                try:
+                    data = await client.get_account_data(addr)
+                    data["label"] = label
+                    return {"status": "ok", "data": data, "label": label}
+                except Exception as exc:  # noqa: BLE001
+                    msg = str(exc)
+                    # Rate-limit errors → backoff and retry; other errors → fail fast.
+                    if "32005" in msg or "rate" in msg.lower() or "timeout" in msg.lower():
+                        if attempt < 2:
+                            await asyncio.sleep(1.5 * (attempt + 1))
+                            continue
+                    log.warning(
+                        "HyperLend fetch %s (%s) failed (attempt %d): %s",
+                        label, addr[:10], attempt + 1, exc,
+                    )
+                    return {"status": "error", "error": msg, "label": label}
+            return {"status": "error", "error": "max retries exceeded", "label": label}
 
     results = await asyncio.gather(*[_query(a, l) for a, l in wallets.items()])
 

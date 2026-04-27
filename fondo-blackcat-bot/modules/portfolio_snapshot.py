@@ -32,10 +32,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+# Module-level cache so /reporte and /dashboard share work and we don't
+# hammer the HyperEVM RPC with 200+ parallel calls on every dashboard hit.
+# Browser refresh cadence vs RPC rate-limits (-32005) was the root cause of
+# HL collateral showing $0 when the dashboard was loaded right after a
+# /reporte run.
+_SNAPSHOT_CACHE: dict[str, Any] = {"snap": None, "ts": 0.0}
+_SNAPSHOT_LOCK: asyncio.Lock | None = None
+SNAPSHOT_TTL_SEC = 45.0  # fresh enough for dashboard refresh + /reporte cadence
 
 
 # ─── Datatypes ──────────────────────────────────────────────────────────────
@@ -132,8 +142,47 @@ def _spot_usd_value(spot_balances: list[dict[str, Any]],
     return total
 
 
-async def build_portfolio_snapshot() -> PortfolioSnapshot:
-    """Run the four canonical fetches in parallel and stitch the snapshot."""
+async def build_portfolio_snapshot(force_refresh: bool = False) -> PortfolioSnapshot:
+    """Run the four canonical fetches in parallel and stitch the snapshot.
+
+    Cached for ``SNAPSHOT_TTL_SEC`` seconds so concurrent callers (dashboard
+    HTTP requests + /reporte + /status) reuse the same fetch instead of
+    each issuing their own 200+ RPC calls. The cache is invalidated when
+    ``force_refresh=True`` (e.g. by a manual /reporte command if needed).
+    """
+    global _SNAPSHOT_LOCK
+    if _SNAPSHOT_LOCK is None:
+        _SNAPSHOT_LOCK = asyncio.Lock()
+
+    now = time.time()
+    cached = _SNAPSHOT_CACHE.get("snap")
+    cached_ts = _SNAPSHOT_CACHE.get("ts") or 0.0
+    if (
+        not force_refresh
+        and cached is not None
+        and (now - cached_ts) < SNAPSHOT_TTL_SEC
+    ):
+        return cached
+
+    async with _SNAPSHOT_LOCK:
+        # Re-check inside the lock — another caller may have just refreshed.
+        cached = _SNAPSHOT_CACHE.get("snap")
+        cached_ts = _SNAPSHOT_CACHE.get("ts") or 0.0
+        if (
+            not force_refresh
+            and cached is not None
+            and (time.time() - cached_ts) < SNAPSHOT_TTL_SEC
+        ):
+            return cached
+
+        snap = await _build_portfolio_snapshot_inner()
+        _SNAPSHOT_CACHE["snap"] = snap
+        _SNAPSHOT_CACHE["ts"] = time.time()
+        return snap
+
+
+async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
+    """Inner uncached path — does the actual fetch + aggregate work."""
     from modules.hyperlend import fetch_all_hyperlend
     from modules.market import fetch_market_data
     from modules.portfolio import fetch_all_wallets
