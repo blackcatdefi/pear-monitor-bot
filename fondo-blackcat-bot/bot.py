@@ -2,6 +2,16 @@
 
 Runs python-telegram-bot v21 (commands) + Telethon userbot (channel reads)
 + APScheduler (alert loop + intel processor) in the same asyncio event loop.
+
+Round 16 additions:
+    - commands_registry.COMMANDS as single source of truth
+    - sync_commands_with_telegram on startup → BotFather autocomplete
+    - /reload_commands manual sync
+    - /version, /errors, /metrics, /test_alerts (admin/debug)
+    - errors_log persistence + with_error_logging decorator on every handler
+    - throttle on /reporte (60s per user)
+    - aiohttp /health endpoint for Railway probes
+    - daily SQLite backup + weekly cleanup
 """
 from __future__ import annotations
 
@@ -12,9 +22,16 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from telegram import BotCommand as TGBotCommand
 from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
+from commands_registry import (
+    COMMANDS,
+    render_start_menu,
+    telegram_command_payload,
+    validate_commands_match_handlers,
+)
 from config import (
     ENABLE_ALERTS,
     POLL_INTERVAL_MIN,
@@ -28,20 +45,30 @@ from modules.analysis import (
     _load_thesis,
     load_tesis_latest,
 )
+from modules.errors_log import (
+    cleanup_old as errors_cleanup,
+    format_recent as format_recent_errors,
+    with_error_logging,
+)
+from modules.health_server import start_health_server, stop_health_server
 from modules.hyperlend import fetch_all_hyperlend, fetch_reserve_rates
 from modules.kill_scenarios import compute_kill_scenarios
 from modules.llm_providers import format_provider_status
 from modules.market import fetch_market_data
+from modules.metrics import format_metrics
 from modules.portfolio import fetch_all_wallets, fetch_all_recent_fills, get_spot_price
+from modules.sqlite_backup import backup_sqlite, cleanup_sqlite_weekly
 from modules.telegram_intel import (
     fetch_telegram_intel,
     get_client as get_telethon,
     scan_telegram_unread,
     stop_client as stop_telethon,
 )
+from modules.throttle import throttle
 from modules.unlocks import fetch_unlocks
 from modules.bounce_tech import detect_closes as bt_detect_closes, fetch_bounce_tech
 from modules.gmail_intel import scan_gmail_unread
+from modules.version_info import format_version_block
 from modules.x_intel import (
     cache_banner_for_report,
     debug_x_status,
@@ -68,7 +95,7 @@ from modules import pnl_tracker, position_log
 from templates.formatters import format_hf, format_quick_positions
 from templates.timeline import format_timeline
 from utils.security import authorized
-from utils.telegram import send_long_message
+from utils.telegram import send_bot_message, send_long_message
 
 
 logging.basicConfig(
@@ -78,23 +105,33 @@ logging.basicConfig(
 log = logging.getLogger("fondo-blackcat")
 
 
-# Persistent keyboard — todos los comandos accesibles con un tap.
-MAIN_KEYBOARD = ReplyKeyboardMarkup(
-    [
-        [KeyboardButton("/reporte"), KeyboardButton("/posiciones")],
-        [KeyboardButton("/flywheel"), KeyboardButton("/liqcalc")],
-        [KeyboardButton("/timeline"), KeyboardButton("/tesis")],
-        [KeyboardButton("/hf"), KeyboardButton("/kill")],
-        [KeyboardButton("/ciclo"), KeyboardButton("/ciclo_update")],
-        [KeyboardButton("/dca"), KeyboardButton("/pnl")],
-        [KeyboardButton("/log"), KeyboardButton("/intel")],
-        [KeyboardButton("/alertas"), KeyboardButton("/help")],
-        [KeyboardButton("/providers"), KeyboardButton("/debug_x")],
-        [KeyboardButton("/intel_sources"), KeyboardButton("/start")],
-    ],
-    resize_keyboard=True,
-    is_persistent=True,
-)
+# Persistent keyboard — dynamic, derived from COMMANDS so adding a new command
+# auto-adds it here too. Built in pairs per row, prioritising core/trading.
+def _build_main_keyboard() -> ReplyKeyboardMarkup:
+    priority = ["core", "trading", "intel", "admin", "debug"]
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for cat in priority:
+        for c in COMMANDS:
+            if c.category == cat and c.command not in seen:
+                if c.command in ("help",):
+                    continue
+                ordered.append(c.command)
+                seen.add(c.command)
+
+    rows: list[list[KeyboardButton]] = []
+    pair: list[KeyboardButton] = []
+    for cmd in ordered:
+        pair.append(KeyboardButton(f"/{cmd}"))
+        if len(pair) == 2:
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
+
+
+MAIN_KEYBOARD = _build_main_keyboard()
 
 # Runtime state for /alertas toggle
 _alerts_enabled = {"value": ENABLE_ALERTS}
@@ -107,33 +144,13 @@ _telethon_ok = True
 
 
 @authorized
+@with_error_logging
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = (
-        "\U0001f431\u200d\u2b1b Fondo Black Cat \u2014 analista personal\n\n"
-        "Keyboard \u2014 todos los comandos:\n"
-        "/reporte \u2014 TODO-EN-UNO: timeline + posiciones + an\u00e1lisis\n"
-        "/posiciones \u2014 snapshot r\u00e1pido (wallets + HF)\n"
-        "/flywheel \u2014 pair trade HL (LONG HYPE / SHORT UETH)\n"
-        "/liqcalc \u2014 matriz liq HYPE \u00d7 deuda\n"
-        "/timeline \u2014 timeline X 48h (tu X list)\n"
-        "/tesis \u2014 estado de la tesis macro\n"
-        "/hf \u2014 Health Factor de HyperLend\n"
-        "/kill \u2014 kill scenarios de cada posici\u00f3n\n"
-        "/ciclo \u2014 estado del Trade del Ciclo (Blofin, manual)\n"
-        "/ciclo_update \u2014 abrir/cerrar Trade del Ciclo (edita fund_state.py)\n"
-        "/dca \u2014 plan DCA tramificado BTC/ETH/HYPE + zona actual\n"
-        "/pnl \u2014 realized PnL 7D / 30D / YTD\n"
-        "/log \u2014 \u00faltimas 20 entradas del position log\n"
-        "/intel \u2014 resumen de intel memory (\u00faltimas 24h)\n"
-        "/providers \u2014 status de los LLM providers\n"
-        "/debug_x \u2014 diagn\u00f3stico de conectividad X/Twitter\n"
-        "/intel_sources \u2014 top 20 cuentas activas en la list X (24h)\n"
-        "/alertas \u2014 toggle alertas autom\u00e1ticas (on/off)\n"
-    )
-    await update.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text(render_start_menu(), reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
+@with_error_logging
 async def cmd_posiciones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\u23f3 Snapshot...", reply_markup=MAIN_KEYBOARD)
     wallets, hl, bt, market, recent_fills = await asyncio.gather(
@@ -174,28 +191,25 @@ async def cmd_posiciones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 @authorized
+@with_error_logging
 async def cmd_hf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     hl = await fetch_all_hyperlend()
     await update.message.reply_text(format_hf(hl), reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
+@with_error_logging
+@throttle(min_interval_s=60, key_prefix="cmd_reporte")
 async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Reporte TODO-EN-UNO: timeline X + posiciones + an\u00e1lisis LLM.
+    """Reporte TODO-EN-UNO: timeline X + posiciones + análisis LLM.
 
-    Emite 3 mensajes secuenciales:
-    1. Timeline \u2014 top 40 tweets por engagement de las \u00faltimas 48h (tu X list curada)
-    2. Posiciones \u2014 snapshot r\u00e1pido de wallets + HyperLend + Bounce Tech
-    3. An\u00e1lisis \u2014 reporte completo generado por Sonnet (market + intel + tesis)
+    Round 16: throttled at 60s/user to avoid stacking concurrent runs.
     """
     await update.message.reply_text(
         "\u23f3 Generando reporte completo: timeline + posiciones + an\u00e1lisis (30-90s)...",
         reply_markup=MAIN_KEYBOARD,
     )
 
-    # Todos los fetches en paralelo (Telethon separado — puede estar deshabilitado).
-    # Round 15: pass app to fetch_x_intel so the 75pct daily-cap alert can fire
-    # via Telegram immediately after the live fetch records the call.
     portfolio, hl, market, unlocks, x_intel, gmail_intel, bt, recent_fills = await asyncio.gather(
         fetch_all_wallets(),
         fetch_all_hyperlend(),
@@ -217,11 +231,6 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         intel_unread = {"status": "error", "error": "telethon_disabled"}
 
     # ─── Sección 1: Timeline X (48h) ─────────────────────────────────────────
-    # Round 13: fallback a cache scheduler cuando el live fetch hit cooldown.
-    # Pre-Round 13 bug: si fetch_x_intel devolvía status=error (ej: internal
-    # 4h cooldown recién disparado por el scheduler), /reporte directamente
-    # saltaba la sección y mostraba el mensaje legacy de "Nitter/RSSHub".
-    # Ahora: intentar cache antes de rendirse — /timeline ya hacía esto.
     x_intel_ok = isinstance(x_intel, dict) and x_intel.get("status") == "ok"
     x_intel_fallback_note = ""
 
@@ -242,8 +251,6 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if x_intel_ok:
         timeline_text = format_timeline(x_intel, top_n=40)
-        # Round 15: always show cache-state banner so BCD knows whether the
-        # timeline data is fresh or cached, regardless of how it was obtained.
         banner = cache_banner_for_report()
         header = (
             "\U0001f4e1 TIMELINE X \u2014 48H\n"
@@ -299,9 +306,6 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if thesis_update:
         await send_long_message(update, thesis_update, reply_markup=MAIN_KEYBOARD)
 
-    # Nota si timeline X no disponible (ni live ni cache)
-    # Round 13: mensaje actualizado — ya no usamos Nitter/RSSHub, el error
-    # legacy era confuso. Ahora apunta al Spend Cap / balance X API / /debug_x.
     if not x_intel_ok:
         live_err = ""
         if isinstance(x_intel, dict):
@@ -315,14 +319,8 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 @authorized
+@with_error_logging
 async def cmd_tesis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show current thesis state from disk — no fresh API call.
-
-    Primary source: thesis_state.json (structured, populated when the LLM
-    returns parseable JSON after /reporte). Fallback: tesis_latest.md
-    (plain-text snapshot written unconditionally by /reporte — this saves us
-    when the structured JSON parse fails).
-    """
     state = _load_thesis()
     has_components = bool(state.get("components"))
 
@@ -330,7 +328,6 @@ async def cmd_tesis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         from modules.analysis import _thesis_context
         text = _thesis_context(state)
     else:
-        # Fallback to plain-text snapshot
         content, last_modified = load_tesis_latest()
         if content:
             sep = "\u2500" * 30
@@ -355,6 +352,7 @@ async def cmd_tesis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 @authorized
+@with_error_logging
 async def cmd_timeline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "\u23f3 Leyendo \u00faltimas 48h de tu X list...",
@@ -362,8 +360,6 @@ async def cmd_timeline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
     x_intel = await fetch_x_intel(hours=48, caller="timeline", app=context.application)
     banner = cache_banner_for_report()
-    # Fallback to cached timeline when live fetch fails (SpendCap, cooldown,
-    # kill switch, daily cap reached).
     if isinstance(x_intel, dict) and x_intel.get("status") != "ok":
         cached = get_cached_timeline()
         if cached and cached.get("status") == "ok":
@@ -381,6 +377,7 @@ async def cmd_timeline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 @authorized
+@with_error_logging
 async def cmd_alertas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _alerts_enabled["value"] = not _alerts_enabled["value"]
     estado = "ON \u2705" if _alerts_enabled["value"] else "OFF \U0001f6ab"
@@ -388,8 +385,8 @@ async def cmd_alertas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 @authorized
+@with_error_logging
 async def cmd_intel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show intel memory from last 24h (or custom hours)."""
     args = context.args or []
     hours = 24
     source_filter = None
@@ -403,69 +400,55 @@ async def cmd_intel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 @authorized
+@with_error_logging
 async def cmd_debug_x(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show X/Twitter connectivity diagnostics."""
     text = await debug_x_status()
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
+@with_error_logging
 async def cmd_x_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Round 15: live dashboard for X API mode + counters + cache state."""
     text = await format_x_status()
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
+@with_error_logging
 async def cmd_costos_x(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Round 15: cost dashboard with 7d / 30d breakdown by caller."""
     text = await format_x_costos()
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
+@with_error_logging
 async def cmd_intel_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Top 20 most active accounts in the X list over the last 24h."""
     await update.message.reply_text(
         "\u23f3 Leyendo la list X \u2014 top 20 cuentas \u00faltimas 24h...",
         reply_markup=MAIN_KEYBOARD,
     )
-    try:
-        text = await format_intel_sources(hours=24)
-    except Exception as exc:  # noqa: BLE001
-        log.exception("intel_sources failed")
-        text = f"\u274c /intel_sources fall\u00f3: {exc}"
+    text = await format_intel_sources(hours=24)
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
+@with_error_logging
 async def cmd_providers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show LLM provider status dashboard with cost tracking."""
     text = format_provider_status()
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
+@with_error_logging
 async def cmd_flywheel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\u23f3 Calculando flywheel pair trade...", reply_markup=MAIN_KEYBOARD)
-    try:
-        text = await compute_flywheel()
-    except Exception as exc:  # noqa: BLE001
-        log.exception("flywheel failed")
-        text = f"\u274c /flywheel fall\u00f3: {exc}"
+    text = await compute_flywheel()
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
+@with_error_logging
 async def cmd_debug_flywheel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Dump raw HyperLend reserve rates — diagnostic for /flywheel matching.
-
-    Gated by DEBUG_MODE=true env var. Shows every reserve's canonical symbol,
-    raw chain symbol (from on-chain symbol() call), underlying asset address,
-    borrow/supply APR+APY, and deprecated flag. Use this when /flywheel
-    reports unexpected "no disponible en pool" entries to verify the
-    address→symbol map is in sync with the live protocol.
-    """
     if os.getenv("DEBUG_MODE", "").strip().lower() != "true":
         await update.message.reply_text(
             "\u26a0\ufe0f /debug_flywheel est\u00e1 deshabilitado. Set "
@@ -477,16 +460,7 @@ async def cmd_debug_flywheel(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(
         "\u23f3 Dump de reservas HyperLend...", reply_markup=MAIN_KEYBOARD
     )
-    try:
-        payload = await fetch_reserve_rates(force=True)
-    except Exception as exc:  # noqa: BLE001
-        log.exception("debug_flywheel fetch failed")
-        await send_long_message(
-            update, f"\u274c fetch_reserve_rates fall\u00f3: {exc}",
-            reply_markup=MAIN_KEYBOARD,
-        )
-        return
-
+    payload = await fetch_reserve_rates(force=True)
     if payload.get("status") != "ok":
         err = payload.get("error") or "unknown"
         await send_long_message(
@@ -502,7 +476,6 @@ async def cmd_debug_flywheel(update: Update, context: ContextTypes.DEFAULT_TYPE)
     lines.append(f"Fetched: {ts}  (cache bypass)")
     lines.append(f"Reserves: {len(rates_map)}")
     lines.append("\u2500" * 40)
-    # Sort deprecated last, primary by APY ASC within each group
     items = list(rates_map.values())
     items.sort(key=lambda v: (bool(v.get("deprecated")), float(v.get("apy_borrow") or 0.0)))
     for v in items:
@@ -526,49 +499,31 @@ async def cmd_debug_flywheel(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 @authorized
+@with_error_logging
 async def cmd_liqcalc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\u23f3 Calculando matriz de liquidaci\u00f3n...", reply_markup=MAIN_KEYBOARD)
-    try:
-        text = await compute_liq_matrix()
-    except Exception as exc:  # noqa: BLE001
-        log.exception("liqcalc failed")
-        text = f"\u274c /liqcalc fall\u00f3: {exc}"
+    text = await compute_liq_matrix()
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
+@with_error_logging
 async def cmd_kill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\u23f3 Evaluando kill scenarios...", reply_markup=MAIN_KEYBOARD)
-    try:
-        text = await compute_kill_scenarios()
-    except Exception as exc:  # noqa: BLE001
-        log.exception("kill scenarios failed")
-        text = f"\u274c /kill fall\u00f3: {exc}"
+    text = await compute_kill_scenarios()
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
+@with_error_logging
 async def cmd_ciclo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Trade del Ciclo status (manual Blofin, sin API)."""
-    try:
-        text = render_cycle_status()
-    except Exception as exc:  # noqa: BLE001
-        log.exception("ciclo failed")
-        text = f"\u274c /ciclo fall\u00f3: {exc}"
+    text = render_cycle_status()
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
+@with_error_logging
 async def cmd_ciclo_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Edit fund_state.TRADE_DEL_CICLO_* constants from Telegram.
-
-    Usage examples:
-        /ciclo_update OPEN 77000
-        /ciclo_update CLOSED
-
-    Writes to fund_state.py, commits with bot identity, and pushes to master
-    so Railway redeploys automatically (requires GITHUB_TOKEN env var).
-    """
     args = context.args or []
     try:
         status, entry = parse_cycle_update_args(args)
@@ -582,15 +537,7 @@ async def cmd_ciclo_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         + "...",
         reply_markup=MAIN_KEYBOARD,
     )
-    try:
-        result = apply_cycle_update(status, entry)
-    except Exception as exc:  # noqa: BLE001
-        log.exception("ciclo_update failed")
-        await update.message.reply_text(
-            f"\u274c /ciclo_update fall\u00f3: {exc}", reply_markup=MAIN_KEYBOARD,
-        )
-        return
-
+    result = apply_cycle_update(status, entry)
     icon = "\u2705" if result.get("ok") else "\u274c"
     pushed = "pushed" if result.get("pushed") else "NO pushed"
     text = (
@@ -602,14 +549,9 @@ async def cmd_ciclo_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 @authorized
+@with_error_logging
 async def cmd_dca(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show BCD DCA plan + current prices + which zones are active right now.
-
-    Round 13: no arguments. Muestra los 4 tranches por asset con su status
-    computado sobre el precio spot actual (BTC/ETH/HYPE). Útil como sanity
-    check antes de que las alertas automáticas disparen.
-    """
-    from modules.alerts import _dca_alerted_within_window  # runtime peek
+    from modules.alerts import _dca_alerted_within_window
     from modules.alerts import _load_state as load_alert_state
     state = load_alert_state()
     lines = ["\U0001f3af PLAN DCA TRAMIFICADO BCD", "\u2500" * 40]
@@ -665,6 +607,7 @@ async def cmd_dca(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 @authorized
+@with_error_logging
 async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = context.args or []
     if args and args[0].lower() == "ciclo":
@@ -685,15 +628,12 @@ async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text(f"\u274c {exc}", reply_markup=MAIN_KEYBOARD)
         return
 
-    try:
-        text = pnl_tracker.build_summary()
-    except Exception as exc:  # noqa: BLE001
-        log.exception("pnl failed")
-        text = f"\u274c /pnl fall\u00f3: {exc}"
+    text = pnl_tracker.build_summary()
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
+@with_error_logging
 async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = context.args or []
     if args and args[0].lower() == "add":
@@ -708,13 +648,62 @@ async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text(f"\u274c {exc}", reply_markup=MAIN_KEYBOARD)
         return
 
-    try:
-        entries = position_log.last_n(20)
-        text = position_log.format_log(entries)
-    except Exception as exc:  # noqa: BLE001
-        log.exception("log failed")
-        text = f"\u274c /log fall\u00f3: {exc}"
+    entries = position_log.last_n(20)
+    text = position_log.format_log(entries)
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+# ─── Round 16 new commands ───────────────────────────────────────────────────
+
+
+@authorized
+@with_error_logging
+async def cmd_version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Round 16: show commit SHA, deploy ID, uptime, providers status."""
+    text = format_version_block(commands_count=len(COMMANDS))
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_errors(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Round 16: last 20 captured errors from errors_log SQLite table."""
+    text = format_recent_errors(limit=20)
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_metrics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Round 16: 24h health dashboard (errors, llm cost, x api, db size)."""
+    text = format_metrics()
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_test_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Round 16: fire a test alert through the alerts pipeline."""
+    msg = (
+        "\U0001f9ea TEST ALERT \u2014 sistema de alertas operativo.\n"
+        f"Timestamp UTC: {datetime.now(timezone.utc).isoformat()}\n"
+        "Si recibís este mensaje, el canal funciona OK."
+    )
+    if TELEGRAM_CHAT_ID:
+        await send_bot_message(context.application.bot, TELEGRAM_CHAT_ID, msg)
+    await update.message.reply_text("\u2705 Test alert enviado.", reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_reload_commands(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Round 16: re-sync command list with Telegram (BotFather)."""
+    n = await sync_commands_with_telegram(context.application)
+    await update.message.reply_text(
+        f"\U0001f504 Comandos re-sincronizados con Telegram.\n"
+        f"Total registrados: {n} (visibles en autocompletado).",
+        reply_markup=MAIN_KEYBOARD,
+    )
 
 
 # ─── Scheduler jobs ──────────────────────────────────────────────────────────
@@ -730,7 +719,6 @@ async def _alert_job(application: Application) -> None:
 
 
 async def _intel_processor_job() -> None:
-    """Scheduled job: process pending intel items via Gemini free."""
     try:
         count = await process_pending_intel(limit=50)
         if count > 0:
@@ -740,15 +728,49 @@ async def _intel_processor_job() -> None:
 
 
 async def _x_timeline_cache_job(application: Application | None = None) -> None:
-    """Scheduled job: refresh the X list timeline cache every N hours.
-
-    Round 12: receives the Application so poll_and_cache_timeline can fire
-    a Telegram cost alert when the 7d projection exceeds the threshold.
-    """
     try:
         await poll_and_cache_timeline(app=application)
     except Exception:  # noqa: BLE001
         log.exception("X timeline cache job failed")
+
+
+async def _backup_job() -> None:
+    """Round 16: nightly SQLite backup."""
+    try:
+        result = await backup_sqlite()
+        log.info("Backup job: %s", result)
+    except Exception:  # noqa: BLE001
+        log.exception("Backup job failed")
+
+
+async def _weekly_cleanup_job() -> None:
+    """Round 16: weekly purge of old rows + VACUUM."""
+    try:
+        deleted = cleanup_sqlite_weekly(days=90)
+        errs = errors_cleanup(days=90)
+        log.info("Weekly cleanup: rows=%s errors_log=%s", deleted, errs)
+    except Exception:  # noqa: BLE001
+        log.exception("Weekly cleanup failed")
+
+
+# ─── BotFather sync ──────────────────────────────────────────────────────────
+
+
+async def sync_commands_with_telegram(application: Application) -> int:
+    """Push the canonical command list to BotFather so they appear in autocomplete.
+
+    Returns the number of commands registered. Idempotent — Telegram replaces
+    the list each call. Failure is logged but never blocks startup.
+    """
+    payload = telegram_command_payload()
+    tg_commands = [TGBotCommand(cmd, desc) for cmd, desc in payload]
+    try:
+        await application.bot.set_my_commands(tg_commands)
+        log.info("\u2705 Sync %d comandos con Telegram (BotFather autocomplete)", len(tg_commands))
+        return len(tg_commands)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("\u274c set_my_commands fall\u00f3: %s", exc)
+        return 0
 
 
 # ─── Lifecycle hooks ─────────────────────────────────────────────────────────
@@ -756,6 +778,27 @@ async def _x_timeline_cache_job(application: Application | None = None) -> None:
 
 async def post_init(application: Application) -> None:
     global _telethon_ok
+
+    # Round 16: validate handler/command coherence (loud warning, not fatal)
+    registered_names = {h.command for h in COMMANDS}  # purely structural — no asserts
+    # The actual runtime check happens via main(): we record handler names there.
+    issues = application.bot_data.get("validate_issues", [])
+    if issues:
+        log.warning("⚠️ commands_registry validation issues: %s", issues)
+
+    # Round 16: sync to BotFather (autocomplete bar)
+    if os.getenv("COMMANDS_AUTO_SYNC", "true").strip().lower() != "false":
+        await sync_commands_with_telegram(application)
+    else:
+        log.info("COMMANDS_AUTO_SYNC=false → skipping BotFather sync")
+
+    # Round 16: start aiohttp /health server
+    try:
+        await start_health_server()
+    except Exception:  # noqa: BLE001
+        log.exception("health server start failed (non-fatal)")
+
+    # Telethon
     try:
         client = await get_telethon()
         if client is None:
@@ -778,7 +821,6 @@ async def post_init(application: Application) -> None:
             max_instances=1,
             coalesce=True,
         )
-        # Intel processor — runs every 30 min, parses pending intel via Gemini free
         scheduler.add_job(
             _intel_processor_job,
             "interval",
@@ -787,15 +829,6 @@ async def post_init(application: Application) -> None:
             max_instances=1,
             coalesce=True,
         )
-        # X list timeline cache — Round 15 (Apr 27 2026): scheduler is now
-        # OPT-IN (default off). Pre-Round 15 it ran every 4h regardless,
-        # which produced ~6 fetches/day automatically + every /reporte that
-        # raced past the cooldown window. Net effect: $70+/7d cost overrun.
-        # Round 15 strategy: only /reporte triggers a live fetch. Each fetch
-        # is gated by X_LIVE_ENABLED + 2h cooldown + 15/day cap. The
-        # in-memory cache is mirrored to SQLite so redeploys don't wipe it.
-        # To reactivate the periodic refresh, set X_SCHEDULER_ENABLED=true
-        # in Railway Variables (no redeploy needed — picked up at next boot).
         if X_SCHEDULER_ENABLED:
             x_cache_hours = float(os.getenv("X_CACHE_INTERVAL_HOURS", "6"))
             scheduler.add_job(
@@ -817,10 +850,34 @@ async def post_init(application: Application) -> None:
                 "X timeline cache scheduler DISABLED (Round 15 default). "
                 "Set X_SCHEDULER_ENABLED=true to re-enable."
             )
+
+        # Round 16: nightly SQLite backup at 03:00 UTC
+        scheduler.add_job(
+            _backup_job,
+            "cron",
+            hour=3,
+            minute=0,
+            id="sqlite_backup",
+            max_instances=1,
+            coalesce=True,
+        )
+        # Round 16: weekly cleanup Sundays at 04:00 UTC
+        scheduler.add_job(
+            _weekly_cleanup_job,
+            "cron",
+            day_of_week="sun",
+            hour=4,
+            minute=0,
+            id="sqlite_cleanup",
+            max_instances=1,
+            coalesce=True,
+        )
+
         scheduler.start()
         application.bot_data["scheduler"] = scheduler
         log.info(
-            "Scheduler started: alerts %dmin, intel processor 30min, X scheduler %s.",
+            "Scheduler started: alerts %dmin, intel processor 30min, X scheduler %s, "
+            "backup 03:00 UTC daily, cleanup Sun 04:00 UTC.",
             POLL_INTERVAL_MIN,
             "ON" if X_SCHEDULER_ENABLED else "OFF",
         )
@@ -837,10 +894,48 @@ async def post_shutdown(application: Application) -> None:
     sched = application.bot_data.get("scheduler")
     if sched:
         sched.shutdown(wait=False)
+    try:
+        await stop_health_server()
+    except Exception:  # noqa: BLE001
+        log.exception("health server stop failed")
     await stop_telethon()
 
 
 # ─── Main ────────────────────────────────────────────────────────────────────
+
+
+# Mapping (command → handler) — used both for registration and validation.
+HANDLER_MAP = {
+    "start": cmd_start,
+    "help": cmd_start,
+    "posiciones": cmd_posiciones,
+    "hf": cmd_hf,
+    "reporte": cmd_reporte,
+    "tesis": cmd_tesis,
+    "timeline": cmd_timeline,
+    "alertas": cmd_alertas,
+    "intel": cmd_intel,
+    "debug_x": cmd_debug_x,
+    "x_status": cmd_x_status,
+    "costos_x": cmd_costos_x,
+    "intel_sources": cmd_intel_sources,
+    "providers": cmd_providers,
+    "flywheel": cmd_flywheel,
+    "debug_flywheel": cmd_debug_flywheel,
+    "liqcalc": cmd_liqcalc,
+    "kill": cmd_kill,
+    "ciclo": cmd_ciclo,
+    "ciclo_update": cmd_ciclo_update,
+    "dca": cmd_dca,
+    "pnl": cmd_pnl,
+    "log": cmd_log,
+    # Round 16
+    "version": cmd_version,
+    "errors": cmd_errors,
+    "metrics": cmd_metrics,
+    "test_alerts": cmd_test_alerts,
+    "reload_commands": cmd_reload_commands,
+}
 
 
 def main() -> None:
@@ -859,31 +954,24 @@ def main() -> None:
         .build()
     )
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help", cmd_start))
-    app.add_handler(CommandHandler("posiciones", cmd_posiciones))
-    app.add_handler(CommandHandler("hf", cmd_hf))
-    app.add_handler(CommandHandler("reporte", cmd_reporte))
-    app.add_handler(CommandHandler("tesis", cmd_tesis))
-    app.add_handler(CommandHandler("timeline", cmd_timeline))
-    app.add_handler(CommandHandler("alertas", cmd_alertas))
-    app.add_handler(CommandHandler("intel", cmd_intel))
-    app.add_handler(CommandHandler("debug_x", cmd_debug_x))
-    app.add_handler(CommandHandler("x_status", cmd_x_status))
-    app.add_handler(CommandHandler("costos_x", cmd_costos_x))
-    app.add_handler(CommandHandler("intel_sources", cmd_intel_sources))
-    app.add_handler(CommandHandler("providers", cmd_providers))
-    app.add_handler(CommandHandler("flywheel", cmd_flywheel))
-    app.add_handler(CommandHandler("debug_flywheel", cmd_debug_flywheel))
-    app.add_handler(CommandHandler("liqcalc", cmd_liqcalc))
-    app.add_handler(CommandHandler("kill", cmd_kill))
-    app.add_handler(CommandHandler("ciclo", cmd_ciclo))
-    app.add_handler(CommandHandler("ciclo_update", cmd_ciclo_update))
-    app.add_handler(CommandHandler("dca", cmd_dca))
-    app.add_handler(CommandHandler("pnl", cmd_pnl))
-    app.add_handler(CommandHandler("log", cmd_log))
+    # Register every handler from the mapping
+    registered_handler_names: set[str] = set()
+    for cmd_name, handler in HANDLER_MAP.items():
+        app.add_handler(CommandHandler(cmd_name, handler))
+        # Strip wrapper layers to get the actual function name
+        underlying = handler
+        while hasattr(underlying, "__wrapped__"):
+            underlying = underlying.__wrapped__
+        registered_handler_names.add(underlying.__name__)
 
-    log.info("Fondo Black Cat bot starting...")
+    # Validate against COMMANDS registry (loud warning if drift)
+    issues = validate_commands_match_handlers(registered_handler_names)
+    if issues:
+        log.warning("⚠️ commands_registry drift detected: %s", issues)
+    app.bot_data["validate_issues"] = issues
+
+    log.info("Fondo Black Cat bot starting (Round 16) — %d handlers, %d in registry",
+             len(HANDLER_MAP), len(COMMANDS))
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
