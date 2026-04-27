@@ -59,6 +59,9 @@ log = logging.getLogger(__name__)
 # Ns" badge instead of going blank.
 _SNAPSHOT_CACHE: dict[str, Any] = {"snap": None, "ts": 0.0}
 _SNAPSHOT_LOCK: asyncio.Lock | None = None
+# Background revalidation task. The stale branch fires-and-forgets a
+# refresh and returns last-good immediately so user requests never block.
+_BG_REFRESH_TASK: asyncio.Task | None = None
 
 SNAPSHOT_TTL_SEC = float(
     os.getenv("DASHBOARD_CACHE_FRESH_TTL_SECONDS", "45")
@@ -177,6 +180,78 @@ def _spot_usd_value(spot_balances: list[dict[str, Any]],
     return total
 
 
+async def _do_blocking_fetch(timeout_sec: float, cached_fallback: PortfolioSnapshot | None
+                              ) -> PortfolioSnapshot:
+    """Blocking fetch path. Used by force_refresh=True and cold-start.
+
+    On success: populate cache, return fresh snapshot.
+    On failure: return cached_fallback (tagged stale) if provided, else
+    a loading placeholder. The cache is left untouched on failure so the
+    next request still gets the last-good snapshot.
+    """
+    global _SNAPSHOT_LOCK
+    if _SNAPSHOT_LOCK is None:
+        _SNAPSHOT_LOCK = asyncio.Lock()
+    try:
+        async with asyncio.timeout(timeout_sec):
+            async with _SNAPSHOT_LOCK:
+                # Re-check inside lock: a concurrent caller may have just refreshed.
+                cached_inside: PortfolioSnapshot | None = _SNAPSHOT_CACHE.get("snap")
+                cached_inside_ts: float = _SNAPSHOT_CACHE.get("ts") or 0.0
+                if (
+                    cached_inside is not None
+                    and (time.time() - cached_inside_ts) < SNAPSHOT_TTL_SEC
+                ):
+                    cached_inside.is_fresh = True
+                    return cached_inside
+                snap = await _build_portfolio_snapshot_inner()
+                snap.built_at_ts = time.time()
+                snap.is_fresh = True
+                snap.fetch_attempts = 1
+                snap.last_error = None
+                _SNAPSHOT_CACHE["snap"] = snap
+                _SNAPSHOT_CACHE["ts"] = snap.built_at_ts
+                return snap
+    except Exception as exc:  # noqa: BLE001
+        err_msg = type(exc).__name__ + (f": {exc}" if str(exc) else "")
+        if cached_fallback is not None:
+            stale_age = time.time() - (_SNAPSHOT_CACHE.get("ts") or 0.0)
+            log.warning(
+                "Snapshot refresh failed (timeout=%.0fs, age=%.0fs, err=%s) — last-good stays in cache.",
+                timeout_sec, stale_age, err_msg,
+            )
+            cached_fallback.is_fresh = False
+            cached_fallback.fetch_attempts = (cached_fallback.fetch_attempts or 1) + 1
+            cached_fallback.last_error = err_msg[:200]
+            return cached_fallback
+        log.error("Cold-start snapshot fetch failed: %s", err_msg)
+        return _make_loading_placeholder(error=err_msg[:200])
+
+
+async def _background_revalidate() -> None:
+    """Fire-and-forget refresh kicked off by a stale cache hit. The
+    blocking timeout is the cold-start one (longer) because we're
+    decoupled from the user request — taking 15-25s here is fine, the
+    user already got their stale page back."""
+    try:
+        await _do_blocking_fetch(COLD_START_TIMEOUT_SEC, cached_fallback=None)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Background revalidate failed (suppressed): %s", exc)
+
+
+def _kick_background_refresh() -> None:
+    """Schedule a background revalidation if not already running."""
+    global _BG_REFRESH_TASK
+    if _BG_REFRESH_TASK is not None and not _BG_REFRESH_TASK.done():
+        return  # one in-flight refresh is plenty
+    try:
+        loop = asyncio.get_event_loop()
+        _BG_REFRESH_TASK = loop.create_task(_background_revalidate())
+    except RuntimeError:
+        # No running loop (shouldn't happen inside aiohttp/PTB), bail silently
+        log.debug("No running event loop — skipping background revalidate")
+
+
 async def build_portfolio_snapshot(force_refresh: bool = False) -> PortfolioSnapshot:
     """Stale-while-revalidate snapshot getter.
 
@@ -184,16 +259,18 @@ async def build_portfolio_snapshot(force_refresh: bool = False) -> PortfolioSnap
 
     1. **Cache fresh** (age < ``SNAPSHOT_TTL_SEC``): return cache as-is,
        no fetch.
-    2. **Cache stale-but-present** (age >= TTL, snapshot exists): try a
-       short-timeout refresh. On success, replace the cache. On failure,
-       return the *last-good* snapshot tagged ``is_fresh=False``. The
-       dashboard renders a "stale Ns" badge but the data is still there.
-    3. **Cache empty (cold start)**: blocking fetch with a longer timeout
-       (200+ RPC calls). On success, populate cache. On failure, return a
-       placeholder snapshot the dashboard renders as a loading screen.
+    2. **Cache stale-but-present** (age >= TTL, snapshot exists): kick off
+       a *background* revalidation task and return the last-good snapshot
+       *immediately* tagged ``is_fresh=False``. User requests never block
+       on a refresh — they always get sub-second response.
+    3. **Cache empty (cold start)**: blocking fetch with the longer
+       cold-start timeout. On failure, returns a loading placeholder.
 
-    ``force_refresh=True`` always tries a fetch but still falls back to
-    cache on failure (never returns an empty snapshot when one is cached).
+    ``force_refresh=True`` does a *blocking* refresh with cold-start
+    timeout, falling back to the cached snapshot on failure (never
+    returns empty when a cache exists). This is what the proactive
+    scheduler job uses, so the cache stays warm even when individual
+    refreshes take 15-20s under RPC pressure.
     """
     global _SNAPSHOT_LOCK
     if _SNAPSHOT_LOCK is None:
@@ -204,79 +281,29 @@ async def build_portfolio_snapshot(force_refresh: bool = False) -> PortfolioSnap
     cached_ts: float = _SNAPSHOT_CACHE.get("ts") or 0.0
     age = now - cached_ts if cached_ts else float("inf")
 
+    # force_refresh path: blocking fetch (used by the proactive scheduler).
+    if force_refresh:
+        return await _do_blocking_fetch(COLD_START_TIMEOUT_SEC, cached_fallback=cached)
+
     # Branch 1: cache fresh — fast path, no fetch.
-    if not force_refresh and cached is not None and age < SNAPSHOT_TTL_SEC:
-        # Re-stamp freshness flag (could have been flipped to False by an
-        # earlier failed refresh attempt that ran inside the lock).
+    if cached is not None and age < SNAPSHOT_TTL_SEC:
         cached.is_fresh = True
         return cached
 
-    # Branch 2: cache stale-but-present — best-effort refresh with short
-    # timeout. Falls back to last-good snapshot on any failure.
+    # Branch 2: cache stale-but-present — background revalidate, return
+    # last-good immediately. Zero blocking on user requests.
     if cached is not None:
-        try:
-            async with asyncio.timeout(STALE_REFRESH_TIMEOUT_SEC):
-                async with _SNAPSHOT_LOCK:
-                    # Re-check after acquiring the lock; a concurrent caller
-                    # may already have refreshed.
-                    new_cached: PortfolioSnapshot | None = _SNAPSHOT_CACHE.get("snap")
-                    new_ts: float = _SNAPSHOT_CACHE.get("ts") or 0.0
-                    if (
-                        not force_refresh
-                        and new_cached is not None
-                        and (time.time() - new_ts) < SNAPSHOT_TTL_SEC
-                    ):
-                        new_cached.is_fresh = True
-                        return new_cached
-
-                    snap = await _build_portfolio_snapshot_inner()
-                    snap.built_at_ts = time.time()
-                    snap.is_fresh = True
-                    snap.fetch_attempts = 1
-                    snap.last_error = None
-                    _SNAPSHOT_CACHE["snap"] = snap
-                    _SNAPSHOT_CACHE["ts"] = snap.built_at_ts
-                    return snap
-        except (asyncio.TimeoutError, Exception) as exc:  # noqa: BLE001
-            stale_age = time.time() - cached_ts
-            log.warning(
-                "Snapshot refresh failed (age=%.0fs, err=%s) — serving last-good stale snapshot.",
-                stale_age,
-                exc,
+        _kick_background_refresh()
+        cached.is_fresh = False
+        if age > STALE_MAX_AGE_SEC:
+            log.error(
+                "Snapshot stale > %.0fs (age=%.0fs) — proactive refresh stuck under RPC pressure.",
+                STALE_MAX_AGE_SEC, age,
             )
-            cached.is_fresh = False
-            cached.fetch_attempts = (cached.fetch_attempts or 1) + 1
-            cached.last_error = str(exc)[:200]
-            if stale_age > STALE_MAX_AGE_SEC:
-                log.error(
-                    "Snapshot stale > %.0fs (age=%.0fs) — RPC issues persist.",
-                    STALE_MAX_AGE_SEC,
-                    stale_age,
-                )
-            return cached
+        return cached
 
-    # Branch 3: cache empty — cold start, blocking fetch with longer
-    # timeout (200+ RPC calls on first hit are expensive).
-    try:
-        async with asyncio.timeout(COLD_START_TIMEOUT_SEC):
-            async with _SNAPSHOT_LOCK:
-                cached2: PortfolioSnapshot | None = _SNAPSHOT_CACHE.get("snap")
-                cached2_ts: float = _SNAPSHOT_CACHE.get("ts") or 0.0
-                if cached2 is not None and (time.time() - cached2_ts) < SNAPSHOT_TTL_SEC:
-                    cached2.is_fresh = True
-                    return cached2
-
-                snap = await _build_portfolio_snapshot_inner()
-                snap.built_at_ts = time.time()
-                snap.is_fresh = True
-                snap.fetch_attempts = 1
-                snap.last_error = None
-                _SNAPSHOT_CACHE["snap"] = snap
-                _SNAPSHOT_CACHE["ts"] = snap.built_at_ts
-                return snap
-    except Exception as exc:  # noqa: BLE001
-        log.error("Cold-start snapshot fetch failed: %s", exc)
-        return _make_loading_placeholder(error=str(exc)[:200])
+    # Branch 3: cache empty — cold start. Must block.
+    return await _do_blocking_fetch(COLD_START_TIMEOUT_SEC, cached_fallback=None)
 
 
 def _make_loading_placeholder(error: str = "") -> PortfolioSnapshot:
