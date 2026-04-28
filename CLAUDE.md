@@ -87,6 +87,14 @@ Reglas:
 - **2026-04-13** — Umbral de borrow subido de $10 a $50 por pedido del usuario. Se agregó manual de procedimientos y regla de auto-update de memoria en cada mensaje.
 - **2026-04-14** — Umbral TP/SL subido de $1 a $50. Umbral fondos disponibles subido de $10 a $50. Ambos por pedido del usuario para eliminar falsas alertas.
 - **2026-04-15** — Build completo de **Fondo Black Cat Bot** (Python) en subdirectorio `fondo-blackcat-bot/`. Bot de Telegram en Python que actúa como analista personal del fondo: portfolio HyperLiquid (5 wallets), HyperLend on-chain (web3.py), market data (CoinGecko/CoinGlass/DefiLlama/F&G), token unlocks, Telethon intel de 24 canales, análisis con Claude Sonnet 4.5. Comandos: `/reporte`, `/posiciones`, `/hf`, `/tesis`, `/alertas`. Convive con el bot Node existente en el mismo repo. Reglas nuevas agregadas a "How Claude Should Work": omitir TODOS los permisos por default + reanudar automáticamente cuando se resetee el rate limit + revisar CLAUDE.md cada turno.
+- **2026-04-28** — **HOTFIX 4-bug en bot de alertas Pear Protocol** (Node, raíz del repo). Disparado por basket close 19:07 UTC (6 SHORTs, wallet 0xc7AE) donde Telegram reportó datos incorrectos (BLUR +$47.69 vs real +$406.94, ARB con TP+SL ambos disparados, mensajes duplicados, sin resumen total). Refactor unificado en `src/closeAlerts.js` + `src/monitor.js`:
+  - **BUG 1 (PnL)**: `aggregateClosePnl()` suma `closedPnl` de TODAS las fills desde `openedAt`, no solo la última. BLUR reportado correctamente como +$406.94.
+  - **BUG 2 (duplicados)**: `shouldSendAlert(wallet, coin)` dedup por minuto en cache 60s. Una sola alerta por cierre.
+  - **BUG 3 (TP+SL ambos)**: `classifyCloseReason()` retorna UN solo motivo (TAKE_PROFIT / STOP_LOSS / TRAILING_OR_MANUAL / MANUAL_CLOSE) usando match de exit_price con trigger_px (tolerancia 1%). ARB con TP $0.09761 y SL $0.16268, exit $0.1247 → resuelve a TRAILING_OR_MANUAL (ningún trigger matchea).
+  - **BUG 4 (resumen basket)**: `trackCloseForBasket()` detecta 3+ cierres en 5min y dispara summary consolidado tras debounce 30s. Formato: `🐱‍⬛ BASKET CLOSED — {wallet}` con PnL total + breakdown ordenado.
+  - El antiguo handler de TP/SL en `monitor.js` (que cargaba el último `recentFill.closedPnl`) y `notifyManualClose` (que duplicaba la alerta) FUERON REEMPLAZADOS por un único pase sobre `closedCoins` que clasifica razón + agrega PnL una sola vez.
+  - **Tests de regresión**: `src/closeAlerts.test.js` con 18 casos (node:test). Caso E2E replica el cierre 28-abr-19:07 exacto. Run: `node --test src/closeAlerts.test.js`.
+  - El umbral de $50 en TP/SL fue removido — el nuevo flujo solo alerta en cierres COMPLETOS (coin desaparece de positions), no en partial closes, así que no hay spam de dust.
 
 ## Fondo Black Cat Bot (Python) — `fondo-blackcat-bot/`
 - **Stack:** python-telegram-bot v21 + Telethon (userbot) + APScheduler + web3.py + Anthropic SDK

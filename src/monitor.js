@@ -1,4 +1,19 @@
-const { getAllChatIds, getWallets, getBorrowWallets, loadState, saveState, shortenAddress } = require('./store');
+const {
+  getAllChatIds,
+  getWallets,
+  getBorrowWallets,
+  loadState,
+  saveState,
+  shortenAddress,
+} = require('./store');
+const {
+  shouldSendAlert,
+  aggregateClosePnl,
+  classifyCloseReason,
+  trackCloseForBasket,
+  formatCloseAlert,
+  formatBasketSummary,
+} = require('./closeAlerts');
 
 class PositionMonitor {
   constructor(hlApi, notifyFn, hlendApi = null) {
@@ -35,18 +50,23 @@ class PositionMonitor {
         try {
           await this.checkWallet(chatId, wallet, state, silent);
         } catch (error) {
-          console.error(`Error checking wallet ${wallet.label} for chat ${chatId}:`, error.message);
+          console.error(
+            `Error checking wallet ${wallet.label} for chat ${chatId}:`,
+            error.message
+          );
         }
       }
 
-      // HyperLend borrow wallets
       if (this.hlendApi) {
         const borrowWallets = getBorrowWallets(chatId);
         for (const wallet of borrowWallets) {
           try {
             await this.checkBorrowWallet(chatId, wallet, state, silent);
           } catch (error) {
-            console.error(`Error checking HyperLend wallet ${wallet.label} for chat ${chatId}:`, error.message);
+            console.error(
+              `Error checking HyperLend wallet ${wallet.label} for chat ${chatId}:`,
+              error.message
+            );
           }
         }
       }
@@ -66,17 +86,22 @@ class PositionMonitor {
     const data = await this.hlendApi.getAccountData(addr);
     const available = data.availableBorrowsUsd;
 
-    const crossedThreshold = available >= this.minBorrowAvailable && bs.hadBorrowAvailable === false;
+    const crossedThreshold =
+      available >= this.minBorrowAvailable && bs.hadBorrowAvailable === false;
     if (crossedThreshold && !silent) {
       const hf = data.healthFactor === Infinity ? '∞' : data.healthFactor.toFixed(2);
-      await this.notify(chatId, [
-        `🏦 *HyperLend — Borrow Available!*`, ``,
-        `📍 Wallet: ${label}`,
-        `💸 Available to borrow: $${available.toFixed(2)}`,
-        `🔒 Collateral: $${data.totalCollateralUsd.toFixed(2)}`,
-        `💳 Current debt: $${data.totalDebtUsd.toFixed(2)}`,
-        `❤️ Health factor: ${hf}`,
-      ].join('\n'));
+      await this.notify(
+        chatId,
+        [
+          `🏦 *HyperLend — Borrow Available!*`,
+          ``,
+          `📍 Wallet: ${label}`,
+          `💸 Available to borrow: $${available.toFixed(2)}`,
+          `🔒 Collateral: $${data.totalCollateralUsd.toFixed(2)}`,
+          `💳 Current debt: $${data.totalDebtUsd.toFixed(2)}`,
+          `❤️ Health factor: ${hf}`,
+        ].join('\n')
+      );
     }
     bs.hadBorrowAvailable = available >= this.minBorrowAvailable;
   }
@@ -95,143 +120,157 @@ class PositionMonitor {
     if (!ws.triggerOrders) ws.triggerOrders = {};
 
     const allPositions = this.hlApi.aggregatePositions(allStates);
-    const currentKeys = new Set(allPositions.map(p => `${p.coin}`));
+    const currentKeys = new Set(allPositions.map((p) => `${p.coin}`));
 
-    // Detect newly opened positions
+    // 1. Detect newly opened positions
     for (const pos of allPositions) {
       const key = `${pos.coin}`;
       if (!ws.positions[key]) {
         ws.positions[key] = {
-          coin: pos.coin, dex: pos.dex, dexDisplay: pos.dexDisplay || pos.dex,
-          side: pos.side, size: pos.size, entryPrice: pos.entryPrice,
-          openedAt: new Date().toISOString()
+          coin: pos.coin,
+          dex: pos.dex,
+          dexDisplay: pos.dexDisplay || pos.dex,
+          side: pos.side,
+          size: pos.size,
+          entryPrice: pos.entryPrice,
+          openedAt: new Date().toISOString(),
         };
         if (!silent) {
-          const dexTag = pos.dex !== 'Native' ? ` _(${pos.dexDisplay || pos.dex})_` : '';
-          await this.notify(chatId, [
-            `📈 *New position opened*`, ``,
-            `📍 Wallet: ${label}`,
-            `🪙 ${pos.coin}${dexTag} ${pos.side}`,
-            `📏 Size: ${Math.abs(pos.size).toFixed(4)}`,
-            `💲 Entry: $${pos.entryPrice.toFixed(2)}`,
-            pos.leverage ? `⚡ Leverage: ${pos.leverage}x` : '',
-          ].filter(Boolean).join('\n'));
+          const dexTag =
+            pos.dex !== 'Native' ? ` _(${pos.dexDisplay || pos.dex})_` : '';
+          await this.notify(
+            chatId,
+            [
+              `📈 *New position opened*`,
+              ``,
+              `📍 Wallet: ${label}`,
+              `🪙 ${pos.coin}${dexTag} ${pos.side}`,
+              `📏 Size: ${Math.abs(pos.size).toFixed(4)}`,
+              `💲 Entry: $${pos.entryPrice.toFixed(2)}`,
+              pos.leverage ? `⚡ Leverage: ${pos.leverage}x` : '',
+            ]
+              .filter(Boolean)
+              .join('\n')
+          );
         }
       }
     }
 
-    // Check trigger orders (TP/SL)
+    // 2. Snapshot current trigger orders and find which disappeared per coin
     await this.hlApi.sleep(500);
     const currentTriggers = await this.hlApi.getAllTriggerOrders(addr);
-    const currentTriggerIds = new Set(currentTriggers.map(o => String(o.oid)));
+    const currentTriggerIds = new Set(currentTriggers.map((o) => String(o.oid)));
 
-    if (!silent) {
-      for (const [oid, oldOrder] of Object.entries(ws.triggerOrders)) {
-        if (!currentTriggerIds.has(oid)) {
-          const posKey = `${oldOrder.coin}`;
-          const positionStillOpen = currentKeys.has(posKey);
-          const isTP = oldOrder.orderType.includes('Take Profit');
-          const isSL = oldOrder.orderType.includes('Stop');
-
-          if (isTP || isSL) {
-            await this.hlApi.sleep(500);
-            const fills = await this.hlApi.getUserFills(addr);
-            const recentFill = fills?.filter(f => f.coin === oldOrder.coin)
-              .sort((a, b) => b.time - a.time)[0];
-
-            const closedPnl = recentFill ? parseFloat(recentFill.closedPnl || 0) : 0;
-
-            // Skip alert if PnL is less than $50 to avoid false/dust alerts
-            if (Math.abs(closedPnl) < 50) continue;
-
-            const pnlStr = closedPnl >= 0 ? `+$${closedPnl.toFixed(2)}` : `-$${Math.abs(closedPnl).toFixed(2)}`;
-            const pnlEmoji = closedPnl >= 0 ? '🟢' : '🔴';
-            const oldPos = ws.positions[posKey];
-            const dexTag = oldOrder.dex !== 'Native' ? ` _(${oldOrder.dexDisplay || oldOrder.dex})_` : '';
-            const typeLabel = isTP ? '🎯 *TAKE PROFIT hit!*' : '🛑 *STOP LOSS triggered!*';
-
-            await this.notify(chatId, [
-              typeLabel, ``,
-              `📍 Wallet: ${label}`,
-              `🪙 ${oldOrder.coin}${dexTag}`,
-              `${pnlEmoji} PnL: ${pnlStr}`,
-              oldPos?.entryPrice ? `💲 Entry: $${oldPos.entryPrice.toFixed(2)}` : '',
-              oldOrder.triggerPx ? `💲 Trigger: $${oldOrder.triggerPx}` : '',
-              !positionStillOpen ? `📋 Position fully closed` : `📋 Partial close (position still open)`,
-            ].filter(Boolean).join('\n'));
-          }
-        }
+    const disappearedTriggersByCoin = {};
+    for (const [oid, oldOrder] of Object.entries(ws.triggerOrders)) {
+      if (!currentTriggerIds.has(oid)) {
+        const c = oldOrder.coin;
+        if (!disappearedTriggersByCoin[c]) disappearedTriggersByCoin[c] = [];
+        disappearedTriggersByCoin[c].push(oldOrder);
       }
     }
 
-    // Update trigger orders
+    // Persist current triggers BEFORE handling closes (idempotent on retry)
     ws.triggerOrders = {};
     for (const o of currentTriggers) {
       ws.triggerOrders[String(o.oid)] = {
-        oid: o.oid, coin: o.coin, dex: o.dex, dexDisplay: o.dexDisplay || o.dex,
-        orderType: o.orderType, triggerPx: o.triggerPx,
-        triggerCondition: o.triggerCondition, side: o.side,
+        oid: o.oid,
+        coin: o.coin,
+        dex: o.dex,
+        dexDisplay: o.dexDisplay || o.dex,
+        orderType: o.orderType,
+        triggerPx: o.triggerPx,
+        triggerCondition: o.triggerCondition,
+        side: o.side,
       };
     }
 
-    // Detect manual closes
-    const closedKeys = Object.keys(ws.positions).filter(k => !currentKeys.has(k));
-    for (const key of closedKeys) {
-      const oldPos = ws.positions[key];
-      if (!silent) {
-        await this.notifyManualClose(chatId, addr, label, oldPos);
+    // 3. Detect closed coins (= disappeared from positions). ONE alert per coin
+    //    with reason classified from disappeared triggers and aggregated PnL
+    //    summed from ALL fills since the position was opened.
+    const closedCoins = Object.keys(ws.positions).filter((k) => !currentKeys.has(k));
+    let fills = null; // lazy
+
+    for (const coin of closedCoins) {
+      const oldPos = ws.positions[coin];
+      const dexTag =
+        oldPos && oldPos.dex && oldPos.dex !== 'Native'
+          ? ` _(${oldPos.dexDisplay || oldPos.dex})_`
+          : '';
+
+      if (!silent && shouldSendAlert(addr, coin)) {
+        if (fills === null) {
+          await this.hlApi.sleep(500);
+          fills = (await this.hlApi.getUserFills(addr)) || [];
+        }
+
+        const sinceMs = oldPos.openedAt
+          ? new Date(oldPos.openedAt).getTime()
+          : Date.now() - 7 * 24 * 60 * 60 * 1000;
+        const { pnl, exitPrice, fees } = aggregateClosePnl(fills, coin, sinceMs);
+
+        const reason = classifyCloseReason(
+          disappearedTriggersByCoin[coin] || [],
+          exitPrice
+        );
+
+        const msg = formatCloseAlert({ label, oldPos, pnl, exitPrice, reason, dexTag });
+        await this.notify(chatId, msg);
+
+        // Track for basket-close summary (3+ within 5 minutes)
+        trackCloseForBasket(
+          chatId,
+          addr,
+          label,
+          {
+            coin,
+            pnl,
+            fees,
+            side: oldPos.side,
+            entryPrice: oldPos.entryPrice,
+            exitPrice,
+            reason,
+          },
+          async (cId, _w, lbl, closes) => {
+            const summary = formatBasketSummary(lbl, closes);
+            await this.notify(cId, summary);
+          }
+        );
       }
-      delete ws.positions[key];
+
+      delete ws.positions[coin];
     }
 
-    // Update positions
+    // 4. Update positions for those still open (sizes / unrealized PnL / mark)
     for (const pos of allPositions) {
       ws.positions[`${pos.coin}`] = {
         ...ws.positions[`${pos.coin}`],
-        size: pos.size, unrealizedPnl: pos.unrealizedPnl, markPrice: pos.markPrice,
+        size: pos.size,
+        unrealizedPnl: pos.unrealizedPnl,
+        markPrice: pos.markPrice,
       };
     }
 
-    // Check funds
+    // 5. Funds-available alert (edge-triggered)
     const agg = this.hlApi.aggregateBalances(allStates);
     const available = agg.totalWithdrawable;
 
     if (available >= this.minAvailableBalance && ws.hadFunds === false) {
       if (!silent) {
-        await this.notify(chatId, [
-          `💰 *Funds available to trade!*`, ``,
-          `📍 Wallet: ${label}`,
-          `💵 Available: $${available.toFixed(2)}`,
-          `📊 Account value: $${agg.totalAccountValue.toFixed(2)}`,
-          `📈 Margin used: $${agg.totalMarginUsed.toFixed(2)}`,
-        ].join('\n'));
+        await this.notify(
+          chatId,
+          [
+            `💰 *Funds available to trade!*`,
+            ``,
+            `📍 Wallet: ${label}`,
+            `💵 Available: $${available.toFixed(2)}`,
+            `📊 Account value: $${agg.totalAccountValue.toFixed(2)}`,
+            `📈 Margin used: $${agg.totalMarginUsed.toFixed(2)}`,
+          ].join('\n')
+        );
       }
     }
     ws.hadFunds = available >= this.minAvailableBalance;
-  }
-
-  async notifyManualClose(chatId, addr, label, oldPos) {
-    await this.hlApi.sleep(500);
-    const fills = await this.hlApi.getUserFills(addr);
-    const recentFill = fills?.filter(f => f.coin === oldPos.coin)
-      .sort((a, b) => b.time - a.time)[0];
-    if (!recentFill) return;
-
-    const closedPnl = parseFloat(recentFill.closedPnl || 0);
-    if (closedPnl === 0) return;
-
-    const pnlStr = closedPnl >= 0 ? `+$${closedPnl.toFixed(2)}` : `-$${Math.abs(closedPnl).toFixed(2)}`;
-    const pnlEmoji = closedPnl >= 0 ? '🟢' : '🔴';
-    const dexTag = oldPos.dex && oldPos.dex !== 'Native' ? ` _(${oldPos.dexDisplay || oldPos.dex})_` : '';
-
-    await this.notify(chatId, [
-      `📋 *Position closed*`, ``,
-      `📍 Wallet: ${label}`,
-      `🪙 ${oldPos.coin}${dexTag} ${oldPos.side || ''}`,
-      `${pnlEmoji} PnL: ${pnlStr}`,
-      oldPos.entryPrice ? `💲 Entry: $${oldPos.entryPrice.toFixed(2)}` : '',
-      `💲 Close: $${parseFloat(recentFill.px).toFixed(2)}`,
-    ].filter(Boolean).join('\n'));
   }
 }
 
