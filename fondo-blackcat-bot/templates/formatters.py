@@ -50,12 +50,33 @@ def _fmt_hf(v: float | None) -> str:
 
 
 def _estimate_spot_usd(spot_balances: list[dict[str, Any]]) -> float:
-    """Estimate USD value of spot token balances."""
+    """Estimate USD value of spot tokens, EXCLUDING USDC.
+
+    ================================================================
+    CRITICAL: HYPERLIQUID UNIFIED ACCOUNT — DO NOT REMOVE
+    ================================================================
+    HyperLiquid unified spot+perp into a single account. The USDC
+    that backs an open basket appears in BOTH:
+      * clearinghouseState.marginSummary.accountValue  (perp equity)
+      * spotClearinghouseState.balances[USDC].total    (spot USDC)
+
+    NEVER sum both — it is the SAME USDC reported twice. The
+    authoritative wallet capital is ``accountValue`` (perp); from
+    spot we only add NON-USDC tokens.
+
+    Bug history: 2026-04-28 wallet 0xc7ae reported $11.6K (Perp
+    $5.8K + Spot $5.8K) when its real capital was $5.8K — a 2x
+    duplication of basket margin.
+    ================================================================
+    """
     total = 0.0
     for sb in spot_balances:
         coin = (sb.get("coin") or "").upper()
         amount = sb.get("total", 0) or 0
-        if coin in ("USDC", "USDH", "USDT", "DAI"):
+        # CRITICAL: skip USDC — already in perp accountValue (Unified Account).
+        if coin == "USDC":
+            continue
+        if coin in ("USDH", "USDT", "USDT0", "DAI"):
             total += amount
         else:
             # Use entry_ntl (cost basis) as rough USD estimate
@@ -194,6 +215,9 @@ def format_quick_positions(wallets: list[dict[str, Any]],
         d["_spot_usd"] = spot_usd
         d["_hl_collateral_usd"] = hl_coll
         d["_hl_debt_usd"] = hl_debt
+        d["_margin_used"] = d.get("total_margin_used") or 0.0
+        d["_withdrawable"] = d.get("withdrawable") or 0.0
+        d["_total_ntl_pos"] = d.get("total_ntl_pos") or 0.0
 
     # Sort wallets by total capital descending (dynamic ordering)
     wallets = sorted(wallets,
@@ -229,6 +253,9 @@ def format_quick_positions(wallets: list[dict[str, Any]],
         spot_usd = d.get("_spot_usd") or 0.0
         hl_coll = d.get("_hl_collateral_usd") or 0.0
         hl_debt = d.get("_hl_debt_usd") or 0.0
+        margin_used = d.get("_margin_used") or 0.0
+        withdrawable = d.get("_withdrawable") or 0.0
+        ntl_pos = d.get("_total_ntl_pos") or 0.0
         upnl_val = d.get("unrealized_pnl_total") or 0.0
         total_fund_capital += tc
         total_upnl += upnl_val
@@ -258,12 +285,15 @@ def format_quick_positions(wallets: list[dict[str, Any]],
         lines.append(f"  • {display_label} {short}")
         lines.append(f"    Capital Total: {_fmt_usd(tc)}")
 
-        # Breakdown only if multiple components have value
+        # Breakdown — Account Value already includes any USDC sitting in spot
+        # under HyperLiquid Unified Account, so "Spot" here only ever shows
+        # NON-USDC tokens (HYPE, kHYPE, etc.). See portfolio_snapshot.py for
+        # the full unified-account note.
         parts: list[str] = []
         if perp_eq > 0.01:
-            parts.append(f"Perp {_fmt_usd(perp_eq)}")
+            parts.append(f"Account Value {_fmt_usd(perp_eq)}")
         if spot_usd > 0.01:
-            parts.append(f"Spot {_fmt_usd(spot_usd)}")
+            parts.append(f"Spot non-USDC {_fmt_usd(spot_usd)}")
         if hl_coll > 0.01:
             parts.append(f"HL Coll {_fmt_usd(hl_coll)}")
         if hl_debt > 0.01:
@@ -272,6 +302,14 @@ def format_quick_positions(wallets: list[dict[str, Any]],
             lines.append(f"    ({' | '.join(parts)})")
         if upnl_val != 0:
             lines.append(f"    UPnL: {_fmt_usd(upnl_val)}")
+        # Show margin / withdrawable / leverage when there's an active perp position.
+        if ntl_pos > 50 or margin_used > 50:
+            lev = (ntl_pos / perp_eq) if perp_eq > 0.01 else 0.0
+            lines.append(
+                f"    Margin used: {_fmt_usd(margin_used)} | "
+                f"Withdrawable: {_fmt_usd(withdrawable)} | "
+                f"Notional: {_fmt_usd(ntl_pos)} (~{lev:.2f}x)"
+            )
         lines.append(f"    {pos_summary}")
 
         # Collect spot balances
@@ -338,16 +376,27 @@ def format_quick_positions(wallets: list[dict[str, Any]],
             else:
                 cost_basis_display = _fmt_usd(total_entry)
 
+            # Unified Account note: USDC shown here is the SAME asset already
+            # included in each wallet's "Account Value" line above. It is NOT
+            # additional capital. Render an explicit annotation so a reader
+            # never re-adds it mentally.
+            usdc_note = (
+                "  ⚠️ already in Account Value (Unified Account) — NOT additional capital"
+                if coin == "USDC" else ""
+            )
+
             if len(entries) == 1:
                 wallet_label = entries[0].get("_wallet_label", "")
                 lines.append(
                     f"  • {coin}: {total_amount:.4f} · {_fmt_usd(total_usd_now)} now "
                     f"(cost basis {cost_basis_display}) [{wallet_label}]"
+                    f"{usdc_note}"
                 )
             else:
                 lines.append(
                     f"  • {coin}: {total_amount:.4f} total · {_fmt_usd(total_usd_now)} now "
                     f"(cost basis {cost_basis_display})"
+                    f"{usdc_note}"
                 )
                 for e in entries:
                     amt = e.get("total", 0) or 0

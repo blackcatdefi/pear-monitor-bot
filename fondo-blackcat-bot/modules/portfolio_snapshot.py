@@ -4,10 +4,30 @@ Builds one structured snapshot using the SAME formulas as
 ``templates/formatters.format_quick_positions`` (which is what /reporte ends
 up showing under the hood):
 
-    capital_total_per_wallet = perp_account_value + spot_usd + hl_collateral_usd
+    capital_total_per_wallet = perp_account_value + spot_non_usdc_usd + hl_collateral_usd
 
 (Debt is reported as a separate line — it is **not** subtracted from capital,
 matching the way /reporte displays the consolidated portfolio.)
+
+================================================================
+CRITICAL: HYPERLIQUID UNIFIED ACCOUNT (do NOT remove this note)
+================================================================
+HyperLiquid unified SPOT and PERPETUALS into a single account. The USDC
+that backs an open basket appears in BOTH endpoints of the info API:
+
+  * ``clearinghouseState.marginSummary.accountValue``  (perp equity / margin)
+  * ``spotClearinghouseState.balances[USDC].total``    (spot USDC balance)
+
+NEVER sum both — it is the SAME USDC reported under two views.
+
+The authoritative source for a wallet's total capital is
+``clearinghouseState.marginSummary.accountValue``. From the spot endpoint we
+ONLY add NON-USDC tokens (HYPE, kHYPE, PEAR, USDH, USDT0, etc.) valued at
+current market price.
+
+This bug (2026-04-28) caused wallet 0xc7ae to be reported as $11.6K
+when its real capital was $5.8K — a 2x double-count of basket margin.
+================================================================
 
 Identifies, dynamically:
 
@@ -154,19 +174,28 @@ def _short(addr: str) -> str:
 
 def _spot_usd_value(spot_balances: list[dict[str, Any]],
                     prices: dict[str, Any]) -> float:
-    """Replicates templates.formatters._current_usd_value but aggregated.
+    """Sum spot USD value EXCLUDING USDC.
 
-    Order of preference per coin:
-      1. Stablecoins (USDC/USDH/USDT/USDT0/DAI) → amount 1:1
-      2. Live price from ``market.data.prices``
-      3. Entry notional (cost basis) as last-resort proxy
+    Why USDC is excluded: under HyperLiquid Unified Account, USDC sitting in
+    spot is the SAME asset already reported by ``clearinghouseState.marginSummary
+    .accountValue`` (which we use as ``perp_equity``). Adding it again here
+    double-counts the margin behind any open perp/basket position.
+
+    Other stablecoins (USDH, USDT, USDT0, DAI) are real on-chain spot tokens
+    and are *not* the unified-account collateral, so they are summed 1:1.
+
+    Non-stable coins use live price from ``market.data.prices`` with
+    entry-notional cost basis as last-resort proxy.
     """
     total = 0.0
     for sb in spot_balances or []:
         coin = (sb.get("coin") or "").upper()
         amount = float(sb.get("total") or 0)
         entry_ntl = float(sb.get("entry_ntl") or 0)
-        if coin in {"USDC", "USDH", "USDT", "USDT0", "DAI"}:
+        # CRITICAL: skip USDC — already in perp accountValue (Unified Account).
+        if coin == "USDC":
+            continue
+        if coin in {"USDH", "USDT", "USDT0", "DAI"}:
             total += amount
             continue
         # kHYPE → HYPE proxy

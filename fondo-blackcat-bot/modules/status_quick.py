@@ -138,7 +138,7 @@ async def build_status_block() -> str:
     lines.append(sep)
     lines.append(f"💰 Capital total: {_fmt_usd(total_capital)}")
     lines.append(f"   HL collateral: {_fmt_usd(hl_collateral_usd)} | debt: {_fmt_usd(hl_debt_usd)}")
-    lines.append(f"   Perp account value: {_fmt_usd(perp_account_value)}")
+    lines.append(f"   Account Value (perp+USDC unif.): {_fmt_usd(perp_account_value)}")
     lines.append(f"📊 UPnL perp: {_fmt_signed_usd(perp_unrealized)}")
     lines.append("")
     if flywheel_hf is not None:

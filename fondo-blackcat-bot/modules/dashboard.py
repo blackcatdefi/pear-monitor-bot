@@ -319,8 +319,8 @@ def _render_html(state: dict[str, Any]) -> str:
             <p>Total: <strong>{_esc(cap_total)}</strong></p>
             <p>HL collateral: {_esc(_fmt_compact_usd(state["hl_collateral_total"]))}</p>
             <p>HL debt: {_esc(_fmt_compact_usd(state["hl_debt_total"]))}</p>
-            <p>Perp acct: {_esc(_fmt_compact_usd(state["perp_equity_total"]))}</p>
-            <p>Spot: {_esc(_fmt_compact_usd(state["spot_usd_total"]))}</p>
+            <p>Account Value (perp+USDC unif.): {_esc(_fmt_compact_usd(state["perp_equity_total"]))}</p>
+            <p>Spot non-USDC: {_esc(_fmt_compact_usd(state["spot_usd_total"]))}</p>
             <p>UPnL perp: <span class="{upnl_cls}">{_esc(upnl_fmt)}</span></p>
         </div>
 
