@@ -173,27 +173,38 @@ def _short(addr: str) -> str:
 
 
 def _spot_usd_value(spot_balances: list[dict[str, Any]],
-                    prices: dict[str, Any]) -> float:
-    """Sum spot USD value EXCLUDING USDC.
+                    prices: dict[str, Any],
+                    perp_account_value: float = 0.0) -> float:
+    """Sum spot USD value, conditionally excluding USDC.
 
-    Why USDC is excluded: under HyperLiquid Unified Account, USDC sitting in
-    spot is the SAME asset already reported by ``clearinghouseState.marginSummary
-    .accountValue`` (which we use as ``perp_equity``). Adding it again here
-    double-counts the margin behind any open perp/basket position.
+    Decision rule per BCD's directive (2026-04-28):
+      * IF the wallet has ACTIVE perp positions (perp_account_value > 0.01):
+        the USDC sitting in spot is the SAME bucket already reported by
+        ``clearinghouseState.marginSummary.accountValue`` under HyperLiquid
+        Unified Account. Skip it from the spot sum to avoid double-counting.
+      * IF there is NO active perp (perp_account_value <= 0.01):
+        the USDC in spot is real free capital (e.g., basket just closed,
+        funds idle). Sum it 1:1.
 
-    Other stablecoins (USDH, USDT, USDT0, DAI) are real on-chain spot tokens
-    and are *not* the unified-account collateral, so they are summed 1:1.
+    Other stablecoins (USDH, USDT, USDT0, DAI) are independent on-chain spot
+    tokens — NOT part of the unified-account USDC collateral — so they are
+    always summed 1:1.
 
     Non-stable coins use live price from ``market.data.prices`` with
     entry-notional cost basis as last-resort proxy.
     """
+    has_active_perp = perp_account_value > 0.01
     total = 0.0
     for sb in spot_balances or []:
         coin = (sb.get("coin") or "").upper()
         amount = float(sb.get("total") or 0)
         entry_ntl = float(sb.get("entry_ntl") or 0)
-        # CRITICAL: skip USDC — already in perp accountValue (Unified Account).
+        # CRITICAL: only skip USDC if wallet has an active perp position
+        # (then it's already inside accountValue under Unified Account).
         if coin == "USDC":
+            if has_active_perp:
+                continue
+            total += amount
             continue
         if coin in {"USDH", "USDT", "USDT0", "DAI"}:
             total += amount
@@ -504,7 +515,7 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
             addr = (d.get("wallet") or "").lower()
             label = d.get("label") or w.get("label") or "?"
             perp_equity = float(d.get("account_value") or 0.0)
-            spot_usd = _spot_usd_value(d.get("spot_balances") or [], prices)
+            spot_usd = _spot_usd_value(d.get("spot_balances") or [], prices, perp_equity)
             hl_data = hl_by_wallet.get(addr, {})
             hl_coll = float(hl_data.get("total_collateral_usd") or 0.0)
             hl_debt = float(hl_data.get("total_debt_usd") or 0.0)

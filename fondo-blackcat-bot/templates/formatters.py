@@ -49,8 +49,9 @@ def _fmt_hf(v: float | None) -> str:
     return f"{v:.3f}"
 
 
-def _estimate_spot_usd(spot_balances: list[dict[str, Any]]) -> float:
-    """Estimate USD value of spot tokens, EXCLUDING USDC.
+def _estimate_spot_usd(spot_balances: list[dict[str, Any]],
+                       perp_account_value: float = 0.0) -> float:
+    """Estimate USD value of spot tokens, conditionally excluding USDC.
 
     ================================================================
     CRITICAL: HYPERLIQUID UNIFIED ACCOUNT — DO NOT REMOVE
@@ -60,21 +61,28 @@ def _estimate_spot_usd(spot_balances: list[dict[str, Any]]) -> float:
       * clearinghouseState.marginSummary.accountValue  (perp equity)
       * spotClearinghouseState.balances[USDC].total    (spot USDC)
 
-    NEVER sum both — it is the SAME USDC reported twice. The
-    authoritative wallet capital is ``accountValue`` (perp); from
-    spot we only add NON-USDC tokens.
+    Per BCD's directive (2026-04-28):
+      - IF wallet has an ACTIVE perp position (perp_account_value > 0.01):
+        skip USDC from spot — it's already inside accountValue.
+      - IF wallet has NO active perp: count USDC from spot — it's free
+        capital sitting idle (basket just closed, awaiting next trade).
 
-    Bug history: 2026-04-28 wallet 0xc7ae reported $11.6K (Perp
-    $5.8K + Spot $5.8K) when its real capital was $5.8K — a 2x
-    duplication of basket margin.
+    Bug history: wallet 0xc7ae was reported as $11.6K (Perp $5.8K +
+    Spot $5.8K) when its real capital was $5.8K — a 2x duplication
+    of basket margin under Unified Account.
     ================================================================
     """
+    has_active_perp = perp_account_value > 0.01
     total = 0.0
     for sb in spot_balances:
         coin = (sb.get("coin") or "").upper()
         amount = sb.get("total", 0) or 0
-        # CRITICAL: skip USDC — already in perp accountValue (Unified Account).
+        # CRITICAL: only skip USDC when an active perp exists (then it's
+        # already in accountValue under Unified Account).
         if coin == "USDC":
+            if has_active_perp:
+                continue
+            total += amount
             continue
         if coin in ("USDH", "USDT", "USDT0", "DAI"):
             total += amount
@@ -205,7 +213,7 @@ def format_quick_positions(wallets: list[dict[str, Any]],
         d = w["data"]
         wallet_addr = (d.get("wallet") or "").lower()
         perp_eq = d.get("account_value") or 0.0
-        spot_usd = _estimate_spot_usd(d.get("spot_balances") or [])
+        spot_usd = _estimate_spot_usd(d.get("spot_balances") or [], perp_eq)
         hl_data = hl_by_wallet.get(wallet_addr, {})
         hl_coll = hl_data.get("collateral_usd", 0.0)
         hl_debt = hl_data.get("debt_usd", 0.0)
@@ -376,14 +384,29 @@ def format_quick_positions(wallets: list[dict[str, Any]],
             else:
                 cost_basis_display = _fmt_usd(total_entry)
 
-            # Unified Account note: USDC shown here is the SAME asset already
-            # included in each wallet's "Account Value" line above. It is NOT
-            # additional capital. Render an explicit annotation so a reader
-            # never re-adds it mentally.
-            usdc_note = (
-                "  ⚠️ already in Account Value (Unified Account) — NOT additional capital"
-                if coin == "USDC" else ""
-            )
+            # Unified Account note: when a wallet listed has an active perp,
+            # its USDC shown here is already inside Account Value. The
+            # capital math above already handles the dedup per-wallet, so
+            # the SPOT TOKENS section is purely informational. We only flag
+            # USDC entries when ANY of the holding wallets has an active
+            # perp — those are the ones a reader could mistakenly re-add.
+            usdc_note = ""
+            if coin == "USDC":
+                # Check per-wallet via the wallets list scoped above
+                holding_addrs_with_perp = [
+                    w for w in wallets
+                    if w.get("status") == "ok"
+                    and (w.get("data", {}).get("_perp_equity") or 0.0) > 0.01
+                    and any(
+                        (e.get("_wallet_label") == w.get("data", {}).get("label"))
+                        for e in entries
+                    )
+                ]
+                if holding_addrs_with_perp:
+                    usdc_note = (
+                        "  ⚠️ part of this USDC is in Account Value of an active "
+                        "perp wallet (Unified Account) — see per-wallet breakdown above"
+                    )
 
             if len(entries) == 1:
                 wallet_label = entries[0].get("_wallet_label", "")
