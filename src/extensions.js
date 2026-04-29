@@ -26,6 +26,7 @@ const compoundingDetector = require('./compoundingDetector');
 const pnlCrossValidation = require('./pnlCrossValidation');
 const walletConfig = require('./walletConfig');
 const closeClassifier = require('./closeClassifier');
+const principalBridge = require('./principalBridge');
 const { appendFooter } = require('./branding');
 
 function _safeInt(v, d) {
@@ -101,7 +102,7 @@ function buildHooks({ notify, primaryChatId }) {
                 parse_mode: 'Markdown',
               });
               for (const p of newPositions) {
-                eventLog.recordEvent({
+                const evt = {
                   type: 'OPEN',
                   chatId: String(chatId),
                   wallet,
@@ -113,7 +114,11 @@ function buildHooks({ notify, primaryChatId }) {
                     (p.size || 0) * (p.entryPrice || 0)
                   ),
                   leverage: p.leverage || null,
-                });
+                };
+                // Bridge replaces direct eventLog write — it both
+                // appends to JSONL AND fires the optional webhook.
+                try { await principalBridge.publish(evt); }
+                catch (_) { eventLog.recordEvent(evt); }
               }
             },
           });
@@ -142,14 +147,16 @@ function buildHooks({ notify, primaryChatId }) {
             isPrimary
           );
           await notify(chatId, msg, { parse_mode: 'Markdown' });
-          eventLog.recordEvent({
+          const evt = {
             type: 'COMPOUND',
             chatId: String(chatId),
             wallet,
             prev_notional: result.prevNotional,
             current_notional: result.currentNotional,
             growth_pct: result.growth * 100,
-          });
+          };
+          try { await principalBridge.publish(evt); }
+          catch (_) { eventLog.recordEvent(evt); }
         }
       } catch (e) {
         console.error(
@@ -200,7 +207,7 @@ function buildHooks({ notify, primaryChatId }) {
         }
       }
 
-      eventLog.recordEvent({
+      const evt = {
         type: 'FULL_CLOSE',
         chatId: String(chatId),
         wallet,
@@ -217,7 +224,9 @@ function buildHooks({ notify, primaryChatId }) {
         entryNotional: Math.abs(
           (close.size || 0) * (close.entryPrice || 0)
         ),
-      });
+      };
+      try { await principalBridge.publish(evt); }
+      catch (_) { eventLog.recordEvent(evt); }
       // Compound snapshot resets when basket cleared
       compoundingDetector._resetForTests; // no-op; we just reset on next empty poll
     } catch (e) {

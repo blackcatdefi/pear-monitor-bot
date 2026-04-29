@@ -185,10 +185,11 @@ function trackCloseForBasket(chatId, wallet, label, closeData, onSummary) {
 }
 
 const REASON_META = {
-  TAKE_PROFIT: { emoji: '🎯', label: 'TAKE PROFIT hit' },
-  STOP_LOSS: { emoji: '🛑', label: 'STOP LOSS triggered' },
-  TRAILING_OR_MANUAL: { emoji: '🔄', label: 'Position closed (trailing/manual)' },
-  MANUAL_CLOSE: { emoji: '📋', label: 'Position closed' },
+  TAKE_PROFIT: { emoji: '🎯', label: 'TAKE PROFIT alcanzado' },
+  STOP_LOSS: { emoji: '🛑', label: 'STOP LOSS activado' },
+  TRAILING_OR_MANUAL: { emoji: '🔄', label: 'Cerrado (trailing/manual)' },
+  MANUAL_CLOSE: { emoji: '📋', label: 'Cierre manual' },
+  TRAILING_STOP: { emoji: '🔄', label: 'TRAILING STOP activado' },
 };
 
 function _fmtUsd(n) {
@@ -243,7 +244,7 @@ function formatBasketSummary(label, closes) {
   const pnlEmoji = totalPnl >= 0 ? '🟢' : '🔴';
 
   const lines = [
-    `🐱‍⬛ *BASKET CLOSED* — ${label}`,
+    `🐱‍⬛ *BASKET CERRADA* — ${label}`,
     ``,
     `📊 *Summary:*`,
     `• Posiciones cerradas: *${items.length}* (${symbols})`,

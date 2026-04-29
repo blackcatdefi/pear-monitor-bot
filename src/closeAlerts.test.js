@@ -195,7 +195,7 @@ test('formatCloseAlert renders BLUR alert with correct PnL', () => {
   });
   assert.match(msg, /BLUR/);
   assert.match(msg, /\+\$406\.94/);
-  assert.match(msg, /Position closed/);
+  assert.match(msg, /Cerrado/);
   // CRUCIAL: must NOT contain the wrong, last-fill-only number
   assert.ok(!msg.includes('+$47.69'), 'must not contain old buggy PnL');
 });
@@ -210,7 +210,7 @@ test('formatBasketSummary aggregates total PnL and lists best→worst', () => {
     { coin: 'LDO', pnl: -0.61 },
   ];
   const msg = formatBasketSummary('Fondo Black Cat', closes);
-  assert.match(msg, /BASKET CLOSED/);
+  assert.match(msg, /BASKET CERRADA/);
   assert.match(msg, /Posiciones cerradas: \*6\*/);
   // total ≈ 558.76
   const total = closes.reduce((s, c) => s + c.pnl, 0);
