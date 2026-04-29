@@ -1,303 +1,323 @@
-"""Trade del Ciclo — read/update helpers for the /ciclo and /ciclo_update bot
-commands.
+"""Trade del Ciclo — BTC LONG 10x en Blofin (manual tracking).
 
-The canonical state lives in ``fund_state.py`` as module constants (BCD edits
-them by hand when the Blofin position opens / closes). This module exposes:
+Blofin does NOT expose a public portfolio API, so the bot stores the last
+known state (margin, entry, size, mark) in a JSON file and updates it via
+/ciclo_update from Telegram.
 
-* ``render_cycle_status()`` — builds the human-readable message shown by
-  ``/ciclo``.
-* ``apply_cycle_update(status, last_entry=None)`` — mutates ``fund_state.py``
-  on disk, commits the change via git, and pushes to origin/master so Railway
-  redeploys automatically. Uses GITHUB_TOKEN from env (or .secrets/tokens.env)
-  if HTTPS push auth is needed.
-
-Design notes:
- - We write to ``fund_state.py`` with a textual rewrite (regex-replace) so the
-   diff is minimal and human-reviewable.
- - Mutation is guarded: only STATUS values in {"OPEN", "CLOSED"} are allowed,
-   LAST_ENTRY must parse as float.
- - On Railway (no git repo present / no push token), write succeeds but push
-   fails → we report the partial success so BCD can commit via GitHub web UI.
+State file: DATA_DIR/cycle_trade.json
+Schema:
+{
+  "active": true|false,
+  "last_update_utc": ISO,
+  "entry_avg": 77200.0,
+  "size_btc": 0.0065,
+  "margin_usd": 500.0,
+  "mark_px": 77300.0,
+  "leverage": 10,
+  "dca_completed": ["entry"],  // ENTRY / ADD_1 / ADD_2 / ADD_3
+  "notes": "optional free text"
+}
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
-import re
-import shlex
-import subprocess
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
+
+from config import DATA_DIR
 
 log = logging.getLogger(__name__)
 
-# fund_state.py lives one directory up from this file (modules/)
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-_FUND_STATE_PATH = _REPO_ROOT / "fund_state.py"
+STATE_FILE = os.path.join(DATA_DIR, "cycle_trade.json")
 
-# Parent of fondo-blackcat-bot/ is the git repo root
-_GIT_REPO_ROOT = _REPO_ROOT.parent
+# DCA plan (BTC prices + margin chunks)
+DCA_PLAN = [
+    {"key": "ENTRY", "trigger": 77_000.0, "margin_usd": 500.0, "desc": "Entry inicial ~BTC $77K"},
+    {"key": "ADD_1", "trigger": 70_000.0, "margin_usd": 500.0, "desc": "ADD 1 @ BTC $70K"},
+    {"key": "ADD_2", "trigger": 63_000.0, "margin_usd": 750.0, "desc": "ADD 2 @ BTC $63K"},
+    {"key": "ADD_3", "trigger": 55_000.0, "margin_usd": 1000.0, "desc": "ADD 3 @ BTC $55K"},
+]
+
+TOTAL_DEPLOYABLE = sum(s["margin_usd"] for s in DCA_PLAN)  # 2750
+LIQ_TARGET_RANGE = (45_000.0, 50_000.0)
+TP_PARTIAL = 130_000.0
+TP_MAIN = 150_000.0
 
 
-def _read_fund_state() -> dict[str, Any]:
-    """Import fund_state fresh (importlib) and return the trade-del-ciclo fields.
+def _load() -> dict[str, Any]:
+    if not os.path.isfile(STATE_FILE):
+        return {"active": False}
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:  # noqa: BLE001
+        return {"active": False}
 
-    We import inside the function so tests/reloads see live values after a
-    /ciclo_update rewrite (though the running bot only sees the post-redeploy
-    values — Python does not hot-reload module constants).
+
+def _save(state: dict[str, Any]) -> None:
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2, ensure_ascii=False, default=str)
+    except Exception:  # noqa: BLE001
+        log.exception("cycle_trade save failed")
+
+
+def get_state() -> dict[str, Any]:
+    """Read current Trade del Ciclo state. Always returns a dict."""
+    s = _load()
+    # Normalize defaults
+    s.setdefault("active", False)
+    s.setdefault("entry_avg", 0.0)
+    s.setdefault("size_btc", 0.0)
+    s.setdefault("margin_usd", 0.0)
+    s.setdefault("mark_px", 0.0)
+    s.setdefault("leverage", 10)
+    s.setdefault("dca_completed", [])
+    s.setdefault("last_update_utc", None)
+    s.setdefault("notes", "")
+    return s
+
+
+def _parse_kv_args(raw_args: list[str]) -> dict[str, str]:
+    """Parse key=value args from a Telegram command."""
+    out: dict[str, str] = {}
+    for token in raw_args:
+        if "=" in token:
+            k, v = token.split("=", 1)
+            out[k.strip().lower()] = v.strip()
+    return out
+
+
+def update_from_args(raw_args: list[str]) -> tuple[dict[str, Any], str]:
+    """Parse /ciclo_update args and persist. Returns (new_state, human_summary).
+
+    Supported keys: margin, entry, size, mark, leverage, notes, active (true/false),
+    close (closes position), dca_add (marks a DCA leg completed: ENTRY/ADD_1/...).
     """
-    import importlib
+    kv = _parse_kv_args(raw_args)
+    if not kv:
+        raise ValueError(
+            "Uso: /ciclo_update margin=500 entry=77200 size=0.0065 mark=77300 [leverage=10] [dca_add=ADD_1] [notes=\"...\"]\n"
+            "Cierre: /ciclo_update close=true"
+        )
 
-    import fund_state  # type: ignore
+    state = get_state()
 
-    importlib.reload(fund_state)
-    return {
-        "status": getattr(fund_state, "TRADE_DEL_CICLO_STATUS", "?"),
-        "platform": getattr(fund_state, "TRADE_DEL_CICLO_PLATFORM", "?"),
-        "leverage": getattr(fund_state, "TRADE_DEL_CICLO_LEVERAGE", 0),
-        "last_entry": getattr(fund_state, "TRADE_DEL_CICLO_LAST_ENTRY", 0.0),
-        "last_update": getattr(fund_state, "TRADE_DEL_CICLO_LAST_UPDATE", "?"),
-        "last_close": getattr(fund_state, "TRADE_DEL_CICLO_LAST_CLOSE", ""),
-        "pnl_realized": getattr(fund_state, "TRADE_DEL_CICLO_PNL_REALIZED", 0.0),
-        "blofin_balance": getattr(fund_state, "BLOFIN_BALANCE_AVAILABLE", 0.0),
-        "basket_v5_plan": getattr(fund_state, "BASKET_V5_PLAN", {}),
-    }
+    # Handle closure shortcut
+    if kv.get("close", "").lower() in ("true", "1", "yes"):
+        state["active"] = False
+        state["margin_usd"] = 0.0
+        state["size_btc"] = 0.0
+        state["last_update_utc"] = datetime.now(timezone.utc).isoformat()
+        _save(state)
+        return state, "✅ Trade del Ciclo marcado como CERRADO."
+
+    def _num(key: str, default: float) -> float:
+        v = kv.get(key)
+        if v is None:
+            return default
+        try:
+            return float(v)
+        except ValueError as exc:
+            raise ValueError(f"{key} debe ser numérico: {exc}") from None
+
+    state["margin_usd"] = _num("margin", float(state.get("margin_usd") or 0.0))
+    state["entry_avg"] = _num("entry", float(state.get("entry_avg") or 0.0))
+    state["size_btc"] = _num("size", float(state.get("size_btc") or 0.0))
+    state["mark_px"] = _num("mark", float(state.get("mark_px") or 0.0))
+    if "leverage" in kv:
+        try:
+            state["leverage"] = int(float(kv["leverage"]))
+        except ValueError:
+            pass
+    if "notes" in kv:
+        state["notes"] = kv["notes"]
+    if "active" in kv:
+        state["active"] = kv["active"].lower() in ("true", "1", "yes")
+    else:
+        # Auto: if margin>0 and size>0, mark active
+        state["active"] = state["margin_usd"] > 0.0 and state["size_btc"] > 0.0
+
+    if "dca_add" in kv:
+        leg = kv["dca_add"].upper()
+        if leg not in (s["key"] for s in DCA_PLAN):
+            raise ValueError(f"dca_add debe ser uno de {[s['key'] for s in DCA_PLAN]}")
+        completed = set(state.get("dca_completed") or [])
+        completed.add(leg)
+        state["dca_completed"] = sorted(completed, key=lambda k: next(i for i, s in enumerate(DCA_PLAN) if s["key"] == k))
+    elif state["active"] and state["margin_usd"] > 0 and "ENTRY" not in (state.get("dca_completed") or []):
+        # Auto-mark ENTRY if first activation
+        state["dca_completed"] = ["ENTRY"]
+
+    state["last_update_utc"] = datetime.now(timezone.utc).isoformat()
+    _save(state)
+
+    # Compute derived metrics for summary
+    upnl = compute_upnl(state)
+    liq = estimated_liq_price(state)
+    next_trigger = next_dca_trigger(state)
+
+    sign = "+" if upnl >= 0 else ""
+    pct = 0.0
+    if state["margin_usd"] > 0:
+        pct = upnl / state["margin_usd"] * 100
+
+    summary = (
+        "✅ Trade del Ciclo actualizado\n"
+        f"Margin: ${state['margin_usd']:,.0f} | Entry: ${state['entry_avg']:,.0f} | Size: {state['size_btc']:.4f} BTC\n"
+        f"Mark: ${state['mark_px']:,.0f} | UPnL: {sign}${upnl:,.2f} ({sign}{pct:.2f}%)\n"
+        f"Liq estimada: ${liq:,.0f} (a {state['leverage']}x)\n"
+    )
+    if next_trigger:
+        summary += (
+            f"Próximo DCA trigger: BTC ${next_trigger['trigger']:,.0f} → +${next_trigger['margin_usd']:,.0f} margin"
+        )
+    else:
+        summary += "DCA plan completo (todos los adds marcados)."
+
+    return state, summary
 
 
-def render_cycle_status() -> str:
-    """Human-readable /ciclo output."""
-    s = _read_fund_state()
-    status = (s["status"] or "?").upper()
-    status_icon = "\U0001f7e2" if status == "OPEN" else "\U0001f534" if status == "CLOSED" else "\u26aa"
-    plan = s["basket_v5_plan"] or {}
-    bonus_unlock = plan.get("bonus_blofin_unlock", "?")
+# ─── Derived metrics ────────────────────────────────────────────────────────
+def compute_upnl(state: dict[str, Any]) -> float:
+    """UPnL USD = size * (mark - entry). No funding, no fees — close enough."""
+    size = float(state.get("size_btc") or 0.0)
+    mark = float(state.get("mark_px") or 0.0)
+    entry = float(state.get("entry_avg") or 0.0)
+    if size <= 0 or mark <= 0 or entry <= 0:
+        return 0.0
+    return size * (mark - entry)
+
+
+def estimated_liq_price(state: dict[str, Any]) -> float:
+    """Very rough liq estimate for a LONG at given leverage.
+
+    liq ≈ entry * (1 - 1/leverage + maintenance_margin_rate).
+    We assume maintenance ~0.5%, standard-ish for major exchanges.
+    Approximate only — exchange-specific haircut/funding will shift it.
+    """
+    entry = float(state.get("entry_avg") or 0.0)
+    lev = max(1, int(state.get("leverage") or 10))
+    if entry <= 0:
+        return 0.0
+    maintenance = 0.005
+    return max(0.0, entry * (1 - 1 / lev + maintenance))
+
+
+def next_dca_trigger(state: dict[str, Any]) -> dict[str, Any] | None:
+    """Return next uncompleted DCA leg."""
+    completed = set(state.get("dca_completed") or [])
+    for leg in DCA_PLAN:
+        if leg["key"] not in completed:
+            return leg
+    return None
+
+
+def dca_progress_lines(state: dict[str, Any]) -> list[str]:
+    """Return a list of '[✅ ENTRY]' / '[⏳ ADD 1]' style progress lines."""
+    completed = set(state.get("dca_completed") or [])
+    out: list[str] = []
+    for leg in DCA_PLAN:
+        icon = "✅" if leg["key"] in completed else "⏳"
+        status = "DONE" if leg["key"] in completed else "pending"
+        out.append(
+            f"  [{icon} {leg['key']}] BTC ${leg['trigger']:,.0f} → ${leg['margin_usd']:,.0f} margin ({status})"
+        )
+    return out
+
+
+def status_label(state: dict[str, Any]) -> str:
+    if not state.get("active"):
+        return "INACTIVO"
+    if state.get("margin_usd", 0) == 0:
+        return "PENDIENTE (esperando bonus 5 días)"
+    return "ACTIVO"
+
+
+# ─── Text formatters for /ciclo and /posiciones ─────────────────────────────
+def format_status_short(state: dict[str, Any]) -> str:
+    """Short 3-5 line block used INSIDE /posiciones and /reporte 'POSICIONES'."""
+    if not state.get("active") and state.get("margin_usd", 0) == 0 and not state.get("dca_completed"):
+        return (
+            "TRADE DEL CICLO (Blofin - BTC LONG)\n"
+            "  Status: INACTIVO — sin posición abierta\n"
+            "  (usar /ciclo_update para registrar entrada)"
+        )
+
+    upnl = compute_upnl(state)
+    liq = estimated_liq_price(state)
+    next_t = next_dca_trigger(state)
+    sign = "+" if upnl >= 0 else ""
+    pct = (upnl / state["margin_usd"] * 100) if state.get("margin_usd", 0) > 0 else 0.0
+    last_upd = state.get("last_update_utc") or "?"
+    last_upd_short = last_upd[:16].replace("T", " ") if last_upd else "?"
 
     lines = [
-        "\U0001f3af TRADE DEL CICLO",
-        "\u2501" * 28,
-        f"Status: {status_icon} {status}",
+        "TRADE DEL CICLO (Blofin - BTC LONG)",
+        f"  Status: {status_label(state)}",
+        f"  Last update: {last_upd_short} UTC",
+        f"  Entry avg: ${state.get('entry_avg', 0):,.0f} | Mark: ${state.get('mark_px', 0):,.0f}",
+        f"  Size: {state.get('size_btc', 0):.4f} BTC | Leverage: {state.get('leverage', 10)}x",
+        f"  Margin deployed: ${state.get('margin_usd', 0):,.0f} / ${TOTAL_DEPLOYABLE:,.0f} plan",
+        f"  Liq estimada: ${liq:,.0f}",
+        f"  UPnL: {sign}${upnl:,.2f} ({sign}{pct:.2f}%)",
     ]
-    if status == "OPEN":
-        lines.append(f"\u00daltimo entry: ${s['last_entry']:,.2f}")
-        lines.append(f"Leverage: {s['leverage']}x")
-        lines.append(f"Plataforma: {(s['platform'] or '?').title()}")
-        lines.append(f"\u00daltima actualizaci\u00f3n: {s['last_update']}")
-        lines.append("")
-        lines.append(
-            "\u26a0\ufe0f Blofin NO tiene API p\u00fablica. El UPnL real se consulta "
-            "manualmente en la app."
-        )
-    elif status == "CLOSED":
-        lines.append(f"PnL realizado: ${s['pnl_realized']:+,.2f}")
-        last_close = s["last_close"] or "?"
-        lines.append(f"\u00daltimo close: {last_close[:16].replace('T', ' ')} UTC")
-        lines.append(f"Plataforma: {(s['platform'] or '?').title()}")
-        lines.append(f"\u00daltimo entry (cerrado): ${s['last_entry']:,.2f}")
-        lines.append(f"Balance Blofin disponible: ${s['blofin_balance']:,.2f} USDT")
+    if next_t:
+        lines.append(f"  DCA next trigger: BTC ${next_t['trigger']:,.0f} → +${next_t['margin_usd']:,.0f} margin")
     else:
-        lines.append("(estado desconocido — revisar fund_state.py)")
-
-    lines.append("")
-    lines.append(f"\U0001f381 Bono Blofin unlock: {bonus_unlock}")
-    lines.append("")
-    lines.append("Para cambiar estado:")
-    lines.append("  /ciclo_update OPEN 77000   \u2192 abre con entry $77,000")
-    lines.append("  /ciclo_update CLOSED       \u2192 cierra posici\u00f3n")
-
+        lines.append("  DCA plan: COMPLETO")
     return "\n".join(lines)
 
 
-# ─── Mutators (/ciclo_update) ──────────────────────────────────────────────
-
-
-_STATUS_RE = re.compile(
-    r'^(TRADE_DEL_CICLO_STATUS\s*=\s*)"[^"]*"(.*)$', re.MULTILINE
-)
-_LAST_ENTRY_RE = re.compile(
-    r"^(TRADE_DEL_CICLO_LAST_ENTRY\s*=\s*)[\d\.]+(.*)$", re.MULTILINE
-)
-_LAST_UPDATE_RE = re.compile(
-    r'^(TRADE_DEL_CICLO_LAST_UPDATE\s*=\s*)"[^"]*"(.*)$', re.MULTILINE
-)
-_LAST_CLOSE_RE = re.compile(
-    r'^(TRADE_DEL_CICLO_LAST_CLOSE\s*=\s*)"[^"]*"(.*)$', re.MULTILINE
-)
-
-
-def apply_cycle_update(new_status: str, last_entry: float | None = None) -> dict[str, Any]:
-    """Rewrite fund_state.py, commit and push.
-
-    Returns a dict: ``{"ok": bool, "wrote": bool, "pushed": bool, "message": str}``.
-    """
-    new_status = new_status.strip().upper()
-    if new_status not in {"OPEN", "CLOSED"}:
-        return {
-            "ok": False,
-            "wrote": False,
-            "pushed": False,
-            "message": f"STATUS inv\u00e1lido: {new_status}. Valores v\u00e1lidos: OPEN | CLOSED",
-        }
-
-    if not _FUND_STATE_PATH.is_file():
-        return {
-            "ok": False,
-            "wrote": False,
-            "pushed": False,
-            "message": f"No encuentro {_FUND_STATE_PATH}",
-        }
-
-    text = _FUND_STATE_PATH.read_text(encoding="utf-8")
-    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    # 1. status
-    text, n_status = _STATUS_RE.subn(
-        rf'\1"{new_status}"\2', text, count=1
-    )
-    # 2. last_update (bumped always)
-    text, n_update = _LAST_UPDATE_RE.subn(
-        rf'\1"{now_iso}"\2', text, count=1
-    )
-    # 3. last_entry (only when OPEN and provided)
-    n_entry = 0
-    if new_status == "OPEN" and last_entry is not None:
-        text, n_entry = _LAST_ENTRY_RE.subn(
-            rf"\g<1>{last_entry:.2f}\g<2>", text, count=1
-        )
-    # 4. last_close (bumped on CLOSED)
-    n_close = 0
-    if new_status == "CLOSED":
-        text, n_close = _LAST_CLOSE_RE.subn(
-            rf'\1"{now_iso}"\2', text, count=1
+def format_full_status(state: dict[str, Any]) -> str:
+    """Full /ciclo output — position + DCA plan + horizon + TP/liq zones."""
+    if not state.get("active") and state.get("margin_usd", 0) == 0:
+        return (
+            "🎯 TRADE DEL CICLO — Estado\n\n"
+            "Posición: INACTIVA (sin entrada registrada)\n\n"
+            "Plan DCA (pendiente ejecución):\n"
+            + "\n".join(dca_progress_lines(state))
+            + f"\n\nTotal deployable: ${TOTAL_DEPLOYABLE:,.0f}\n"
+            f"Liq final post-DCA completo (~): ${43_500:,.0f}\n"
+            f"Horizonte: 12-18 meses\n"
+            f"TP target: ${TP_MAIN:,.0f}+\n\n"
+            "Usá /ciclo_update margin=500 entry=77200 size=0.0065 mark=77300 cuando abras la posición."
         )
 
-    if n_status == 0 or n_update == 0:
-        return {
-            "ok": False,
-            "wrote": False,
-            "pushed": False,
-            "message": "No pude localizar las constantes TRADE_DEL_CICLO_* en fund_state.py",
-        }
+    upnl = compute_upnl(state)
+    liq = estimated_liq_price(state)
+    sign = "+" if upnl >= 0 else ""
+    pct = (upnl / state["margin_usd"] * 100) if state.get("margin_usd", 0) > 0 else 0.0
+    last_upd = state.get("last_update_utc") or "?"
+    last_upd_short = last_upd[:16].replace("T", " ") if last_upd else "?"
 
-    _FUND_STATE_PATH.write_text(text, encoding="utf-8")
-    log.info(
-        "fund_state.py rewritten: STATUS=%s last_entry_updated=%s last_close_updated=%s",
-        new_status,
-        bool(n_entry),
-        bool(n_close),
+    lines = [
+        "🎯 TRADE DEL CICLO — Estado",
+        "",
+        f"Status: {status_label(state)} | Last update: {last_upd_short} UTC",
+        "",
+        "Posición:",
+        f"  Entry: ${state.get('entry_avg', 0):,.0f} | Mark: ${state.get('mark_px', 0):,.0f} | Size: {state.get('size_btc', 0):.4f} BTC",
+        f"  Leverage: {state.get('leverage', 10)}x | Margin: ${state.get('margin_usd', 0):,.0f} | Liq est: ${liq:,.0f}",
+        f"  UPnL: {sign}${upnl:,.2f} ({sign}{pct:.2f}%)",
+        "",
+        "Plan DCA:",
+    ]
+    lines.extend(dca_progress_lines(state))
+    lines.extend(
+        [
+            "",
+            f"Total deployable: ${TOTAL_DEPLOYABLE:,.0f}",
+            f"Liq final post-DCA completo (~): ${43_500:,.0f}",
+            f"Horizonte: 12-18 meses",
+            f"TP target: ${TP_MAIN:,.0f}+  (parcial ${TP_PARTIAL:,.0f})",
+            f"Liq zone (salvar posición): ${LIQ_TARGET_RANGE[0]:,.0f}-${LIQ_TARGET_RANGE[1]:,.0f}",
+        ]
     )
-
-    # Commit + push. If no git/tokens we still return ok=True for the write.
-    push_result = _git_commit_and_push(new_status, last_entry)
-    return {
-        "ok": True,
-        "wrote": True,
-        "pushed": push_result["pushed"],
-        "message": push_result["message"],
-    }
-
-
-def _git_commit_and_push(new_status: str, last_entry: float | None) -> dict[str, Any]:
-    """Commit fund_state.py and push to origin. Best-effort; no exceptions escape."""
-    token = os.getenv("GITHUB_TOKEN", "").strip()
-    if not token:
-        # Try tokens.env fallback (local dev). Railway runtime will not have it.
-        tokens_env = _GIT_REPO_ROOT.parent / ".secrets" / "tokens.env"
-        if tokens_env.is_file():
-            for line in tokens_env.read_text(encoding="utf-8").splitlines():
-                if line.startswith("GITHUB_TOKEN="):
-                    token = line.split("=", 1)[1].strip()
-                    break
-
-    entry_note = f" entry=${last_entry:,.2f}" if last_entry is not None else ""
-    msg = f"chore(fund_state): /ciclo_update STATUS={new_status}{entry_note}"
-
-    def _run(args: list[str], *, env_extra: dict[str, str] | None = None) -> tuple[int, str]:
-        env = os.environ.copy()
-        if env_extra:
-            env.update(env_extra)
-        proc = subprocess.run(
-            args,
-            cwd=str(_GIT_REPO_ROOT),
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=30,
-        )
-        return proc.returncode, (proc.stdout + proc.stderr).strip()
-
-    # Ensure we are inside a git repo
-    rc, out = _run(["git", "rev-parse", "--is-inside-work-tree"])
-    if rc != 0:
-        return {"pushed": False, "message": f"No es repo git — write OK pero sin push. ({out})"}
-
-    # stage + commit
-    rel_path = str(_FUND_STATE_PATH.relative_to(_GIT_REPO_ROOT))
-    rc, out = _run(["git", "add", rel_path])
-    if rc != 0:
-        return {"pushed": False, "message": f"git add fall\u00f3: {out}"}
-
-    rc, out = _run([
-        "git",
-        "-c", "user.email=bot@blackcatdefi.local",
-        "-c", "user.name=fondo-blackcat-bot",
-        "commit",
-        "-m", msg,
-    ])
-    if rc != 0:
-        low = out.lower()
-        if "nothing to commit" in low or "no changes added" in low:
-            return {"pushed": False, "message": "Nada para commitear (sin cambios)."}
-        return {"pushed": False, "message": f"git commit fall\u00f3: {out}"}
-
-    if not token:
-        return {
-            "pushed": False,
-            "message": "Commit local OK, pero sin GITHUB_TOKEN → no push. Editar manual en GitHub.",
-        }
-
-    # Configure push URL with token (one-shot via `-c`)
-    remote_url = f"https://x-access-token:{token}@github.com/blackcatdefi/pear-monitor-bot.git"
-    rc, out = _run([
-        "git", "push", remote_url, "HEAD:master",
-    ])
-    if rc != 0:
-        return {"pushed": False, "message": f"git push fall\u00f3: {out[:200]}"}
-
-    return {"pushed": True, "message": "Commit + push OK. Railway redeployea autom\u00e1ticamente."}
-
-
-def parse_cycle_update_args(args: list[str]) -> tuple[str, float | None]:
-    """Parse /ciclo_update CLI-style args.
-
-    Examples:
-        ["OPEN", "77000"]      → ("OPEN", 77000.0)
-        ["open", "75,298.70"]  → ("OPEN", 75298.70)
-        ["CLOSED"]             → ("CLOSED", None)
-    Raises ValueError on malformed input.
-    """
-    if not args:
-        raise ValueError("Uso: /ciclo_update <STATUS> [LAST_ENTRY]\n  STATUS = OPEN | CLOSED")
-    status = args[0].strip().upper()
-    if status not in {"OPEN", "CLOSED"}:
-        raise ValueError(f"STATUS inv\u00e1lido: {status}. V\u00e1lidos: OPEN | CLOSED")
-    if status == "CLOSED":
-        return status, None
-    # OPEN requires last_entry
-    if len(args) < 2:
-        raise ValueError("OPEN requiere LAST_ENTRY. Uso: /ciclo_update OPEN 77000")
-    raw = args[1].replace(",", "").replace("$", "").strip()
-    try:
-        entry = float(raw)
-    except ValueError as exc:
-        raise ValueError(f"LAST_ENTRY inv\u00e1lido: {args[1]}") from exc
-    if entry <= 0:
-        raise ValueError("LAST_ENTRY debe ser > 0")
-    return status, entry
-
-
-__all__ = [
-    "apply_cycle_update",
-    "parse_cycle_update_args",
-    "render_cycle_status",
-]
+    if state.get("notes"):
+        lines.append("")
+        lines.append(f"Notas: {state['notes']}")
+    return "\n".join(lines)
