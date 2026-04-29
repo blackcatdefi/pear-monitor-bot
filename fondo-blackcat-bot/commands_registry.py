@@ -30,6 +30,8 @@ COMMANDS: List[BotCommand] = [
     BotCommand("flywheel", "Pair trade HL (LONG HYPE / SHORT UETH)", "core", "cmd_flywheel"),
     BotCommand("tesis", "Estado de la tesis macro", "core", "cmd_tesis"),
     BotCommand("calendar", "Próximos catalysts (macro + unlocks + TGEs)", "core", "cmd_calendar"),
+    BotCommand("brief", "Briefing matutino completo (R18)", "core", "cmd_brief"),
+    BotCommand("convergence", "Status macro convergence triggers (R18)", "core", "cmd_convergence"),
     BotCommand("start", "Mostrar este menú completo", "core", "cmd_start"),
     BotCommand("help", "Alias de /start", "core", "cmd_start"),
 
@@ -42,7 +44,9 @@ COMMANDS: List[BotCommand] = [
     BotCommand("ciclo_update", "Abrir/cerrar Trade del Ciclo", "trading", "cmd_ciclo_update"),
     BotCommand("dca", "Plan DCA tramificado BTC/ETH/HYPE + zona actual", "trading", "cmd_dca"),
     BotCommand("pnl", "Realized PnL 7D / 30D / YTD", "trading", "cmd_pnl"),
+    BotCommand("pnlx", "PnL extendido por período + best/worst (R18)", "trading", "cmd_pnlx"),
     BotCommand("pretrade", "Checklist 5-puntos pre-trade <SYMBOL>", "trading", "cmd_pretrade"),
+    BotCommand("compounding_history", "Compoundings detectados últimos 30d (R18)", "trading", "cmd_compounding_history"),
 
     # ─── INTEL ───
     BotCommand("timeline", "Timeline X 48h (tu X list)", "intel", "cmd_timeline"),
@@ -58,6 +62,7 @@ COMMANDS: List[BotCommand] = [
     BotCommand("reload_commands", "Re-sincronizar lista de comandos con Telegram", "admin", "cmd_reload_commands"),
     BotCommand("test_alerts", "Disparar alerta de test al chat", "admin", "cmd_test_alerts"),
     BotCommand("reconcile", "Reconciliar fund_state vs on-chain (R17)", "admin", "cmd_reconcile"),
+    BotCommand("risk_check", "Validador de invariantes de risk config (R18)", "admin", "cmd_risk_check"),
     BotCommand("add_event", "Agregar evento a calendar <id> <ISO> <cat> <imp> | <name>", "admin", "cmd_add_event"),
     BotCommand("remove_event", "Borrar evento del calendar <event_id>", "admin", "cmd_remove_event"),
     BotCommand("export", "Export CSV <tipo> <periodo> (fills|pnl|positions|intel|errors × 7d|30d|90d|ytd|all)", "admin", "cmd_export"),

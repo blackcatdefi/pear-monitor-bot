@@ -4,6 +4,7 @@ const HyperliquidApi = require('./src/hyperliquidApi');
 const HyperLendApi = require('./src/hyperLendApi');
 const PositionMonitor = require('./src/monitor');
 const createBot = require('./src/bot');
+const extensions = require('./src/extensions');
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '30', 10);
@@ -26,10 +27,24 @@ async function main() {
 
   monitor.notify = sendNotification;
 
+  // Round v2 — bootstrap extensions BEFORE start() so monitor patches apply
+  // to the very first poll cycle. Health server, heartbeat, weekly summary,
+  // /history /pnl /status /export /summary commands all attach here.
+  const primaryChatId =
+    process.env.BCD_TELEGRAM_CHAT_ID || process.env.WEEKLY_SUMMARY_CHAT_ID || null;
+  const rv2 = extensions.bootstrap({
+    bot,
+    monitor,
+    sendNotification,
+    primaryChatId,
+  });
+  monitor.notify = rv2.notify;
+
   await monitor.start(POLL_INTERVAL);
 
   console.log(`Bot running. Polling every ${POLL_INTERVAL}s. Public mode - any user can add wallets.`);
   console.log(`HyperLend enabled via ${HYPEREVM_RPC_URL} (Pool ${HYPERLEND_POOL_ADDRESS})`);
+  console.log(`R(v2) extensions active. Health on :${process.env.HEALTH_PORT || 8080}`);
 }
 
 main().catch(err => {

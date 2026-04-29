@@ -125,6 +125,79 @@ from modules.pretrade_checklist import build_pretrade_checklist
 from modules.intel_search import format_search_results, search_intel
 from modules.exports import export_dispatch
 from modules.weekly_summary import scheduled_summary as weekly_scheduled_summary
+# Round 18 — proactive modules (lazy imports so missing files don't crash boot)
+try:
+    from modules.morning_brief import (
+        send_morning_brief as r18_send_morning_brief,
+        scheduled as r18_morning_scheduled,
+        is_enabled as r18_morning_enabled,
+    )
+except Exception:  # noqa: BLE001
+    r18_send_morning_brief = None
+    r18_morning_scheduled = None
+    r18_morning_enabled = lambda: False
+try:
+    from modules.basket_close_detector import (
+        maybe_emit_summary as r18_basket_close_emit,
+        is_enabled as r18_basket_close_enabled,
+    )
+except Exception:  # noqa: BLE001
+    r18_basket_close_emit = None
+    r18_basket_close_enabled = lambda: False
+try:
+    from modules.compounding_detector import (
+        scheduled as r18_compounding_scheduled,
+        format_history as r18_compounding_history,
+        is_enabled as r18_compounding_enabled,
+    )
+except Exception:  # noqa: BLE001
+    r18_compounding_scheduled = None
+    r18_compounding_history = None
+    r18_compounding_enabled = lambda: False
+try:
+    from modules.macro_convergence import (
+        scheduled_check as r18_convergence_scheduled,
+        format_status as r18_convergence_status,
+        is_enabled as r18_convergence_enabled,
+    )
+except Exception:  # noqa: BLE001
+    r18_convergence_scheduled = None
+    r18_convergence_status = None
+    r18_convergence_enabled = lambda: False
+try:
+    from modules.predictive_alerts import (
+        scheduled_check as r18_predictive_scheduled,
+        is_enabled as r18_predictive_enabled,
+    )
+except Exception:  # noqa: BLE001
+    r18_predictive_scheduled = None
+    r18_predictive_enabled = lambda: False
+try:
+    from modules.pre_event_brief import (
+        scheduled_check as r18_preevent_scheduled,
+        is_enabled as r18_preevent_enabled,
+    )
+except Exception:  # noqa: BLE001
+    r18_preevent_scheduled = None
+    r18_preevent_enabled = lambda: False
+try:
+    from modules.risk_config_validator import (
+        build_report as r18_risk_check_report,
+        is_enabled as r18_risk_check_enabled,
+    )
+except Exception:  # noqa: BLE001
+    r18_risk_check_report = None
+    r18_risk_check_enabled = lambda: False
+try:
+    from modules.fund_state_auto_reconcile import (
+        get_callback_handler as r18_auto_reconcile_handler,
+    )
+except Exception:  # noqa: BLE001
+    r18_auto_reconcile_handler = None
+try:
+    from modules.pnl_extended import build_period_summary as r18_pnl_period
+except Exception:  # noqa: BLE001
+    r18_pnl_period = None
 from templates.formatters import format_hf, format_quick_positions
 from templates.timeline import format_timeline
 from utils.security import authorized
@@ -933,6 +1006,106 @@ async def cmd_pretrade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
+# ─── Round 18 commands ──────────────────────────────────────────────────────
+
+
+@authorized
+@with_error_logging
+async def cmd_brief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R18 — Briefing matutino on demand."""
+    if r18_send_morning_brief is None:
+        await update.message.reply_text(
+            "Morning brief no disponible (módulo no cargado).",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    await update.message.reply_text("⏳ Briefing matutino...", reply_markup=MAIN_KEYBOARD)
+    try:
+        await r18_send_morning_brief(context.application.bot, force_chat_id=update.effective_chat.id)
+    except Exception as e:  # noqa: BLE001
+        await update.message.reply_text(
+            f"⚠️ Brief falló: {str(e)[:200]}",
+            reply_markup=MAIN_KEYBOARD,
+        )
+
+
+@authorized
+@with_error_logging
+async def cmd_pnlx(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R18 — PnL extendido por período."""
+    if r18_pnl_period is None:
+        await update.message.reply_text(
+            "PnL extendido no disponible (módulo no cargado).",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    args = context.args or []
+    period = (args[0] if args else "week").lower()
+    valid = ("today", "week", "month", "ytd", "all")
+    if period not in valid:
+        await update.message.reply_text(
+            f"Uso: /pnlx <período>\nVálidos: {' / '.join(valid)}",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    try:
+        text = await r18_pnl_period(period)
+    except Exception as e:  # noqa: BLE001
+        text = f"⚠️ /pnlx falló: {str(e)[:200]}"
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_convergence(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R18 — Macro convergence triggers."""
+    if r18_convergence_status is None:
+        await update.message.reply_text(
+            "Convergence module no disponible.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    try:
+        text = await r18_convergence_status()
+    except Exception as e:  # noqa: BLE001
+        text = f"⚠️ /convergence falló: {str(e)[:200]}"
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_risk_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R18 — Risk config invariant validator."""
+    if r18_risk_check_report is None:
+        await update.message.reply_text(
+            "Risk check no disponible (módulo no cargado).",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    try:
+        text = r18_risk_check_report()
+    except Exception as e:  # noqa: BLE001
+        text = f"⚠️ /risk_check falló: {str(e)[:200]}"
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_compounding_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R18 — Compounding events últimos 30 días."""
+    if r18_compounding_history is None:
+        await update.message.reply_text(
+            "Compounding history no disponible (módulo no cargado).",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    try:
+        text = r18_compounding_history(days=30)
+    except Exception as e:  # noqa: BLE001
+        text = f"⚠️ /compounding_history falló: {str(e)[:200]}"
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
 # ─── Scheduler jobs ──────────────────────────────────────────────────────────
 
 
@@ -1297,6 +1470,76 @@ async def post_init(application: Application) -> None:
                 "(DASHBOARD_PROACTIVE_REFRESH_ENABLED=false)"
             )
 
+        # ─── Round 18 jobs ───────────────────────────────────────────────
+        # Morning brief — daily 08:00 UTC
+        if r18_morning_scheduled is not None and r18_morning_enabled():
+            scheduler.add_job(
+                lambda: asyncio.create_task(r18_morning_scheduled(application)),
+                "cron",
+                hour=int(os.getenv("MORNING_BRIEF_HOUR_UTC", "8")),
+                minute=0,
+                id="morning_brief",
+                max_instances=1,
+                coalesce=True,
+            )
+            log.info("R18 morning_brief scheduler ENABLED (daily %sh UTC)",
+                     os.getenv("MORNING_BRIEF_HOUR_UTC", "8"))
+        # Basket close detector — every 30s (cheap, edge-triggered)
+        if r18_basket_close_emit is not None and r18_basket_close_enabled():
+            scheduler.add_job(
+                lambda: asyncio.create_task(r18_basket_close_emit(application.bot)),
+                "interval",
+                seconds=30,
+                id="basket_close_detector",
+                max_instances=1,
+                coalesce=True,
+            )
+            log.info("R18 basket_close_detector ENABLED (every 30s)")
+        # Compounding detector — every 5 min
+        if r18_compounding_scheduled is not None and r18_compounding_enabled():
+            scheduler.add_job(
+                lambda: asyncio.create_task(r18_compounding_scheduled(application.bot)),
+                "interval",
+                minutes=5,
+                id="compounding_detector",
+                max_instances=1,
+                coalesce=True,
+            )
+            log.info("R18 compounding_detector ENABLED (every 5min)")
+        # Macro convergence — every 60 min
+        if r18_convergence_scheduled is not None and r18_convergence_enabled():
+            scheduler.add_job(
+                lambda: asyncio.create_task(r18_convergence_scheduled(application.bot)),
+                "interval",
+                minutes=60,
+                id="macro_convergence",
+                max_instances=1,
+                coalesce=True,
+            )
+            log.info("R18 macro_convergence ENABLED (every 60min)")
+        # Predictive alerts — every 30 min
+        if r18_predictive_scheduled is not None and r18_predictive_enabled():
+            scheduler.add_job(
+                lambda: asyncio.create_task(r18_predictive_scheduled(application.bot)),
+                "interval",
+                minutes=30,
+                id="predictive_alerts",
+                max_instances=1,
+                coalesce=True,
+            )
+            log.info("R18 predictive_alerts ENABLED (every 30min)")
+        # Pre-event brief — every 5 min, fires T-90→T-30 window
+        if r18_preevent_scheduled is not None and r18_preevent_enabled():
+            scheduler.add_job(
+                lambda: asyncio.create_task(r18_preevent_scheduled(application)),
+                "interval",
+                minutes=5,
+                id="pre_event_brief",
+                max_instances=1,
+                coalesce=True,
+            )
+            log.info("R18 pre_event_brief ENABLED (every 5min)")
+
         scheduler.start()
         application.bot_data["scheduler"] = scheduler
         log.info(
@@ -1371,6 +1614,11 @@ HANDLER_MAP = {
     "pretrade": cmd_pretrade,
     # Round 18
     "cryexc": cmd_cryexc,
+    "brief": cmd_brief,
+    "pnlx": cmd_pnlx,
+    "convergence": cmd_convergence,
+    "risk_check": cmd_risk_check,
+    "compounding_history": cmd_compounding_history,
 }
 
 
@@ -1392,6 +1640,17 @@ def main() -> None:
 
     # Register every handler from the mapping
     registered_handler_names: set[str] = set()
+
+    # Round 18: register inline-callback handler for fund_state_auto_reconcile
+    try:
+        if r18_auto_reconcile_handler is not None:
+            cb = r18_auto_reconcile_handler()
+            if cb is not None:
+                app.add_handler(cb)
+                log.info("R18 fund_state_auto_reconcile callback handler registered")
+    except Exception:  # noqa: BLE001
+        log.exception("R18 auto_reconcile callback registration failed (non-fatal)")
+
     for cmd_name, handler in HANDLER_MAP.items():
         app.add_handler(CommandHandler(cmd_name, handler))
         # Strip wrapper layers to get the actual function name
