@@ -1,12 +1,5 @@
-"""Kill-scenario dashboard — when should we bail on each position?
+"""Kill scenarios — conditions that would invalidate each trade thesis."""
 
-Builds a /kill (aka /kill_scenarios) command that snapshots the current
-state against each thesis invalidation trigger. Round 3 adds a Trade del
-Ciclo section.
-
-The file on master was corrupted to an HTML 404 page at some point; this
-rewrite restores the command and extends it.
-"""
 from __future__ import annotations
 
 import logging
@@ -14,138 +7,99 @@ import math
 from typing import Any
 
 from modules.hyperlend import fetch_all_hyperlend
-from modules.market import fear_greed, coingecko_global
 from modules.portfolio import get_spot_price
-from modules.cycle_trade import (
-    LIQ_TARGET_RANGE,
-    TP_MAIN,
-    TP_PARTIAL,
-    compute_upnl,
-    get_state as cycle_state,
-)
 
 log = logging.getLogger(__name__)
 
-# Static bits (manually maintained; updated in system_prompt / memory)
-WAR_TRADE_ACTIVE = False  # DreamCash stays INACTIVA
-WAR_TRADE_NOTE = "DreamCash INACTIVA. No hay exposure actual a la tesis Stage 6."
-
-
-def _fmt_hf(v: float | None) -> str:
-    if v is None:
-        return "—"
-    if math.isinf(v):
-        return "∞"
-    return f"{v:.3f}"
-
 
 async def compute_kill_scenarios() -> str:
-    hl_list, fng, glob, btc_px, hype_px = [], {}, {}, None, None
-    try:
-        hl_list = await fetch_all_hyperlend()
-    except Exception:  # noqa: BLE001
-        log.exception("hyperlend fetch failed in kill_scenarios")
-
-    try:
-        fng = await fear_greed()
-    except Exception:  # noqa: BLE001
-        log.exception("fear_greed failed")
-
-    try:
-        glob = await coingecko_global()
-    except Exception:  # noqa: BLE001
-        log.exception("global market failed")
-
-    try:
-        btc_px = await get_spot_price("BTC")
-    except Exception:  # noqa: BLE001
-        log.exception("btc spot failed")
-
-    try:
-        hype_px = await get_spot_price("HYPE")
-    except Exception:  # noqa: BLE001
-        log.exception("hype spot failed")
-
-    btc_dom = float(glob.get("btc_dominance") or 0.0)
-    fng_val = int(fng.get("value") or 0)
-
+    """Generate kill scenario analysis for all active positions."""
     lines: list[str] = []
-    lines.append("💀 KILL SCENARIOS — invalidadores de cada tesis")
-    lines.append("─" * 45)
+    lines.append("\U0001f480 KILL SCENARIOS \u2014 FONDO BLACK CAT")
+    lines.append("\u2500" * 40)
+    lines.append("Condiciones que invalidar\u00edan cada tesis.\n")
+
+    # Fetch live data
+    btc_px = await get_spot_price("BTC")
+    hype_px = await get_spot_price("HYPE")
+    eth_px = await get_spot_price("ETH")
+
+    # 1. Alt Short Bleed
+    lines.append("1\ufe0f\u20e3 ALT SHORT BLEED (SHORT basket 3x)")
+    lines.append("   Kill scenario: Ceasefire + dovish Fed \u2192 risk-on alt squeeze")
+    lines.append("   Triggers concretos:")
+    lines.append("   \u2022 Ceasefire confirmado Iran/Israel (no solo rumores)")
+    lines.append("   \u2022 Fed pivot dovish (rate cut signal o QE)")
+    lines.append("   \u2022 Alt season confirmation (BTC.D < 50% + alts +30%)")
+    lines.append("   SL: individual por posici\u00f3n (liq price = 100% margin)")
+    lines.append("   Acci\u00f3n si kill: cerrar basket completo, no esperar")
     lines.append("")
 
-    # ── WAR TRADE (DreamCash) ──
-    lines.append("WAR TRADE (DreamCash 0x171b):")
-    lines.append(f"  {WAR_TRADE_NOTE}")
-    lines.append("  Sin kill scenario activo (posición no expuesta).")
+    # 2. War Trade (DreamCash)
+    lines.append("2\ufe0f\u20e3 WAR TRADE (DreamCash 0x171b)")
+    lines.append("   Estado: INACTIVA \u2014 sin posiciones")
+    lines.append("   Kill scenario: N/A (no hay exposure)")
+    lines.append("   Reabrir si: escalada confirmada + oil >$85 + gold >$3500")
     lines.append("")
 
-    # ── ALT SHORT BLEED ──
-    lines.append("ALT SHORT BLEED Kill (3 wallets, SHORT basket):")
-    dom_state = "🟢" if btc_dom >= 55 else "🔴"
-    fng_state = "🟢" if fng_val < 75 else "🔴"
-    lines.append(f"  {dom_state} BTC.D: {btc_dom:.1f}% (kill si <55%)")
-    lines.append(f"  {fng_state} F&G: {fng_val} (kill si ≥75 euphoria)")
-    lines.append("  ⚠️ SPX ATH: check manual (kill si breakout sostenido post-ceasefire)")
-    lines.append("")
-
-    # ── FLYWHEEL (HYPE/ETH via HyperLend) ──
-    lines.append("FLYWHEEL Kill (HyperLend HF / HYPE / kHYPE):")
-    if hype_px is not None:
-        hype_state = "🟢" if hype_px >= 40 else ("⚠️" if hype_px >= 34 else "🔴")
-        lines.append(f"  {hype_state} HYPE: ${hype_px:.2f} (kill si <$40, crítico <$34)")
-    else:
-        lines.append("  ❓ HYPE: precio no disponible")
-    # HF per wallet
+    # 3. HyperLend Flywheel
+    hf_text = "?"
+    hl_list = await fetch_all_hyperlend()
     for hl in hl_list:
-        if hl.get("status") != "ok":
-            continue
-        h = hl["data"]
-        coll = float(h.get("total_collateral_usd") or 0.0)
-        if coll < 0.01:
-            continue
-        hf = h.get("health_factor")
-        label = h.get("label") or "—"
-        if hf is None or math.isinf(hf):
-            lines.append(f"  ∞ {label}: sin deuda")
+        if hl.get("status") == "ok":
+            hf = hl["data"].get("health_factor")
+            if hf is not None:
+                hf_text = f"{hf:.3f}" if not math.isinf(hf) else "\u221e"
+                break
+
+    lines.append("3\ufe0f\u20e3 HYPERLEND FLYWHEEL (LONG HYPE / SHORT ETH)")
+    lines.append(f"   HF actual: {hf_text}")
+    if hype_px:
+        lines.append(f"   HYPE: ${hype_px:.2f}")
+    if eth_px:
+        lines.append(f"   ETH: ${eth_px:.2f}")
+    lines.append("   Kill scenario: HYPE crash + ETH pump simult\u00e1neo")
+    lines.append("   Triggers concretos:")
+    lines.append("   \u2022 HYPE < $30 (colateral colapsa)")
+    lines.append("   \u2022 ETH > $4000 mientras HYPE cae (deuda sube)")
+    lines.append("   \u2022 HF < 1.10 sin capacidad de repay")
+    lines.append("   Acci\u00f3n si kill: repay deuda UETH parcial, no cerrar todo")
+    lines.append("")
+
+    # 4. Trade del Ciclo
+    lines.append("4\ufe0f\u20e3 TRADE DEL CICLO (LONG BTC 3x)")
+    if btc_px:
+        lines.append(f"   BTC: ${btc_px:,.0f}")
+    lines.append("   Kill scenario: Bear market confirmado, BTC < $50K sostenido")
+    lines.append("   Triggers concretos:")
+    lines.append("   \u2022 Cycle Top Model AiPear \u226519/30 signals")
+    lines.append("   \u2022 BTC < $50K por >1 semana (zona cr\u00edtica)")
+    lines.append("   \u2022 BTC < $45K \u2192 liquidaci\u00f3n mec\u00e1nica")
+    lines.append("   NO es kill scenario:")
+    lines.append("   \u2022 Pullbacks intraday/semanales")
+    lines.append("   \u2022 Titulares geopol\u00edticos temporales")
+    lines.append("   \u2022 Drawdowns <30% desde ATH")
+    lines.append("   DCA plan activo:")
+    lines.append("   \u2022 $70K \u2192 Add 1 ($500)")
+    lines.append("   \u2022 $63K \u2192 Add 2 ($750)")
+    lines.append("   \u2022 $55K \u2192 Add 3 ($1,000)")
+    if btc_px:
+        if btc_px > 70_000:
+            lines.append(f"   Status: \u2705 Sano \u2014 ${btc_px:,.0f} por encima de todos los DCA levels")
+        elif btc_px > 63_000:
+            lines.append(f"   Status: \u26a0\ufe0f DCA Add 1 activado \u2014 BTC @ ${btc_px:,.0f}")
+        elif btc_px > 55_000:
+            lines.append(f"   Status: \u26a0\ufe0f DCA Add 2 activado \u2014 BTC @ ${btc_px:,.0f}")
+        elif btc_px > 50_000:
+            lines.append(f"   Status: \U0001f534 DCA Add 3 activado \u2014 cerca de zona cr\u00edtica")
         else:
-            icon = "🟢" if hf >= 1.20 else ("⚠️" if hf >= 1.10 else "🔴")
-            lines.append(f"  {icon} {label} HF: {_fmt_hf(hf)} (kill si <1.20, liquidación <1.00)")
-    lines.append("  ⚠️ kHYPE depeg: check manual")
+            lines.append(f"   Status: \U0001f480 ZONA CR\u00cdTICA \u2014 BTC @ ${btc_px:,.0f}")
+    lines.append("   Acci\u00f3n si kill: solo liquidaci\u00f3n mec\u00e1nica (SL = liq price)")
     lines.append("")
 
-    # ── TRADE DEL CICLO ──
-    cs = cycle_state()
-    lines.append("TRADE DEL CICLO Kill (BTC LONG Blofin):")
-    if btc_px is not None:
-        btc_state = "🟢" if btc_px >= LIQ_TARGET_RANGE[1] else ("⚠️" if btc_px >= LIQ_TARGET_RANGE[0] else "🔴")
-        lines.append(
-            f"  {btc_state} BTC: ${btc_px:,.0f} (liq zone ${LIQ_TARGET_RANGE[0]:,.0f}-${LIQ_TARGET_RANGE[1]:,.0f})"
-        )
-        # TP awareness
-        if btc_px >= TP_MAIN:
-            lines.append(f"  🎯🎯 BTC ≥ ${TP_MAIN:,.0f} — zona TP principal (evaluar cierre 50-100%)")
-        elif btc_px >= TP_PARTIAL:
-            lines.append(f"  🎯 BTC ≥ ${TP_PARTIAL:,.0f} — zona TP parcial (evaluar cierre 30%)")
-    else:
-        lines.append("  ❓ BTC: precio no disponible")
-    # Cycle Top Model placeholder
-    lines.append("  ⚠️ Cycle Top Model AiPear: check manual (kill si score >19/25)")
-    # Bull market sanity
-    lines.append("  🟢 Bull market intacto: BTC bien sobre liq zone")
-    if cs.get("active"):
-        upnl = compute_upnl(cs)
-        sign = "+" if upnl >= 0 else ""
-        lines.append(
-            f"  Posición activa: margin ${cs.get('margin_usd', 0):,.0f} | UPnL {sign}${upnl:,.2f}"
-        )
-    else:
-        lines.append("  Posición: INACTIVA — sin entrada registrada")
-    lines.append("")
-
-    # ── Summary ──
-    lines.append("─" * 45)
-    lines.append("RESUMEN: evaluar kills activos con data manual + bot data arriba.")
-    lines.append("DreamCash no figura porque está cerrada; Trade del Ciclo es NEW en Round 3.")
+    # 5. Core DCA
+    lines.append("5\ufe0f\u20e3 CORE DCA (kHYPE + PEAR spot)")
+    lines.append("   Kill scenario: N/A (spot, sin leverage)")
+    lines.append("   Monitored pero sin liq risk")
 
     return "\n".join(lines)
