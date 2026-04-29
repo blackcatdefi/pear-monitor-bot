@@ -1270,6 +1270,33 @@ async def _heartbeat_job(application: Application) -> None:
         log.exception("heartbeat job failed")
 
 
+async def _risk_validator_job(application: Application) -> None:
+    """R18 audit: every 2h — auto-run risk_check; alert only on FAIL.
+
+    Read-only. Surfaces drift in env-var policy gates so BCD doesn't have
+    to remember to /risk_check manually. Silent on PASS.
+    """
+    if r18_risk_check_report is None or not r18_risk_check_enabled():
+        return
+    try:
+        from modules.risk_config_validator import run_checks as _rcv_run
+        results = _rcv_run()
+        failures = [c for c in results if not c.ok]
+        if not failures:
+            return
+        chat_id = TELEGRAM_CHAT_ID
+        if not chat_id:
+            return
+        lines = ["\u26a0\ufe0f RISK CONFIG DRIFT \u2014 auto-detect"]
+        for c in failures:
+            lines.append(f"  \u2022 {c.name}: {c.detail} (expected: {c.expected})")
+        lines.append("")
+        lines.append("Tipea /risk_check para detalle, ajusta env vars en Railway.")
+        await send_bot_message(application.bot, chat_id, "\n".join(lines))
+    except Exception:  # noqa: BLE001
+        log.exception("risk_validator job failed")
+
+
 async def _cryexc_monitor_job(application: Application) -> None:
     """R18: every 30min — cryexc snapshot + fire alert on new notable events."""
     if not cryexc_is_enabled() or not cryexc_monitor_is_enabled():
@@ -1609,6 +1636,23 @@ async def post_init(application: Application) -> None:
                 coalesce=True,
             )
             log.info("R18 add-on heartbeat ENABLED (every %.1fh)", hb_hours)
+
+        # R18 audit: risk_config_validator proactive scheduler (every 2h)
+        if r18_risk_check_report is not None and r18_risk_check_enabled():
+            try:
+                rcv_hours = float(os.getenv("RISK_VALIDATOR_INTERVAL_HOURS", "2"))
+            except ValueError:
+                rcv_hours = 2.0
+            scheduler.add_job(
+                lambda: asyncio.create_task(_risk_validator_job(application)),
+                "interval",
+                hours=rcv_hours,
+                id="risk_config_validator",
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now(timezone.utc) + timedelta(minutes=5),
+            )
+            log.info("R18 risk_config_validator ENABLED (every %.1fh)", rcv_hours)
 
         scheduler.start()
         application.bot_data["scheduler"] = scheduler
