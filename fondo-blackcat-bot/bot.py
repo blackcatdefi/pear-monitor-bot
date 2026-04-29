@@ -231,6 +231,9 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s \u2014 %(message)s",
 )
+# R19: bump httpx/httpcore/urllib3 to WARNING so Railway logs no longer leak
+# the bot token via INFO HTTP-request lines. Env-var overridable.
+import logging_config  # noqa: E402,F401
 log = logging.getLogger("fondo-blackcat")
 
 
