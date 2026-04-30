@@ -236,6 +236,13 @@ logging.basicConfig(
 import logging_config  # noqa: E402,F401
 # R20: validate UTC at boot — alerts on system clock drift > 60s
 import timezone_validator  # noqa: E402,F401
+# R21: boot-time anchors and proactive day-clarity layers
+from calendar_drift_guard import mark_past_events_at_boot  # noqa: E402
+from boot_announcement import announce_boot  # noqa: E402
+from morning_brief_scheduler import (  # noqa: E402
+    send_morning_brief_job,
+    get_scheduled_hour_utc as _morning_brief_hour,
+)
 log = logging.getLogger("fondo-blackcat")
 
 
@@ -1390,6 +1397,13 @@ async def post_init(application: Application) -> None:
     except Exception:  # noqa: BLE001
         log.exception("macro_calendar seed failed (non-fatal)")
 
+    # Round 21: drift guard — mark already-past events as alerted so the
+    # scheduler can never re-fire stale alerts after a redeploy.
+    try:
+        mark_past_events_at_boot()
+    except Exception:  # noqa: BLE001
+        log.exception("drift_guard run failed (non-fatal)")
+
     # Telethon
     try:
         client = await get_telethon()
@@ -1668,6 +1682,21 @@ async def post_init(application: Application) -> None:
             )
             log.info("R18 risk_config_validator ENABLED (every %.1fh)", rcv_hours)
 
+        # R21: morning brief — anchor message at MORNING_BRIEF_HOUR_UTC every day
+        if os.getenv("MORNING_BRIEF_ENABLED", "true").strip().lower() != "false":
+            mb_hour = _morning_brief_hour()
+            scheduler.add_job(
+                lambda: asyncio.create_task(send_morning_brief_job(application.bot)),
+                "cron",
+                hour=mb_hour,
+                minute=0,
+                id="morning_brief",
+                max_instances=1,
+                coalesce=True,
+                replace_existing=True,
+            )
+            log.info("R21 morning_brief ENABLED (cron %02d:00 UTC daily)", mb_hour)
+
         scheduler.start()
         application.bot_data["scheduler"] = scheduler
         log.info(
@@ -1683,6 +1712,14 @@ async def post_init(application: Application) -> None:
         log.info("Intel memory cleanup: deleted %d old entries", deleted)
     except Exception:
         log.exception("Intel memory cleanup failed")
+
+    # R21: boot announcement — confirm to BCD that the bot is online,
+    # clock is validated, calendar is fresh, and list pending events of
+    # the rest of the current day.
+    try:
+        asyncio.create_task(announce_boot(application.bot))
+    except Exception:  # noqa: BLE001
+        log.exception("boot announcement task creation failed (non-fatal)")
 
 
 async def post_shutdown(application: Application) -> None:

@@ -14,6 +14,20 @@ except Exception:  # noqa: BLE001
     def _stamp(text: str) -> str:  # type: ignore[no-redef]
         return text
 
+# R21: every outbound message also gets an explicit day/hour header so BCD
+# can never confuse which day a message was sent.  Idempotent — does not
+# duplicate when the header is already present.
+try:
+    from message_header import add_header_to_message as _header
+except Exception:  # noqa: BLE001
+    def _header(text: str) -> str:  # type: ignore[no-redef]
+        return text
+
+
+def _decorate(text: str) -> str:
+    """Apply R21 header + R20 footer in canonical order (idempotent)."""
+    return _stamp(_header(text))
+
 MAX_LEN = 4000
 
 
@@ -33,7 +47,7 @@ async def send_long_message(
     if update.message is None:
         return
 
-    text = _stamp(text)
+    text = _decorate(text)
 
     if len(text) <= MAX_LEN:
         await update.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
@@ -64,7 +78,7 @@ async def send_bot_message(bot, chat_id: str | int, text: str, parse_mode: str |
     """Send a (possibly long) message outside of an update context (used by scheduler)."""
     if not text:
         return
-    text = _stamp(text)
+    text = _decorate(text)
     remaining = text
     while remaining:
         if len(remaining) <= MAX_LEN:
