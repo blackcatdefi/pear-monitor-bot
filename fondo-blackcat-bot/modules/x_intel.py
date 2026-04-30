@@ -421,7 +421,8 @@ async def maybe_send_cost_alert(app=None) -> None:
         try:
             from config import TELEGRAM_CHAT_ID
             if TELEGRAM_CHAT_ID:
-                await app.bot.send_message(chat_id=int(TELEGRAM_CHAT_ID), text=msg)
+                from utils.telegram import send_bot_message  # R20: auto-stamp timestamp
+                await send_bot_message(app.bot, int(TELEGRAM_CHAT_ID), msg)
         except Exception:
             log.exception("maybe_send_cost_alert send failed (non-fatal)")
 
@@ -446,7 +447,8 @@ async def maybe_send_75pct_alert(app=None) -> None:
         try:
             from config import TELEGRAM_CHAT_ID
             if TELEGRAM_CHAT_ID:
-                await app.bot.send_message(chat_id=int(TELEGRAM_CHAT_ID), text=msg)
+                from utils.telegram import send_bot_message  # R20: auto-stamp timestamp
+                await send_bot_message(app.bot, int(TELEGRAM_CHAT_ID), msg)
         except Exception:
             log.exception("maybe_send_75pct_alert send failed (non-fatal)")
 

@@ -276,8 +276,9 @@ async def scheduled_summary(bot) -> None:
         return
     try:
         from config import TELEGRAM_CHAT_ID
+        from utils.telegram import send_bot_message  # R20: auto-stamp timestamp
         text = build_summary()
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
+        await send_bot_message(bot, TELEGRAM_CHAT_ID, text)
         log.info("weekly_summary sent (%d chars)", len(text))
     except Exception:
         log.exception("weekly_summary dispatch failed")

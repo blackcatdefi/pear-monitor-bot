@@ -234,6 +234,8 @@ logging.basicConfig(
 # R19: bump httpx/httpcore/urllib3 to WARNING so Railway logs no longer leak
 # the bot token via INFO HTTP-request lines. Env-var overridable.
 import logging_config  # noqa: E402,F401
+# R20: validate UTC at boot — alerts on system clock drift > 60s
+import timezone_validator  # noqa: E402,F401
 log = logging.getLogger("fondo-blackcat")
 
 
@@ -1200,11 +1202,20 @@ async def _weekly_cleanup_job() -> None:
 
 
 async def _macro_calendar_job(application: Application) -> None:
-    """R17: every 1 min — fire T-24h/T-2h/T-30m alerts for upcoming events."""
+    """R17/R20: every 1 min — fire T-24h/T-2h/T-30m alerts for upcoming events.
+
+    R20: when TIME_AWARENESS_ENABLED=true (default), routes to v2 scheduler
+    that recomputes "in X hours" at SEND time and filters past events
+    defensively. Set TIME_AWARENESS_ENABLED=false to roll back to v1.
+    """
     if os.getenv("MACRO_CALENDAR_ENABLED", "true").strip().lower() == "false":
         return
     try:
-        await cal_check_alerts(application.bot)
+        if os.getenv("TIME_AWARENESS_ENABLED", "true").strip().lower() != "false":
+            from scheduler_calendar_v2 import run_calendar_alert_check
+            await run_calendar_alert_check(application)
+        else:
+            await cal_check_alerts(application.bot)
     except Exception:  # noqa: BLE001
         log.exception("macro_calendar job failed")
 
