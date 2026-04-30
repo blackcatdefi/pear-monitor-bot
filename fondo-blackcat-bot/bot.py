@@ -51,7 +51,36 @@ from modules.errors_log import (
     with_error_logging,
 )
 from modules.health_server import start_health_server, stop_health_server
-from modules.hyperlend import fetch_all_hyperlend, fetch_reserve_rates
+from modules.hyperlend import fetch_all_hyperlend as _legacy_fetch_all_hyperlend, fetch_reserve_rates  # noqa: E402
+
+# R-FINAL bug-2: route bot.py's fetch_all_hyperlend through the cache-aware
+# reader so /reporte /hf /posiciones never show misleading "HF=∞" when the
+# HyperEVM RPC rate-limits us. The legacy fetcher's synthetic-empty
+# placeholder is replaced with the last-known HF + age. Other modules
+# (alerts.py / flywheel.py) get their already-bound symbol patched at
+# startup via _apply_hl_runtime_patch() (called from post_init).
+from auto.hyperlend_reader import read_all_with_cache as _hl_read_with_cache  # noqa: E402
+
+
+async def fetch_all_hyperlend():  # type: ignore[no-redef]
+    return await _hl_read_with_cache(fetch_fn=_legacy_fetch_all_hyperlend)
+
+
+def _apply_hl_runtime_patch() -> None:
+    """Replace already-bound fetch_all_hyperlend symbols in downstream
+    modules with the cache-aware wrapper. Called from post_init AFTER all
+    module imports are complete so we don't fight import order.
+    """
+    import sys
+
+    for mod_name in ("modules.hyperlend", "modules.flywheel", "modules.alerts"):
+        mod = sys.modules.get(mod_name)
+        if mod is None:
+            continue
+        try:
+            setattr(mod, "fetch_all_hyperlend", fetch_all_hyperlend)
+        except Exception:  # noqa: BLE001
+            pass
 from modules.kill_scenarios import compute_kill_scenarios
 from modules.llm_providers import format_provider_status
 from modules.market import fetch_market_data
@@ -238,7 +267,7 @@ import logging_config  # noqa: E402,F401
 import timezone_validator  # noqa: E402,F401
 # R21: boot-time anchors and proactive day-clarity layers
 from calendar_drift_guard import mark_past_events_at_boot  # noqa: E402
-from boot_announcement import announce_boot  # noqa: E402
+from auto.boot_announcement_v2 import announce_boot  # noqa: E402  (R-FINAL bug-3 dedup)
 from morning_brief_scheduler import (  # noqa: E402
     send_morning_brief_job,
     get_scheduled_hour_utc as _morning_brief_hour,
@@ -1713,9 +1742,19 @@ async def post_init(application: Application) -> None:
     except Exception:
         log.exception("Intel memory cleanup failed")
 
-    # R21: boot announcement — confirm to BCD that the bot is online,
-    # clock is validated, calendar is fresh, and list pending events of
-    # the rest of the current day.
+    # R-FINAL bug-2: monkey-patch downstream modules so flywheel.py /
+    # alerts.py also get the cache-aware HyperLend reader. Done here (not
+    # at import time) to avoid import-ordering issues.
+    try:
+        _apply_hl_runtime_patch()
+        log.info("R-FINAL: hyperlend cache-aware reader patched into downstream modules")
+    except Exception:  # noqa: BLE001
+        log.exception("R-FINAL hyperlend runtime patch failed (non-fatal)")
+
+    # R21 + R-FINAL bug-3: boot announcement — confirm to BCD that the bot
+    # is online, clock is validated, calendar is fresh, and list pending
+    # events of the rest of the current day. The v2 wrapper now consults
+    # auto.boot_dedup so cold-restart spam is suppressed.
     try:
         asyncio.create_task(announce_boot(application.bot))
     except Exception:  # noqa: BLE001

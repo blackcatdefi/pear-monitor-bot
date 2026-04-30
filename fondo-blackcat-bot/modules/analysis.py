@@ -18,6 +18,25 @@ from config import (
 from modules.llm_router import route_request, LLMError
 from templates.formatters import compile_raw_data
 from templates.system_prompt import SYSTEM_PROMPT, THESIS_PROMPT, build_fund_state_block
+# R-FINAL bug-1: prepend an on-chain authoritative state block ABOVE the
+# legacy hardcoded fund_state. The autodetect block declares basket-active
+# status from real positions, so the LLM stops emitting "ANOMALÍA CRÍTICA"
+# when fund_state.py is stale (basket v6 was active 30 abr while
+# BASKET_STATUS still said v4 closed).
+from auto.fund_state_v2 import build_authoritative_state_block as _onchain_state_block
+
+
+async def _full_state_block() -> str:
+    """Return on-chain truth concatenated with the hardcoded legacy block.
+
+    The on-chain block goes FIRST so the LLM treats it as authoritative
+    and discards any contradicting stale constants below.
+    """
+    try:
+        onchain = await _onchain_state_block()
+    except Exception:  # noqa: BLE001
+        onchain = ""
+    return (onchain or "") + build_fund_state_block()
 
 log = logging.getLogger(__name__)
 
@@ -218,7 +237,7 @@ async def _update_thesis_state(report_text: str, user_data: str) -> str | None:
     try:
         raw, provider = await route_request(
             "tesis_update",
-            build_fund_state_block() + SYSTEM_PROMPT + prev_context,
+            (await _full_state_block()) + SYSTEM_PROMPT + prev_context,
             thesis_user_msg,
             max_tokens=2000,
         )
@@ -337,7 +356,7 @@ async def generate_report(
     # Fund-state block is injected at the TOP so the LLM sees it before any
     # stale prose below. Ground truth: HF thresholds, Trade del Ciclo Blofin
     # constants, basket status, flywheel pair trade design note.
-    full_system = build_fund_state_block() + SYSTEM_PROMPT + prev_thesis
+    full_system = (await _full_state_block()) + SYSTEM_PROMPT + prev_thesis
 
     try:
         report_text, provider = await route_request(
@@ -461,7 +480,7 @@ async def generate_thesis_check(
 
     state = _load_thesis()
     prev_thesis = _thesis_context(state)
-    full_prompt = build_fund_state_block() + THESIS_PROMPT + prev_thesis
+    full_prompt = (await _full_state_block()) + THESIS_PROMPT + prev_thesis
 
     try:
         text, provider = await route_request(

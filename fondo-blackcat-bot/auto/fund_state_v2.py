@@ -1,0 +1,345 @@
+"""R-FINAL — Bug #1 fix: fund_state autodetect from on-chain reality.
+
+Symptom (apr-30 2026):
+    /reporte fired a "⚠️ ANOMALÍA CRÍTICA" block claiming the SHORT positions
+    on 0xc7AE "should have been closed since 2026-04-20" and asked BCD for
+    urgent manual verification. False positive. The basket v6 (DYDX/OP/ARB/
+    PYTH/ENA SHORT) is alive and correct — it was deployed 29 abr 2026
+    21:45 UTC after TWAP completion.
+
+Root cause:
+    fund_state.BASKET_STATUS["active"] = False is hardcoded and points to
+    "v4 closed 2026-04-20". Neither v5 nor v6 ever updated this constant.
+    The system_prompt block injects this state as ground truth into every
+    LLM call → model sees real positions but state declared inactive →
+    classifies as anomaly.
+
+Fix:
+    Bypass the hardcoded BASKET_STATUS by querying on-chain reality. If
+    any KNOWN fund wallet has open SHORTs on basket-perp tokens, the state
+    is ACTIVE — full stop. Only emit ANOMALY if positions appear on a
+    wallet NOT registered in the fund (rare, would indicate a real
+    operational mismatch worth flagging).
+
+Public API:
+    detect_active_baskets(fetch_wallets_fn=None) -> dict
+        {
+          "ts_utc": iso,
+          "wallets": {
+            "0xabc...": {
+                "status": "ACTIVE" | "IDLE" | "UNKNOWN",
+                "label": "...",
+                "shorts": [{coin, side, szi, ntl, entryPx}, ...],
+                "basket_id_inferido": "v6" | None,
+                "is_registered": True | False,
+            }, ...
+          },
+          "summary": {
+            "any_active": bool,
+            "total_basket_notional_usd": float,
+            "anomalies": [{wallet, reason}, ...],   # only unregistered/mismatch
+          }
+        }
+
+    build_authoritative_state_block(...) -> str
+        Replacement for templates.system_prompt.build_fund_state_block(),
+        with on-chain truth shadowing the hardcoded constants.
+
+Kill switch: FUND_STATE_AUTODETECT=false (default true)
+
+Anomaly threshold (only flag big mismatches, not dust):
+    ANOMALY_NOTIONAL_USD = float(env "FUND_STATE_ANOMALY_USD" default 500)
+"""
+from __future__ import annotations
+
+import logging
+import os
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable
+
+log = logging.getLogger(__name__)
+
+ENABLED = os.getenv("FUND_STATE_AUTODETECT", "true").strip().lower() != "false"
+ANOMALY_NOTIONAL_USD = float(os.getenv("FUND_STATE_ANOMALY_USD", "500") or 500)
+
+
+def _basket_perp_tokens() -> set[str]:
+    """Best-effort import of BASKET_PERP_TOKENS from fund_state.
+
+    Falls back to a hardcoded set if import fails (defensive — fund_state
+    can also be missing in tests).
+    """
+    try:
+        from fund_state import BASKET_PERP_TOKENS  # type: ignore
+
+        return {str(t).upper() for t in BASKET_PERP_TOKENS}
+    except Exception:  # noqa: BLE001
+        return {
+            "WLD",
+            "STRK",
+            "ZRO",
+            "AVAX",
+            "ENA",
+            "EIGEN",
+            "SCR",
+            "ZETA",
+            # v6 basket tokens (29 abr 2026)
+            "DYDX",
+            "OP",
+            "ARB",
+            "PYTH",
+        }
+
+
+def _registered_wallets() -> dict[str, str]:
+    """Lower-cased map of {address: label} for all known fund wallets.
+
+    Fallback to empty dict if config cannot be imported (tests).
+    """
+    try:
+        from config import FUND_WALLETS, HYPERLEND_WALLET  # type: ignore
+
+        out: dict[str, str] = {}
+        for addr, label in (FUND_WALLETS or {}).items():
+            if not addr:
+                continue
+            out[addr.lower()] = label
+        if HYPERLEND_WALLET:
+            hw = HYPERLEND_WALLET.lower()
+            out.setdefault(hw, "HyperLend Principal")
+        return out
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _infer_basket_id(coins: set[str]) -> str | None:
+    """Pattern-match the active SHORT basket against known historical baskets.
+
+    Used purely for human-readable labelling — the bot's authority is
+    on-chain, not the inferred id.
+    """
+    coins_u = {c.upper() for c in coins}
+    if {"DYDX", "OP", "ARB", "PYTH", "ENA"}.issubset(coins_u):
+        return "v6"
+    if {"WLD", "STRK", "ZRO", "AVAX", "ENA"}.issubset(coins_u):
+        return "v4/v5"
+    if coins_u and coins_u.issubset(_basket_perp_tokens()):
+        return "v?"
+    return None
+
+
+async def _fetch_all_wallets_default() -> list[dict[str, Any]]:
+    """Default wallet fetcher — uses modules.portfolio.fetch_all_wallets."""
+    from modules.portfolio import fetch_all_wallets  # type: ignore
+
+    return await fetch_all_wallets()
+
+
+async def detect_active_baskets(
+    fetch_wallets_fn: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None,
+) -> dict[str, Any]:
+    """Query on-chain reality and return the authoritative basket state.
+
+    Parameters
+    ----------
+    fetch_wallets_fn :
+        Async callable returning the same shape as
+        ``modules.portfolio.fetch_all_wallets`` — i.e. ``list[{status, data}]``
+        with ``data.positions = [{coin, szi, ntl_pos|position_value, entryPx?}]``.
+        Defaults to the production fetcher; injected in tests.
+    """
+    if not ENABLED:
+        return {
+            "ts_utc": datetime.now(timezone.utc).isoformat(),
+            "wallets": {},
+            "summary": {
+                "any_active": False,
+                "total_basket_notional_usd": 0.0,
+                "anomalies": [],
+                "disabled": True,
+            },
+        }
+
+    fetch = fetch_wallets_fn or _fetch_all_wallets_default
+    try:
+        wallets = await fetch()
+    except Exception:  # noqa: BLE001
+        log.exception("fund_state_v2: fetch_all_wallets failed")
+        return {
+            "ts_utc": datetime.now(timezone.utc).isoformat(),
+            "wallets": {},
+            "summary": {
+                "any_active": False,
+                "total_basket_notional_usd": 0.0,
+                "anomalies": [],
+                "fetch_error": True,
+            },
+        }
+
+    basket_tokens = _basket_perp_tokens()
+    registered = _registered_wallets()
+
+    wallets_out: dict[str, dict[str, Any]] = {}
+    total_notional = 0.0
+    anomalies: list[dict[str, Any]] = []
+
+    for w in wallets or []:
+        if not isinstance(w, dict):
+            continue
+        if w.get("status") != "ok":
+            continue
+        d = w.get("data") or {}
+        addr = (d.get("wallet") or "").lower()
+        if not addr:
+            continue
+        label = d.get("label") or registered.get(addr) or addr[:10]
+        is_registered = addr in registered
+
+        shorts: list[dict[str, Any]] = []
+        wallet_basket_notional = 0.0
+        for pos in d.get("positions") or []:
+            coin = (pos.get("coin") or "").upper()
+            try:
+                szi = float(pos.get("szi") or 0.0)
+            except Exception:  # noqa: BLE001
+                szi = 0.0
+            if szi >= 0:
+                continue  # only SHORTs interest us for basket detection
+            try:
+                ntl = float(pos.get("position_value") or pos.get("ntl_pos") or 0.0)
+            except Exception:  # noqa: BLE001
+                ntl = 0.0
+            if abs(ntl) < 1.0:
+                continue  # dust
+            if coin not in basket_tokens:
+                continue
+            try:
+                entry_px = float(pos.get("entryPx") or pos.get("entry_px") or 0.0)
+            except Exception:  # noqa: BLE001
+                entry_px = 0.0
+            shorts.append(
+                {
+                    "coin": coin,
+                    "side": "SHORT",
+                    "szi": szi,
+                    "ntl": abs(ntl),
+                    "entryPx": entry_px,
+                }
+            )
+            wallet_basket_notional += abs(ntl)
+
+        if shorts:
+            coins = {s["coin"] for s in shorts}
+            basket_id = _infer_basket_id(coins)
+            status = "ACTIVE"
+            total_notional += wallet_basket_notional
+            if not is_registered and wallet_basket_notional >= ANOMALY_NOTIONAL_USD:
+                anomalies.append(
+                    {
+                        "wallet": addr,
+                        "reason": "UNREGISTERED_WALLET_HOLDS_BASKET",
+                        "notional_usd": wallet_basket_notional,
+                    }
+                )
+        else:
+            basket_id = None
+            status = "IDLE"
+
+        wallets_out[addr] = {
+            "status": status,
+            "label": label,
+            "shorts": shorts,
+            "basket_id_inferido": basket_id,
+            "is_registered": is_registered,
+            "basket_notional_usd": wallet_basket_notional,
+        }
+
+    summary = {
+        "any_active": any(v["status"] == "ACTIVE" for v in wallets_out.values()),
+        "total_basket_notional_usd": total_notional,
+        "anomalies": anomalies,
+    }
+    return {
+        "ts_utc": datetime.now(timezone.utc).isoformat(),
+        "wallets": wallets_out,
+        "summary": summary,
+    }
+
+
+def render_state_block(detected: dict[str, Any]) -> str:
+    """Render an authoritative on-chain state block for the LLM prompt.
+
+    This block shadows the hardcoded fund_state.BASKET_STATUS — the LLM is
+    instructed to treat it as ground truth.
+    """
+    wallets = detected.get("wallets") or {}
+    summary = detected.get("summary") or {}
+    any_active = bool(summary.get("any_active"))
+    total = float(summary.get("total_basket_notional_usd") or 0.0)
+    anomalies = summary.get("anomalies") or []
+
+    lines: list[str] = []
+    lines.append(
+        "═══════ BASKET STATE — ON-CHAIN AUTORITATIVO (R-FINAL autodetect) ═══════"
+    )
+    lines.append(
+        "Esta sección es la VERDAD AUTORITATIVA. Si una constante hardcodeada "
+        "más abajo dice algo distinto, ignorala — la realidad on-chain "
+        "PREVALECE."
+    )
+    lines.append("")
+    if any_active:
+        active_baskets = sorted(
+            {
+                w.get("basket_id_inferido") or "?"
+                for w in wallets.values()
+                if w["status"] == "ACTIVE"
+            }
+        )
+        lines.append(
+            f"Basket activa: SÍ ({', '.join(active_baskets)}) — "
+            f"notional total ${total:,.0f}"
+        )
+        for addr, w in wallets.items():
+            if w["status"] != "ACTIVE":
+                continue
+            coins = ",".join(s["coin"] for s in w["shorts"])
+            lines.append(
+                f"  • {w['label']} ({addr[:10]}…): SHORT {coins} "
+                f"— ntl ${w['basket_notional_usd']:,.0f}"
+            )
+    else:
+        lines.append("Basket activa: NO (todas las wallets IDLE on-chain)")
+
+    if anomalies:
+        lines.append("")
+        lines.append("⚠️ ANOMALÍAS (wallets NO registradas con basket activa):")
+        for a in anomalies:
+            lines.append(
+                f"  • {a['wallet']} — {a['reason']} (ntl ${a['notional_usd']:,.0f})"
+            )
+    else:
+        lines.append("")
+        lines.append(
+            "Sin anomalías (todas las basket positions están en wallets "
+            "registradas del fondo)."
+        )
+    lines.append("═══════ FIN ON-CHAIN ═══════")
+    lines.append("")
+    return "\n".join(lines)
+
+
+async def build_authoritative_state_block() -> str:
+    """Produce the prompt block to inject above legacy fund_state.
+
+    Wraps detect + render. Safe to call from inside an async LLM caller.
+    Returns empty string if disabled.
+    """
+    if not ENABLED:
+        return ""
+    try:
+        detected = await detect_active_baskets()
+    except Exception:  # noqa: BLE001
+        log.exception("fund_state_v2: detect_active_baskets failed")
+        return ""
+    return render_state_block(detected)
