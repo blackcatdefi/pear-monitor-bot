@@ -28,6 +28,11 @@ const walletConfig = require('./walletConfig');
 const closeClassifier = require('./closeClassifier');
 const principalBridge = require('./principalBridge');
 const { appendFooter } = require('./branding');
+// R(v3) — TWAP-aware compounding gate + external wallet tracker + timestamp
+const compoundingGate = require('./compoundingGate');
+const externalWalletTracker = require('./externalWalletTracker');
+const { isTWAPActive } = require('./twapDetector');
+const { withTimestamp } = require('./timestampHelper');
 
 function _safeInt(v, d) {
   const n = parseInt(v, 10);
@@ -36,8 +41,14 @@ function _safeInt(v, d) {
 
 /**
  * Wraps the bot's sendNotification to enforce the rate limit + branding
- * footer. Called once during bootstrap; the wrapped fn replaces the raw
- * sendNotification on the monitor.
+ * footer + R(v3) timestamp. Called once during bootstrap; the wrapped fn
+ * replaces the raw sendNotification on the monitor.
+ *
+ * Timestamp is added to STRING bodies only and is idempotent — if a caller
+ * has already pre-stamped a message, withTimestamp will append a second
+ * one, so callers should pass un-stamped strings. The funds-available and
+ * compounding paths upstream pre-stamp; we detect that with a marker so
+ * we don't double-stamp.
  */
 function wrapNotifier(rawNotify) {
   return async function wrappedNotify(chatId, message, opts) {
@@ -45,7 +56,11 @@ function wrapNotifier(rawNotify) {
       // dropped — already logged inside canSendAlert()
       return;
     }
-    return rawNotify(chatId, message, opts);
+    let outgoing = message;
+    if (typeof outgoing === 'string' && !outgoing.includes('🕐')) {
+      outgoing = withTimestamp(outgoing, 'bottom');
+    }
+    return rawNotify(chatId, outgoing, opts);
   };
 }
 
@@ -132,31 +147,70 @@ function buildHooks({ notify, primaryChatId }) {
       }
     }
 
-    // 2. compounding
+    // 2. compounding (R(v3): wrapped with TWAP-aware gate)
+    //
+    // The legacy compoundingDetector triggered on +10% notional growth even
+    // when a TWAP was filling — apr-30 false positive ("Notional anterior
+    // $20,227 → $22,454 (+11.0%)" while v6 basket TWAP was still mid-fill).
+    // We now require BOTH:
+    //   • compoundingDetector says COMPOUND_DETECTED (legacy signal)
+    //   • compoundingGate.detectCompounding() returns isCompounding=true
+    //     (TWAP-active suppression + post-TWAP cooldown + account-value-grew check)
+    //
+    // The gate also silently maintains its own snapshot so it remains
+    // calibrated independently from the legacy detector.
     if (compoundingDetector.isEnabled()) {
       try {
-        const result = compoundingDetector.checkForCompounding(
+        const legacy = compoundingDetector.checkForCompounding(
           chatId,
           wallet,
           allPositions
         );
-        if (result.type === 'COMPOUND_DETECTED') {
+
+        // Compute aggregate notional + account value for the gate snapshot
+        const notional = (allPositions || []).reduce((sum, p) => {
+          const sz = Math.abs(Number(p.size) || 0);
+          const px = Number(p.markPrice || p.entryPrice) || 0;
+          return sum + sz * px;
+        }, 0);
+        // accountValue isn't always wired through this path; fall back to
+        // notional + a small buffer when missing so the gate's
+        // account-grew check doesn't false-block on mostly-unleveraged
+        // baskets. The compounding gate degrades gracefully when prevAcct
+        // is 0 (skips that gate).
+        const accountValue = Number(
+          (allPositions && allPositions.accountValue) ||
+            notional * 0.3 ||
+            0
+        );
+
+        const gate = compoundingGate.detectCompounding(
+          wallet,
+          allPositions,
+          notional,
+          accountValue
+        );
+
+        if (legacy.type === 'COMPOUND_DETECTED' && gate.isCompounding) {
           const isPrimary = walletConfig.isPrimaryWallet(wallet);
-          const msg = appendFooter(
-            compoundingDetector.formatCompoundAlert(label, result),
-            isPrimary
-          );
+          const baseMsg = compoundingDetector.formatCompoundAlert(label, legacy);
+          const msg = withTimestamp(appendFooter(baseMsg, isPrimary), 'bottom');
           await notify(chatId, msg, { parse_mode: 'Markdown' });
           const evt = {
             type: 'COMPOUND',
             chatId: String(chatId),
             wallet,
-            prev_notional: result.prevNotional,
-            current_notional: result.currentNotional,
-            growth_pct: result.growth * 100,
+            prev_notional: legacy.prevNotional,
+            current_notional: legacy.currentNotional,
+            growth_pct: legacy.growth * 100,
           };
           try { await principalBridge.publish(evt); }
           catch (_) { eventLog.recordEvent(evt); }
+        } else if (legacy.type === 'COMPOUND_DETECTED') {
+          // Legacy detector wanted to fire but gate blocked → forensic log
+          console.log(
+            `[extensions] suppressed compounding for ${label}: gate=${gate.reason}`
+          );
         }
       } catch (e) {
         console.error(
@@ -402,7 +456,26 @@ function bootstrap({
   // 7. Monkey-patch monitor for lifecycle hooks
   patchMonitor(monitor, hooks);
 
-  console.log('[extensions] R(v2) bootstrap complete.');
+  // 8. R(v3) — External wallet tracker (whales/top traders intel).
+  //    Idempotent: returns null and logs if EXTERNAL_WALLETS_JSON empty
+  //    or no primaryChatId. Wallets configured later via Railway env var
+  //    will pick up after redeploy.
+  let externalTrackerTimer = null;
+  if (primaryChatId && externalWalletTracker.isEnabled()) {
+    try {
+      externalTrackerTimer = externalWalletTracker.startSchedule({
+        notify: wrappedNotify,
+        primaryChatId,
+      });
+    } catch (e) {
+      console.error(
+        '[extensions] externalWalletTracker.startSchedule failed:',
+        e && e.message ? e.message : e
+      );
+    }
+  }
+
+  console.log('[extensions] R(v2)+R(v3) bootstrap complete.');
 
   return {
     hooks,
@@ -418,6 +491,12 @@ function bootstrap({
       } catch (_) {}
       try {
         if (weeklyTimer) clearInterval(weeklyTimer);
+      } catch (_) {}
+      try {
+        if (externalTrackerTimer) clearInterval(externalTrackerTimer);
+      } catch (_) {}
+      try {
+        externalWalletTracker.stopSchedule();
       } catch (_) {}
     },
   };

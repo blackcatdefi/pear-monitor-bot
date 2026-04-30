@@ -14,6 +14,12 @@ const {
   formatCloseAlert,
   formatBasketSummary,
 } = require('./closeAlerts');
+// R(v3) — TWAP-aware gating + timestamp helper. Imported here so the
+// existing edge-triggered funds-available branch can pass through the
+// gate without any structural rewrite of monitor.js.
+const { recordOpenEvent, isTWAPActive } = require('./twapDetector');
+const { shouldFireFundsAvailable } = require('./fundsAvailableGate');
+const { withTimestamp } = require('./timestampHelper');
 
 class PositionMonitor {
   constructor(hlApi, notifyFn, hlendApi = null) {
@@ -135,6 +141,14 @@ class PositionMonitor {
           entryPrice: pos.entryPrice,
           openedAt: new Date().toISOString(),
         };
+        // R(v3): feed the TWAP detector with each new open so that 3+
+        // distinct coins inside its sliding window flips the wallet into
+        // "TWAP active" state and downstream gates suppress noise.
+        try {
+          recordOpenEvent(addr, pos.coin);
+        } catch (_) {
+          /* never let detection break the poll cycle */
+        }
         if (!silent) {
           const dexTag =
             pos.dex !== 'Native' ? ` _(${pos.dexDisplay || pos.dex})_` : '';
@@ -251,23 +265,43 @@ class PositionMonitor {
       };
     }
 
-    // 5. Funds-available alert (edge-triggered)
+    // 5. Funds-available alert (edge-triggered + R(v3) TWAP-aware gate)
+    //
+    // The legacy logic only fired on the rising edge (hadFunds: false → true),
+    // but during a TWAP fill BCD's wallet rapidly toggles around the
+    // minAvailableBalance ($50) threshold, giving the user 5+ noise alerts
+    // per basket. R(v3) routes the candidate alert through
+    // shouldFireFundsAvailable() which suppresses:
+    //   1. anything during an active TWAP
+    //   2. residuals below FUNDS_AVAILABLE_THRESHOLD_USD ($200 default)
+    //   3. duplicates within a 1h window for the same wallet+amount bucket
+    //
+    // ws.hadFunds is still maintained so the original edge-trigger remains
+    // a candidate gate — the new gate stacks ON TOP, never bypasses it.
     const agg = this.hlApi.aggregateBalances(allStates);
     const available = agg.totalWithdrawable;
 
     if (available >= this.minAvailableBalance && ws.hadFunds === false) {
       if (!silent) {
-        await this.notify(
-          chatId,
-          [
+        const gate = shouldFireFundsAvailable(addr, available);
+        if (gate.shouldFire) {
+          const baseMsg = [
             `💰 *Funds available to trade!*`,
             ``,
             `📍 Wallet: ${label}`,
             `💵 Available: $${available.toFixed(2)}`,
             `📊 Account value: $${agg.totalAccountValue.toFixed(2)}`,
             `📈 Margin used: $${agg.totalMarginUsed.toFixed(2)}`,
-          ].join('\n')
-        );
+          ].join('\n');
+          await this.notify(chatId, withTimestamp(baseMsg, 'bottom'));
+        } else {
+          // Helpful for forensic log review when investigating why an alert
+          // didn't fire — surfaces TWAP_ACTIVE / BELOW_THRESHOLD_x / RECENTLY_ALERTED
+          console.log(
+            `[monitor] suppressed funds-available for ${label} (` +
+              `$${available.toFixed(2)}): ${gate.reason}`
+          );
+        }
       }
     }
     ws.hadFunds = available >= this.minAvailableBalance;
