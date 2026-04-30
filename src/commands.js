@@ -17,6 +17,7 @@
 const eventLog = require('./eventLog');
 const healthServer = require('./healthServer');
 const weeklySummary = require('./weeklySummary');
+const basketDedup = require('./basketDedup');
 
 function isEnabled() {
   return (
@@ -230,8 +231,55 @@ function attachCommands(bot, opts = {}) {
     );
   });
 
+  // /dedup_status — R(v4) basket dedup inspection
+  bot.onText(/^\/dedup_status$/, async (msg) => {
+    const chatId = msg.chat.id;
+    if (!basketDedup.ENABLED) {
+      await bot.sendMessage(
+        chatId,
+        '📋 Basket dedup\n\nDISABLED (BASKET_DEDUP_ENABLED=false)'
+      );
+      return;
+    }
+    let entries;
+    try {
+      entries = basketDedup.getAllEntries();
+    } catch (e) {
+      await bot.sendMessage(
+        chatId,
+        `⚠️ /dedup_status fallo: ${e && e.message ? e.message : 'error'}`
+      );
+      return;
+    }
+    if (entries.length === 0) {
+      await bot.sendMessage(
+        chatId,
+        `📋 *Basket dedup*\n\n` +
+          `TTL: ${basketDedup.TTL_DAYS} días\n` +
+          `Entradas activas: 0`,
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+    const lines = entries.slice(0, 10).map((e) => {
+      const ageH = ((Date.now() - e.sentAt) / 3600000).toFixed(1);
+      const w = e.wallet || '';
+      const wShort = w.length >= 10 ? `${w.slice(0, 6)}...${w.slice(-4)}` : w;
+      const summary = (e.positions || [])
+        .map((p) => `${p.coin}-${p.side}`)
+        .join(',');
+      return `  • \`${wShort}\` | ${summary} | ${ageH}h ago`;
+    });
+    const msgText =
+      `📋 *Basket dedup*\n\n` +
+      `TTL: ${basketDedup.TTL_DAYS} días\n` +
+      `Entradas activas: ${entries.length}\n\n` +
+      lines.join('\n');
+    await bot.sendMessage(chatId, msgText, { parse_mode: 'Markdown' });
+  });
+
   console.log(
-    '[commands] attached: /history /pnl /status /export /summary /healthcheck'
+    '[commands] attached: /history /pnl /status /export /summary /healthcheck /dedup_status'
   );
 }
 

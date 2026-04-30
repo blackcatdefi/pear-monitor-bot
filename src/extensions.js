@@ -33,6 +33,11 @@ const compoundingGate = require('./compoundingGate');
 const externalWalletTracker = require('./externalWalletTracker');
 const { isTWAPActive } = require('./twapDetector');
 const { withTimestamp } = require('./timestampHelper');
+// R(v4) — Basket dedup. Gates BASKET_OPEN dispatch on a SHA-256 hash of
+// (wallet + sorted positions) that survives bot restarts. Root cause of
+// the apr-30 duplicate "NUEVA BASKET ABIERTA" was lastSeenSnapshots being
+// in-memory only — every redeploy re-classified active positions as new.
+const basketDedup = require('./basketDedup');
 
 function _safeInt(v, d) {
   const n = parseInt(v, 10);
@@ -106,37 +111,90 @@ function buildHooks({ notify, primaryChatId }) {
           prev
         );
         if (newPositions.length > 0) {
-          await openAlerts.emitAlerts({
-            chatId,
-            wallet,
-            label,
-            newPositions,
-            notify: async (cId, msg) => {
-              const isPrimary = walletConfig.isPrimaryWallet(wallet);
-              await notify(cId, appendFooter(msg, isPrimary), {
-                parse_mode: 'Markdown',
-              });
-              for (const p of newPositions) {
-                const evt = {
-                  type: 'OPEN',
-                  chatId: String(chatId),
-                  wallet,
-                  coin: p.coin,
-                  side: p.side || (p.size < 0 ? 'SHORT' : 'LONG'),
-                  size: p.size,
-                  entryPrice: p.entryPrice,
-                  entryNotional: Math.abs(
-                    (p.size || 0) * (p.entryPrice || 0)
-                  ),
-                  leverage: p.leverage || null,
-                };
-                // Bridge replaces direct eventLog write — it both
-                // appends to JSONL AND fires the optional webhook.
-                try { await principalBridge.publish(evt); }
-                catch (_) { eventLog.recordEvent(evt); }
+          // R(v4) — persistent BASKET_OPEN dedup gate.
+          //
+          // If 3+ "new" positions appear in one cycle, openAlerts will
+          // classify it as BASKET_OPEN. Before letting it fire, hash
+          // (wallet + sorted positions) and check the persisted JSON
+          // store. If we already alerted this exact basket in the last
+          // 7 days (or whatever BASKET_DEDUP_TTL_DAYS is set to), drop
+          // the alert and update the in-memory snapshot so subsequent
+          // cycles see prev=current and don't re-classify.
+          //
+          // Sub-3-position openings (INDIVIDUAL_OPEN) fall through
+          // unchanged — those are real new opens, not basket re-fires.
+          let suppressedByDedup = false;
+          const isBasketCandidate =
+            newPositions.length >= openAlerts.BASKET_MIN_COUNT;
+          let basketDedupPositions = null;
+          if (isBasketCandidate && basketDedup.ENABLED) {
+            basketDedupPositions = newPositions.map((p) => ({
+              coin: p.coin,
+              side: p.side || (p.size < 0 ? 'SHORT' : 'LONG'),
+              entryPx: p.entryPrice,
+            }));
+            const dedupCheck = basketDedup.checkAlreadyAlerted(
+              wallet,
+              basketDedupPositions
+            );
+            if (dedupCheck.wasAlerted) {
+              const hoursAgo = (
+                (Date.now() - dedupCheck.alertedAt) / 3600000
+              ).toFixed(1);
+              console.log(
+                `[basketDedup] suppressed duplicate BASKET_OPEN for ${label} ` +
+                  `— already alerted ${hoursAgo}h ago ` +
+                  `(hash=${dedupCheck.hash.slice(0, 12)}...)`
+              );
+              suppressedByDedup = true;
+            }
+          }
+
+          if (!suppressedByDedup) {
+            await openAlerts.emitAlerts({
+              chatId,
+              wallet,
+              label,
+              newPositions,
+              notify: async (cId, msg) => {
+                const isPrimary = walletConfig.isPrimaryWallet(wallet);
+                await notify(cId, appendFooter(msg, isPrimary), {
+                  parse_mode: 'Markdown',
+                });
+                for (const p of newPositions) {
+                  const evt = {
+                    type: 'OPEN',
+                    chatId: String(chatId),
+                    wallet,
+                    coin: p.coin,
+                    side: p.side || (p.size < 0 ? 'SHORT' : 'LONG'),
+                    size: p.size,
+                    entryPrice: p.entryPrice,
+                    entryNotional: Math.abs(
+                      (p.size || 0) * (p.entryPrice || 0)
+                    ),
+                    leverage: p.leverage || null,
+                  };
+                  // Bridge replaces direct eventLog write — it both
+                  // appends to JSONL AND fires the optional webhook.
+                  try { await principalBridge.publish(evt); }
+                  catch (_) { eventLog.recordEvent(evt); }
+                }
+              },
+            });
+            // Persist the basket hash AFTER successful dispatch so a
+            // notify failure doesn't poison the dedup store.
+            if (isBasketCandidate && basketDedup.ENABLED && basketDedupPositions) {
+              try {
+                basketDedup.markAsAlerted(wallet, basketDedupPositions);
+              } catch (e) {
+                console.error(
+                  '[basketDedup] markAsAlerted failed:',
+                  e && e.message ? e.message : e
+                );
               }
-            },
-          });
+            }
+          }
         }
       } catch (e) {
         console.error(
