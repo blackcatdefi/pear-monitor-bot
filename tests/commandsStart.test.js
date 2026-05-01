@@ -68,9 +68,9 @@ test('/start first-time muestra onboarding completo', async () => {
   assert.match(out.text, /Tu copiloto de trading on-chain/);
   assert.match(out.text, /Trackear wallets de top traders/);
   assert.match(out.text, /Configurá tu zona horaria con \/timezone/);
-  // Inline keyboard: 3 rows.
+  // Inline keyboard: 4 rows (R-AUTOCOPY adds signals + copy_auto row).
   assert.ok(out.opts.reply_markup);
-  assert.strictEqual(out.opts.reply_markup.inline_keyboard.length, 3);
+  assert.strictEqual(out.opts.reply_markup.inline_keyboard.length, 4);
 });
 
 test('/start recurring usuario muestra dashboard compacto', async () => {
@@ -124,15 +124,17 @@ test('/start no clobbera TZ si user ya la tiene seteada', async () => {
   assert.strictEqual(tzMgr.getUserTz(77777), 'America/New_York');
 });
 
-test('keyboard tiene 3 filas: track, tz+status, hero', () => {
+test('keyboard tiene 4 filas: track, signals+copy, tz+status, hero', () => {
   const kb = commandsStart.buildStartKeyboard();
-  assert.strictEqual(kb.inline_keyboard.length, 3);
+  assert.strictEqual(kb.inline_keyboard.length, 4);
   // Row 1: 2 buttons (track add + track list)
   assert.strictEqual(kb.inline_keyboard[0].length, 2);
-  // Row 2: 2 buttons (tz menu + status)
+  // Row 2: 2 buttons (signals + copy_auto) — R-AUTOCOPY
   assert.strictEqual(kb.inline_keyboard[1].length, 2);
-  // Row 3: 1 hero button
-  assert.strictEqual(kb.inline_keyboard[2].length, 1);
+  // Row 3: 2 buttons (tz menu + status)
+  assert.strictEqual(kb.inline_keyboard[2].length, 2);
+  // Row 4: 1 hero button
+  assert.strictEqual(kb.inline_keyboard[3].length, 1);
 });
 
 test('callback start:track_list con cero wallets pide /track', async () => {

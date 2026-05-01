@@ -31,6 +31,9 @@ const onboarding = require('./onboarding');
 const tzMgr = require('./timezoneManager');
 const wt = require('./walletTracker');
 const sm = require('./userStateMachine');
+// R-AUTOCOPY — referral capture + stats touch.
+const share = require('./share');
+const stats = require('./stats');
 
 const DEFAULT_HERO_URL =
   'https://app.pear.garden/?referral=BlackCatDeFi';
@@ -55,8 +58,13 @@ function buildStartKeyboard(/* isReturning unused — same layout */) {
         { text: '📋 Mis wallets', callback_data: 'start:track_list' },
       ],
       [
-        { text: '🌎 Mi zona horaria', callback_data: 'start:tz_menu' },
-        { text: '📊 Ver alertas activas', callback_data: 'start:status_view' },
+        // R-AUTOCOPY — signals + copy auto in row 2.
+        { text: '📡 Signals oficiales', callback_data: 'start:signals_menu' },
+        { text: '🤖 Copy auto', callback_data: 'start:copyauto_menu' },
+      ],
+      [
+        { text: '🌎 Mi TZ', callback_data: 'start:tz_menu' },
+        { text: '📊 Status', callback_data: 'start:status_view' },
       ],
       [
         { text: '🍐 Abrir Pear Protocol', url: _heroUrl() },
@@ -122,6 +130,19 @@ async function handleStart(bot, msg) {
     }
   }
   onboarding.markSeen(userId);
+
+  // R-AUTOCOPY — capture /start ref_<userId> deep-link payload (only on
+  // first sighting, to keep the flow idempotent).
+  if (wasFirstTime) {
+    const m = (msg.text || '').match(/^\/start(?:@\w+)?\s+(\S+)/);
+    if (m && m[1]) {
+      const refUid = share.parseStartPayload(m[1]);
+      if (refUid) {
+        try { share.recordReferral(refUid, userId); } catch (_) {}
+      }
+    }
+  }
+  try { stats.touch(userId); } catch (_) {}
 
   const text = wasFirstTime
     ? _formatFirstTimeText(detectedTz)
@@ -215,6 +236,30 @@ async function _handleCallback(bot, cb) {
     return true;
   }
 
+  if (action === 'signals_menu') {
+    try {
+      const cmdSignals = require('./commandsSignals');
+      await bot.sendMessage(chatId, cmdSignals._bodyText(), {
+        parse_mode: 'Markdown',
+        reply_markup: cmdSignals._menuKeyboard(),
+        disable_web_page_preview: true,
+      });
+    } catch (_) {
+      await bot.sendMessage(chatId, 'Tocá /signals.', { parse_mode: 'Markdown' });
+    }
+    return true;
+  }
+
+  if (action === 'copyauto_menu') {
+    try {
+      const cmdCA = require('./commandsCopyAuto');
+      await cmdCA.showMenu(bot, chatId, userId);
+    } catch (_) {
+      await bot.sendMessage(chatId, 'Tocá /copy_auto.', { parse_mode: 'Markdown' });
+    }
+    return true;
+  }
+
   if (action === 'status_view') {
     const wallets = wt.getUserWallets(userId);
     const tz = tzMgr.getUserTz(userId);
@@ -275,7 +320,9 @@ async function _handleMuteCallback(bot, cb) {
 }
 
 function attach(bot) {
-  bot.onText(/^\/start(?:@\w+)?$/i, async (msg) => {
+  // R-AUTOCOPY — accept optional /start payload (deep-link referral) so
+  // the regex matches `/start ref_12345` as well as bare `/start`.
+  bot.onText(/^\/start(?:@\w+)?(?:\s+\S+)?$/i, async (msg) => {
     try {
       await handleStart(bot, msg);
     } catch (e) {

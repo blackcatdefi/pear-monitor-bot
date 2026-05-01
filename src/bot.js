@@ -8,23 +8,35 @@ const {
 function createBot(token, hlApi, monitor, hlendApi = null) {
   const bot = new TelegramBot(token, { polling: true });
 
-  // Register bot commands menu
+  // Register bot commands menu (R-AUTOCOPY: 14 user cmds + 11 operator cmds)
   bot.setMyCommands([
-    { command: 'start', description: '🍐 Empezar' },
-    { command: 'menu', description: '🍐 Menú principal' },
-    { command: 'positions', description: '📊 Ver posiciones abiertas' },
-    { command: 'balance', description: '💰 Fondos disponibles' },
-    { command: 'wallets', description: '📋 Wallets monitoreadas' },
-    { command: 'check', description: '🔍 Chequear ahora' },
-    { command: 'borrow', description: '🏦 HyperLend Borrow disponible' },
-    { command: 'track', description: '🎯 Track wallets externas (whales)' },
-    { command: 'timezone', description: '🌐 Setear tu zona horaria' },
-    { command: 'history', description: '📜 Últimos cierres' },
-    { command: 'pnl', description: '💰 PnL por período' },
-    { command: 'status', description: '✅ Health del bot' },
-    { command: 'export', description: '📤 Exportar CSV' },
-    { command: 'summary', description: '📊 Resumen semanal' },
-    { command: 'healthcheck', description: '✅ Health check' },
+    { command: 'start',         description: '🍐 Inicio' },
+    { command: 'track',         description: '🎯 Trackear wallets externas' },
+    { command: 'signals',       description: '📡 Canal oficial de signals' },
+    { command: 'copy_auto',     description: '🤖 Copy automático (MANUAL/AUTO)' },
+    { command: 'capital',       description: '💰 Capital por signal' },
+    { command: 'timezone',      description: '🌐 Zona horaria' },
+    { command: 'portfolio',     description: '📊 Tu portfolio (read-only)' },
+    { command: 'leaderboard',   description: '🏆 Top wallets trackeadas' },
+    { command: 'alerts_config', description: '🔔 Granularidad de alertas' },
+    { command: 'stats',         description: '📈 Tus stats personales' },
+    { command: 'share',         description: '🎁 Invitar amigos' },
+    { command: 'learn',         description: '📚 Tutoriales' },
+    { command: 'feedback',      description: '💬 Soporte / sugerencias' },
+    { command: 'help',          description: '🆘 Ayuda' },
+    // Operator commands (BCD personal)
+    { command: 'menu',          description: '⚙️ Operator menu' },
+    { command: 'positions',     description: '📊 Posiciones abiertas' },
+    { command: 'balance',       description: '💰 Fondos disponibles' },
+    { command: 'wallets',       description: '📋 Wallets monitoreadas' },
+    { command: 'check',         description: '🔍 Chequear ahora' },
+    { command: 'borrow',        description: '🏦 HyperLend Borrow' },
+    { command: 'history',       description: '📜 Últimos cierres' },
+    { command: 'pnl',           description: '💰 PnL por período' },
+    { command: 'status',        description: '✅ Health del bot' },
+    { command: 'export',        description: '📤 Exportar CSV' },
+    { command: 'summary',       description: '📊 Resumen semanal' },
+    { command: 'healthcheck',   description: '✅ Health check' },
   ]);
 
   function mainMenu() {

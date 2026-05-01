@@ -44,6 +44,21 @@ const commandsTimezone = require('./commandsTimezone');
 const walletTrackerScheduler = require('./walletTrackerScheduler');
 // R-START — /start onboarding (first-time vs recurring + inline keyboard).
 const commandsStart = require('./commandsStart');
+// R-AUTOCOPY — auto copy-trading + best-bot features.
+const signalsChannel = require('./signalsChannel');
+const copyAuto = require('./copyAuto');
+const dailyDigest = require('./dailyDigest');
+const commandsSignals = require('./commandsSignals');
+const commandsCopyAuto = require('./commandsCopyAuto');
+const commandsCapital = require('./commandsCapital');
+const commandsPortfolio = require('./commandsPortfolio');
+const commandsLeaderboard = require('./commandsLeaderboard');
+const commandsAlertsConfig = require('./commandsAlertsConfig');
+const commandsStats = require('./commandsStats');
+const commandsShare = require('./commandsShare');
+const commandsLearn = require('./commandsLearn');
+const commandsFeedback = require('./commandsFeedback');
+const commandsHelp = require('./commandsHelp');
 
 function _safeInt(v, d) {
   const n = parseInt(v, 10);
@@ -543,6 +558,31 @@ function bootstrap({
         e && e.message ? e.message : e
       );
     }
+
+    // R-AUTOCOPY — wire all R-AUTOCOPY commands. Each attach() is wrapped so
+    // a failure in one module doesn't break the rest of the bootstrap.
+    const wireAutocopy = [
+      ['signalsChannel', () => signalsChannel.attach(bot)],
+      ['commandsSignals', () => commandsSignals.attach(bot)],
+      ['commandsCopyAuto', () => commandsCopyAuto.attach(bot)],
+      ['commandsCapital', () => commandsCapital.attach(bot)],
+      ['commandsPortfolio', () => commandsPortfolio.attach(bot)],
+      ['commandsLeaderboard', () => commandsLeaderboard.attach(bot)],
+      ['commandsAlertsConfig', () => commandsAlertsConfig.attach(bot)],
+      ['commandsStats', () => commandsStats.attach(bot)],
+      ['commandsShare', () => commandsShare.attach(bot)],
+      ['commandsLearn', () => commandsLearn.attach(bot)],
+      ['commandsHelp', () => commandsHelp.attach(bot)],
+    ];
+    for (const [name, fn] of wireAutocopy) {
+      try { fn(); }
+      catch (e) {
+        console.error(
+          `[extensions] ${name}.attach failed:`,
+          e && e.message ? e.message : e
+        );
+      }
+    }
   }
 
   // 7. Monkey-patch monitor for lifecycle hooks
@@ -581,7 +621,37 @@ function bootstrap({
     );
   }
 
-  console.log('[extensions] R(v2)+R(v3)+R-PUBLIC bootstrap complete.');
+  // 10. R-AUTOCOPY — wire copyAuto dispatcher + /feedback + dailyDigest.
+  //     All of these need access to the wrappedNotify (rate-limited + branded).
+  try {
+    copyAuto.attach(wrappedNotify);
+  } catch (e) {
+    console.error(
+      '[extensions] copyAuto.attach failed:',
+      e && e.message ? e.message : e
+    );
+  }
+  if (bot) {
+    try {
+      commandsFeedback.attach(bot, () => wrappedNotify);
+    } catch (e) {
+      console.error(
+        '[extensions] commandsFeedback.attach failed:',
+        e && e.message ? e.message : e
+      );
+    }
+  }
+  let dailyDigestTimer = null;
+  try {
+    dailyDigestTimer = dailyDigest.startSchedule({ notify: wrappedNotify });
+  } catch (e) {
+    console.error(
+      '[extensions] dailyDigest.startSchedule failed:',
+      e && e.message ? e.message : e
+    );
+  }
+
+  console.log('[extensions] R(v2)+R(v3)+R-PUBLIC+R-AUTOCOPY bootstrap complete.');
 
   return {
     hooks,
@@ -608,6 +678,10 @@ function bootstrap({
         if (walletTrackerTimer) clearInterval(walletTrackerTimer);
       } catch (_) {}
       try { walletTrackerScheduler.stopSchedule(); } catch (_) {}
+      try {
+        if (dailyDigestTimer) clearInterval(dailyDigestTimer);
+      } catch (_) {}
+      try { dailyDigest.stopSchedule(); } catch (_) {}
     },
   };
 }

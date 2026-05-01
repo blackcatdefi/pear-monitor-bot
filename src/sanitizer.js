@@ -46,7 +46,8 @@ const FORBIDDEN_TERMS = [
 ];
 
 // "BlackCatDeFi" / "BCD" / "Black Cat" allowed ONLY when used as referral code
-// inside a Pear URL or env var value.
+// inside a Pear URL, env var value, or as the official Telegram channel handle
+// "@BlackCatDeFiSignals" (R-AUTOCOPY).
 function isAllowedBlackCat(line) {
   if (typeof line !== 'string') return false;
   // Allow when used as referral query param value or as referral env var/key
@@ -56,6 +57,11 @@ function isAllowedBlackCat(line) {
   if (/BCD_PEAR_REFERRAL_LINK/.test(line)) return true;
   // Allow the bare literal referral-code value (default fallback in modules)
   if (/^\s*BlackCatDeFi\s*$/.test(line)) return true;
+  // R-AUTOCOPY — public Telegram channel handle is allowed (it's the
+  // canonical signals channel, not a persona reference).
+  if (/@BlackCatDeFiSignals/i.test(line)) return true;
+  if (/SIGNALS_CHANNEL/i.test(line)) return true;
+  if (/blackcatdefisignals/i.test(line)) return true;
   return false;
 }
 

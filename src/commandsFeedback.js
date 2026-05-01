@@ -1,0 +1,82 @@
+'use strict';
+
+/**
+ * R-AUTOCOPY — /feedback command.
+ *
+ * Captures the next plain-text message after /feedback and forwards it to
+ * OWNER_USER_ID via the bot's wrapped notifier. /cancel exits.
+ */
+
+const feedback = require('./feedback');
+const stats = require('./stats');
+const sm = require('./userStateMachine');
+
+const STATE_AWAITING_FEEDBACK = 'AWAITING_FEEDBACK';
+if (!sm.STATES[STATE_AWAITING_FEEDBACK]) {
+  sm.STATES[STATE_AWAITING_FEEDBACK] = STATE_AWAITING_FEEDBACK;
+}
+
+function _isAwaiting(chatId) {
+  const st = sm.getState(chatId);
+  return st && st.state === STATE_AWAITING_FEEDBACK;
+}
+
+function attach(bot, getNotify) {
+  bot.onText(/^\/feedback(?:@\w+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    if (!feedback.ownerConfigured()) {
+      await bot.sendMessage(
+        chatId,
+        '⚠️ Feedback temporalmente no disponible (owner no configurado). Probá más tarde.'
+      );
+      return;
+    }
+    sm.setState(chatId, STATE_AWAITING_FEEDBACK, {});
+    await bot.sendMessage(
+      chatId,
+      '💬 *Enviar feedback*\n\nEscribí tu mensaje. Lo recibo directamente.\n\n_(escribí /cancel para volver)_',
+      { parse_mode: 'Markdown' }
+    );
+  });
+
+  bot.on('message', async (msg) => {
+    if (!msg.text) return;
+    if (!_isAwaiting(msg.chat.id)) return;
+    if (msg.text.startsWith('/')) {
+      // /cancel handled below; any other slash-cmd also exits state
+      sm.reset(msg.chat.id);
+      if (/^\/cancel/i.test(msg.text)) {
+        await bot.sendMessage(msg.chat.id, '✖️ Cancelado.');
+      }
+      return;
+    }
+    sm.reset(msg.chat.id);
+    const notify = typeof getNotify === 'function' ? getNotify() : null;
+    if (typeof notify !== 'function') {
+      await bot.sendMessage(
+        msg.chat.id,
+        '⚠️ No pude reenviar tu feedback ahora (notifier no listo). Probá más tarde.'
+      );
+      return;
+    }
+    const r = await feedback.forwardFeedback({
+      notify,
+      fromUserId: msg.from && msg.from.id,
+      fromUsername: msg.from && msg.from.username,
+      text: msg.text,
+    });
+    if (r && r.ok) {
+      stats.incrementFeedback(msg.from && msg.from.id);
+      await bot.sendMessage(msg.chat.id, '✅ Feedback recibido. Gracias.');
+    } else {
+      await bot.sendMessage(
+        msg.chat.id,
+        `⚠️ No pude reenviar tu feedback (${r && r.error ? r.error : 'error'}).`
+      );
+    }
+  });
+
+  console.log('[commandsFeedback] attached: /feedback');
+}
+
+module.exports = { attach, STATE_AWAITING_FEEDBACK, _isAwaiting };

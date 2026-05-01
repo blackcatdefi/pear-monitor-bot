@@ -15,12 +15,18 @@
  * Timeout: configurable via USER_STATE_TIMEOUT_MIN (default 5).
  */
 
-const STATES = Object.freeze({
+// R-AUTOCOPY: exposes additional conversational states for /portfolio and
+// /feedback. NOT frozen — the new commands modules monkey-patch their state
+// names at module-load (defensive: keeps R-PUBLIC behavior intact even if a
+// commands module isn't loaded).
+const STATES = {
   IDLE: 'IDLE',
   AWAITING_WALLET_ADDRESS: 'AWAITING_WALLET_ADDRESS',
   AWAITING_WALLET_LABEL: 'AWAITING_WALLET_LABEL',
   AWAITING_REMOVE_ADDRESS: 'AWAITING_REMOVE_ADDRESS',
-});
+  AWAITING_PORTFOLIO_ADDRESS: 'AWAITING_PORTFOLIO_ADDRESS',
+  AWAITING_FEEDBACK: 'AWAITING_FEEDBACK',
+};
 
 function _timeoutMs() {
   const m = parseInt(process.env.USER_STATE_TIMEOUT_MIN || '5', 10);
