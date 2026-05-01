@@ -1,15 +1,35 @@
 """System prompt for LLM providers — Co-Gestor del Fondo Black Cat.
 
-NOTE: This prompt is used by multiple LLM providers (Gemini, DeepSeek, Llama, Groq,
-Anthropic). The format instructions at the top ensure consistent output regardless
-of which model processes the request.
+R-FUNDFIX (1 may 2026)
+----------------------
+The LLM context used to receive contradictory inputs:
+  (a) on-chain truth (5 SHORTs active in 0xc7AE — basket v6) and
+  (b) legacy hardcoded strings ("BASKET v4 CERRADO 2026-04-20", "v5
+      PENDING_CAPITAL", BASKET_NOTE saying "wallets IDLE").
+
+The model correctly detected the conflict and asked BCD to confirm
+("BCD confirmar si esto es el v5 ya deployado"). Single-source-of-truth
+fix:
+  • build_fund_state_block() no longer renders the basket sections —
+    on-chain reality (auto.fund_state_v2.build_authoritative_state_block)
+    is the only basket source the LLM sees.
+  • The hardcoded prose section "1. ALT SHORT BLEED: BASKET v4 CERRADO
+    ..." was replaced with a neutral pointer to the on-chain block.
+  • Non-conflicting constants (HF thresholds, Trade del Ciclo, Flywheel
+    pair-trade design, BCD DCA plan) STAY — they don't drift with the
+    basket and remain valid prompt material.
+
+NOTE: This prompt is used by multiple LLM providers (Gemini, DeepSeek,
+Llama, Groq, Anthropic). Format instructions ensure consistent output.
 """
 
-from fund_state import (
-    BASKET_NOTE,
-    BASKET_STATUS,
-    BASKET_V5_PLAN,
-    BASKET_V5_STATUS,
+# R-FUNDFIX: imports trimmed to non-stale constants only. The legacy
+# BASKET_STATUS / BASKET_V5_STATUS / BASKET_V5_PLAN / BASKET_NOTE were
+# the source of LLM context contradiction with on-chain reality — they
+# are no longer rendered into the prompt. They still exist in
+# fund_state.py for non-LLM consumers (status_quick, heartbeat, etc.)
+# until those are migrated.
+from auto.fund_constants import (
     BCD_DCA_PLAN,
     BLOFIN_BALANCE_AVAILABLE,
     FLYWHEEL_NOTE,
@@ -29,18 +49,18 @@ from fund_state import (
 
 
 def build_fund_state_block() -> str:
-    """Build an authoritative fund-state block injected at top of prompt.
+    """Authoritative non-state context injected at top of prompt.
 
-    This shadows any stale info in the prose below — the LLM MUST treat these
-    values as ground truth.
+    R-FUNDFIX: this block deliberately OMITS the basket section. The
+    basket is rendered separately by
+    ``auto.fund_state_v2.build_authoritative_state_block`` from
+    on-chain reality. Including any "BASKET ALT SHORT BLEED" /
+    "BASKET v5 PLAN" lines here re-introduces the 1 may 17:23 bug
+    where the LLM saw two contradicting basket states and asked BCD
+    to confirm.
     """
-    active = BASKET_STATUS.get("active", False)
-    last = BASKET_STATUS.get("last_basket", "?")
-    last_net = BASKET_STATUS.get("last_basket_result_net_usd", 0.0)
-    closed = BASKET_STATUS.get("last_basket_closed", "?")
-    nxt = BASKET_STATUS.get("next_basket", "?")
     return f"""
-═══════ ESTADO AUTORITATIVO DEL FONDO (ground truth — shadows todo lo de abajo) ═══════
+═══════ ESTADO AUTORITATIVO DEL FONDO (constantes — non-state) ═══════
 
 HF THRESHOLDS (regla operativa del fondo):
   • HF < {HF_LIQUIDATION:.2f} → LIQUIDACIÓN REAL de HyperLend
@@ -61,18 +81,12 @@ TRADE DEL CICLO:
   • {TRADE_DEL_CICLO_NOTE}
 
 BASKET ALT SHORT BLEED:
-  • Activo: {'SÍ' if active else 'NO (IDLE)'}
-  • Último basket: {last} — resultado NET ${last_net:+,.2f} — cerrado {closed}
-  • Próximo: {nxt}
-  • {BASKET_NOTE}
-
-BASKET v5 — PLAN OPERATIVO:
-  • Status: {BASKET_V5_STATUS}
-  • Capital target: ${BASKET_V5_PLAN.get('capital_target_usdt', 0):,} USDT | Notional target: ${BASKET_V5_PLAN.get('notional_target_usdt', 0):,} USDT
-  • Leverage máx: {BASKET_V5_PLAN.get('leverage_max', '?')} | Fuente: {BASKET_V5_PLAN.get('source', '?')}
-  • Deploy ETA: {BASKET_V5_PLAN.get('deploy_eta', '?')} | Bono Blofin unlock: {BASKET_V5_PLAN.get('bonus_blofin_unlock', '?')}
-  • Lógica: {BASKET_V5_PLAN.get('logic', '?')}
-  • Triggers de cierre: {' | '.join(BASKET_V5_PLAN.get('triggers_close', []))}
+  • La verdad sobre el basket activa/inactiva ESTÁ ARRIBA, en el bloque
+    "BASKET STATE — ON-CHAIN AUTORITATIVO". Tomá esos datos como ground
+    truth — leé el estado del bloque on-chain, no asumas un id específico
+    de basket de tu memoria. Si la realidad on-chain difiere de cualquier
+    memoria previa, prevalece la on-chain. NO pidas confirmación a BCD
+    por una discrepancia con tu memoria.
 
 FLYWHEEL HYPERLEND:
   • {FLYWHEEL_NOTE}
@@ -132,15 +146,24 @@ SYSTEM_PROMPT = """INSTRUCCIONES CRÍTICAS DEL FORMATO (seguir AL PIE DE LA LETR
 Sos el Co-Gestor #1 de Fondo Black Cat, un fondo crypto/DeFi operado a tiempo completo desde 2020.
 Tu rol: análisis macro, gestión de riesgo, cero sycophancy. Reportás en español.
 
-POSICIONES ACTIVAS DEL FONDO:
+FUENTE DE VERDAD DEL ESTADO DEL FONDO:
+El bloque "BASKET STATE — ON-CHAIN AUTORITATIVO" inyectado al tope es la única
+fuente de verdad sobre qué basket está activa y qué posiciones están abiertas.
+Usá EXCLUSIVAMENTE esos datos para describir basket SHORT (Alt Short Bleed).
+NO inventes "v4 cerrado" / "v5 pending capital" / "v6 ya deployado" — leelo del
+bloque on-chain. Si el bloque dice ACTIVE, está activa. Si dice IDLE, está
+inactiva. Si dice anomalía, es anomalía. NO pidas confirmación al usuario por
+una discrepancia entre tu memoria y la realidad on-chain — la realidad on-chain
+PREVALECE siempre.
 
-1. ALT SHORT BLEED: BASKET v4 CERRADO 2026-04-20 22:45 UTC — NET +$290.20
-   - 3 wallets (0xcddf, 0x00bb, 0xc7AE) están IDLE desde el cierre.
-   - v5 EN PAUSA hasta nueva orden (pending capital).
-   - Cualquier valor spot <$1 en esas wallets es DUST RESIDUAL, NO posición activa.
+POSICIONES ACTIVAS DEL FONDO (esquema general, leer estado actual del bloque on-chain):
+
+1. ALT SHORT BLEED: ver "BASKET STATE — ON-CHAIN AUTORITATIVO" arriba.
+   - Si el bloque marca basket ACTIVA: usar coins, notional, label inferido tal cual.
+   - Si el bloque marca basket IDLE: cualquier valor spot <$1 en wallets de basket es DUST RESIDUAL.
    - NUNCA interpretar account_value=0 como "posiciones Pear Protocol TWAP en contratos separados".
-   - NO reabrir el basket sin orden explícita del socio humano.
-   - Kill scenario (si se reabre): ceasefire + dovish Fed → risk-on alt squeeze
+   - NO reabrir el basket sin orden explícita del socio humano — pero SÍ reportar el estado on-chain real cuando lo veas.
+   - Kill scenario: ceasefire + dovish Fed → risk-on alt squeeze (aplica si la basket está abierta)
 
 2. WAR TRADE (DreamCash): INACTIVA — wallet 0x171b vacía por decisión operativa.
    - Tesis Dalio Stage 6 sigue vigente pero NO hay trade activo expuesto a ella.
@@ -302,7 +325,7 @@ Generá un análisis CORTO (máx 1500 chars) del estado de la tesis macro:
 
 Para cada uno de estos componentes, marcá ✅ VALIDA / ⚠️ NEUTRO / 🔴 INVALIDA con un dato específico:
 1. War trade (oil > $80, gold > $3500): Dalio Stage 6, Hormuz cerrado, energy crisis
-2. Alt Short Bleed: alts en bear, no risk-on squeeze
+2. Alt Short Bleed: leer estado real del bloque "BASKET STATE — ON-CHAIN AUTORITATIVO" arriba; alts en bear / no risk-on squeeze valida la tesis cuando la basket está ACTIVE.
 3. HYPE flywheel (pair trade LONG kHYPE / SHORT ETH): HF > 1.10 (threshold operativo), kHYPE estable o subiendo. ETH outperform HYPE NO invalida la tesis — es caso adverso intrínseco.
 4. Fed hawkish: Warsh narrative, no pivot dovish
 5. Trade del Ciclo (BTC bull cycle): BTC > $60K, Cycle Top Model < 19/30, no bear market confirmation
