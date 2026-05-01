@@ -264,6 +264,20 @@ function startSchedulers() {
   if (!_signalsTimer) {
     _signalsTimer = scraper.startSchedule({
       onSignal: dispatchSignalToSubscribers,
+      // R-SCRAPERROBUST — owner alert callback. Fires on FAILURES_HARD_ALERT
+      // consecutive scrape failures (default 10) and again on recovery.
+      // Best-effort: notification failure is swallowed inside the scraper.
+      onAlert: async ({ severity, consecutiveFailures, message }) => {
+        const ownerId = process.env.BCD_TELEGRAM_CHAT_ID;
+        if (!ownerId) return;
+        const tag = severity === 'critical' ? '🚨' : '✅';
+        const title = severity === 'critical'
+          ? 'SIGNALS SCRAPER DOWN'
+          : 'SIGNALS SCRAPER RECOVERED';
+        const body = `${tag} *${title}*\n\nFailures: ${consecutiveFailures}\n${message}`;
+        try { await _notify(ownerId, body, { parse_mode: 'Markdown' }); }
+        catch (_) {}
+      },
     });
   }
   console.log(

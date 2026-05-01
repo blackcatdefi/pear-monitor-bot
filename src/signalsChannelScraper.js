@@ -26,6 +26,11 @@
 
 const store = require('./copyTradingStore');
 const { extractFromPearUrl } = require('./signalsChannelParser');
+// R-SCRAPERROBUST (1 may 2026) — hardened HTTP fetcher with retry +
+// realistic UA + AbortController timeout. Kept in its own module so the
+// scraper is purely composition (fetchWithRetry + parseHtml + dedup).
+const { fetchWithRetry, DEFAULT_HEADERS } = require('./scraperFetch');
+const crypto = require('crypto');
 
 const SIGNALS_SCRAPER_URL =
   process.env.SIGNALS_SCRAPER_URL ||
@@ -34,14 +39,26 @@ const SIGNALS_SCRAPER_INTERVAL_SEC = parseInt(
   process.env.SIGNALS_SCRAPER_INTERVAL_SEC || '30',
   10
 );
-const USER_AGENT =
-  process.env.SCRAPER_USER_AGENT ||
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15';
+
+// R-SCRAPERROBUST — owner-alert thresholds (consecutive failures).
+// 3   → soft warn (console.error)
+// 10  → hard alert via _onAlert callback if wired by extensions.js
+const FAILURES_SOFT_WARN = parseInt(
+  process.env.SCRAPER_FAILURES_SOFT_WARN || '3',
+  10
+);
+const FAILURES_HARD_ALERT = parseInt(
+  process.env.SCRAPER_FAILURES_HARD_ALERT || '10',
+  10
+);
 
 let _consecutiveFailures = 0;
 let _lastFetchAt = 0;
+let _lastSuccessAt = 0;
+let _hardAlertSentAt = 0;
 let _timer = null;
 let _onSignal = null;
+let _onAlert = null;
 
 function isEnabled() {
   const v = process.env.SIGNALS_SCRAPER_ENABLED;
@@ -55,28 +72,22 @@ function getSchedule() {
     intervalSec: SIGNALS_SCRAPER_INTERVAL_SEC,
     consecutiveFailures: _consecutiveFailures,
     lastFetchAt: _lastFetchAt,
+    lastSuccessAt: _lastSuccessAt,
+    hardAlertSentAt: _hardAlertSentAt,
   };
 }
 
 /**
  * Fetch the HTML preview. Pure I/O — no parsing.
+ *
+ * R-SCRAPERROBUST: delegates to scraperFetch.fetchWithRetry which provides
+ * exponential backoff (3 attempts, 2s/4s/8s), realistic browser UA, and
+ * AbortController-based timeout per attempt. Tests can inject a fake
+ * fetch via opts.fetchImpl.
  */
-async function fetchHtml(url) {
+async function fetchHtml(url, opts) {
   const target = url || SIGNALS_SCRAPER_URL;
-  const fetchFn = typeof fetch === 'function' ? fetch : null;
-  if (!fetchFn) throw new Error('global fetch unavailable; need Node 18+');
-  const res = await fetchFn(target, {
-    method: 'GET',
-    headers: {
-      'User-Agent': USER_AGENT,
-      Accept:
-        'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    },
-  });
-  if (!res.ok) {
-    throw new Error(`scraper status ${res.status}`);
-  }
-  return res.text();
+  return fetchWithRetry(target, opts || {});
 }
 
 /**
@@ -164,6 +175,32 @@ async function fetchAndParse(url) {
  *   signal: { messageId, channel, postedAt, pearUrl, tokens, longTokens,
  *             shortTokens, signal_id, raw_text, dispatched_at }
  */
+/**
+ * R-SCRAPERROBUST — extra dedup layer keyed by sha256(canonicalPearUrl).
+ *
+ * Why: the message_id-based dedup in copyTradingStore catches the common
+ * case (same post seen twice). But if BCD edits a post, t.me/s emits a NEW
+ * message_id for the edit — we'd re-fire the same Pear basket as a fresh
+ * signal. Hashing the canonicalised URL (referral stripped + tokens sorted)
+ * makes the dedup robust against edits / reposts.
+ */
+function _canonicalUrlForHash(url) {
+  if (!url || typeof url !== 'string') return '';
+  // Strip query (referral, utm, anything) so an edited or reposted URL with
+  // a different ref still hashes the same. We keep path because the path
+  // encodes the basket (long/short tokens + collateral).
+  try {
+    const u = new URL(url);
+    return `${u.origin}${u.pathname}`.toLowerCase().replace(/\/+$/, '');
+  } catch (_) {
+    return String(url).toLowerCase().split('?')[0].replace(/\/+$/, '');
+  }
+}
+
+function _urlHash(url) {
+  return crypto.createHash('sha256').update(_canonicalUrlForHash(url)).digest('hex');
+}
+
 async function processNewPosts(posts, onSignal) {
   let dispatched = 0;
   for (const p of posts) {
@@ -187,6 +224,21 @@ async function processNewPosts(posts, onSignal) {
     }
     // Force referral=BlackCatDeFi regardless of what came in the URL.
     const safeUrl = parsed.urlWithReferral;
+
+    // R-SCRAPERROBUST — URL-hash dedup. The seen-store is keyed by
+    // `${channel}/url-hash:${hash}` so we don't collide with the
+    // message_id key. If we've already dispatched this canonical URL,
+    // mark the new message_id as a duplicate-edit and skip dispatch.
+    const urlHash = _urlHash(safeUrl);
+    const urlHashKey = `url-hash:${urlHash}`;
+    if (store.hasSignalBeenSeen(channel, urlHashKey)) {
+      store.markSignalSeen(channel, p.messageId, {
+        skipped: true,
+        duplicate_of_url_hash: urlHash,
+      });
+      continue;
+    }
+
     const signal = {
       messageId: p.messageId,
       channel,
@@ -199,6 +251,7 @@ async function processNewPosts(posts, onSignal) {
       signal_id: String(p.messageId),
       raw_text: p.text || '',
       dispatched_at: Math.floor(Date.now() / 1000),
+      url_hash: urlHash,
     };
     try {
       if (typeof onSignal === 'function') {
@@ -208,6 +261,14 @@ async function processNewPosts(posts, onSignal) {
         pear_url: safeUrl,
         tokens: parsed.tokens,
         posted_at: p.postedAt || null,
+        url_hash: urlHash,
+      });
+      // Index by url-hash too so future edits/reposts of the same basket
+      // are recognised as duplicates regardless of message_id.
+      store.markSignalSeen(channel, urlHashKey, {
+        url_hash: urlHash,
+        first_message_id: p.messageId,
+        first_dispatched_at: signal.dispatched_at,
       });
       dispatched += 1;
     } catch (e) {
@@ -224,22 +285,63 @@ async function processNewPosts(posts, onSignal) {
 async function pollOnce() {
   try {
     const posts = await fetchAndParse();
+    const wasFailing = _consecutiveFailures > 0;
     _consecutiveFailures = 0;
+    _hardAlertSentAt = 0; // reset so we re-alert on a future outage
     _lastFetchAt = Math.floor(Date.now() / 1000);
+    _lastSuccessAt = _lastFetchAt;
+    if (wasFailing && typeof _onAlert === 'function') {
+      // R-SCRAPERROBUST — recovery notice (best-effort, swallow errors).
+      try {
+        await _onAlert({
+          severity: 'recovery',
+          consecutiveFailures: 0,
+          lastFetchAt: _lastFetchAt,
+          message: 'Scraper recovered (HTTP fetch succeeded after failures).',
+        });
+      } catch (_) {}
+    }
     if (typeof _onSignal !== 'function') return 0;
     return processNewPosts(posts, _onSignal);
   } catch (e) {
     _consecutiveFailures += 1;
-    console.error(
-      `[signalsChannelScraper] poll failed (#${_consecutiveFailures}):`,
-      e && e.message ? e.message : e
-    );
+    _lastFetchAt = Math.floor(Date.now() / 1000);
+    const errMsg = e && e.message ? e.message : String(e);
+    if (_consecutiveFailures >= FAILURES_SOFT_WARN) {
+      console.error(
+        `[signalsChannelScraper] poll failed (#${_consecutiveFailures}/${FAILURES_HARD_ALERT}): ${errMsg}`
+      );
+    } else {
+      console.warn(
+        `[signalsChannelScraper] poll failed (#${_consecutiveFailures}): ${errMsg}`
+      );
+    }
+    if (
+      _consecutiveFailures >= FAILURES_HARD_ALERT &&
+      typeof _onAlert === 'function' &&
+      // Only fire one hard alert per outage window (reset on next success).
+      _hardAlertSentAt === 0
+    ) {
+      _hardAlertSentAt = Math.floor(Date.now() / 1000);
+      try {
+        await _onAlert({
+          severity: 'critical',
+          consecutiveFailures: _consecutiveFailures,
+          lastFetchAt: _lastFetchAt,
+          lastSuccessAt: _lastSuccessAt,
+          message:
+            `Scraper has failed ${_consecutiveFailures} times in a row. ` +
+            `Last error: ${errMsg}.`,
+        });
+      } catch (_) {}
+    }
     return 0;
   }
 }
 
 function startSchedule(opts) {
   _onSignal = opts && typeof opts.onSignal === 'function' ? opts.onSignal : null;
+  _onAlert = opts && typeof opts.onAlert === 'function' ? opts.onAlert : null;
   if (!isEnabled()) {
     console.log('[signalsChannelScraper] disabled via SIGNALS_SCRAPER_ENABLED=false');
     return null;
@@ -266,6 +368,27 @@ function stopSchedule() {
   }
 }
 
+// R-SCRAPERROBUST — test hook. Resets the failure-tracking state so a
+// fresh test scenario starts at zero failures with no pending hard-alert.
+function _resetFailureStateForTests() {
+  _consecutiveFailures = 0;
+  _lastFetchAt = 0;
+  _lastSuccessAt = 0;
+  _hardAlertSentAt = 0;
+  _onAlert = null;
+  _onSignal = null;
+}
+
+/**
+ * R-SCRAPERROBUST — test hook. Wires the onAlert/onSignal callbacks WITHOUT
+ * starting the real interval timer (which would block process exit). Lets
+ * tests drive pollOnce manually and observe the alert hook.
+ */
+function _wireCallbacksForTests({ onSignal, onAlert } = {}) {
+  if (typeof onSignal === 'function') _onSignal = onSignal;
+  if (typeof onAlert === 'function') _onAlert = onAlert;
+}
+
 module.exports = {
   isEnabled,
   getSchedule,
@@ -278,4 +401,11 @@ module.exports = {
   stopSchedule,
   SIGNALS_SCRAPER_URL,
   SIGNALS_SCRAPER_INTERVAL_SEC,
+  // R-SCRAPERROBUST exports
+  FAILURES_SOFT_WARN,
+  FAILURES_HARD_ALERT,
+  _urlHash,
+  _canonicalUrlForHash,
+  _resetFailureStateForTests,
+  _wireCallbacksForTests,
 };
