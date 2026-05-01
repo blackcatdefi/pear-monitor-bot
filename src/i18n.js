@@ -1,8 +1,8 @@
 'use strict';
 
 /**
- * Round v2 — i18n.
- * BCD's bot speaks Spanish. Technical tokens (PnL, TP, SL, TWAP, basket) stay
+ * R-PUBLIC — i18n.
+ * Public bot speaks Spanish. Technical tokens (PnL, TP, SL, TWAP, basket) stay
  * in English because that's how Pear Protocol surfaces them.
  */
 
@@ -32,9 +32,9 @@ const MESSAGES = {
     NOTIONAL_NOW: 'Notional actual',
     GROWTH: 'Crecimiento',
     REFERRAL_CTA:
-      'Usá el código de BCD para 10% off en fees de Pear Protocol',
-    AMBASSADOR_TAGLINE: 'Trade by BCD · Pear Protocol Ambassador',
-    WEEKLY_SUMMARY_TITLE: 'RESUMEN SEMANAL — Performance BCD',
+      'Usá este código para 10% off en fees de Pear Protocol',
+    AMBASSADOR_TAGLINE: 'Pear Protocol Alerts · Community Bot',
+    WEEKLY_SUMMARY_TITLE: 'RESUMEN SEMANAL — Performance',
     WEEKLY_WEEK: 'Semana',
     WEEKLY_PNL_NET: 'PnL Neto',
     WEEKLY_TRADES: 'Trades',
@@ -44,7 +44,7 @@ const MESSAGES = {
     WEEKLY_BEST: 'Mejor',
     WEEKLY_WORST: 'Peor',
     WEEKLY_FOLLOW_CTA:
-      'Querés seguir esta estrategia? Usá el código de BCD para 10% off en Pear.',
+      'Querés copiar este estilo? Usá el código para 10% off en Pear.',
     HEARTBEAT_OK: 'Pear Alerts Bot operativo',
     UPTIME: 'Uptime',
     ERRORS_24H: 'Errores 24h',

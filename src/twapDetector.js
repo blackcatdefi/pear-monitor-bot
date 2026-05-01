@@ -9,7 +9,7 @@
  *
  * Detection signal: 3+ DISTINCT coins recorded as new opens for the same
  * wallet within `windowMinutes` (default 5min). Pear baskets ship as TWAPs
- * with ~28min cadence over ~14h (BCD's NORBER WAY default), so a 5min
+ * with ~28min cadence over ~14h (typical TWAP entry default), so a 5min
  * detection window catches the initial burst.
  *
  * State is in-memory only — that is fine for the bot's scope: a Railway

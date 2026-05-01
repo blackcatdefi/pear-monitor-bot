@@ -79,5 +79,5 @@ test('formatCompoundAlert: Spanish output with growth %', () => {
   });
   assert.match(msg, /COMPOUNDING DETECTADO/);
   assert.match(msg, /\+15\.0%/);
-  assert.match(msg, /NORBER WAY/);
+  assert.match(msg, /compounding|TWAP entry/i);
 });

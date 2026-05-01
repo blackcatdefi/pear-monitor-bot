@@ -38,6 +38,10 @@ const { withTimestamp } = require('./timestampHelper');
 // the apr-30 duplicate "NUEVA BASKET ABIERTA" was lastSeenSnapshots being
 // in-memory only — every redeploy re-classified active positions as new.
 const basketDedup = require('./basketDedup');
+// R-PUBLIC — public wallet tracker UI + scheduler + per-user timezone.
+const commandsTrack = require('./commandsTrack');
+const commandsTimezone = require('./commandsTimezone');
+const walletTrackerScheduler = require('./walletTrackerScheduler');
 
 function _safeInt(v, d) {
   const n = parseInt(v, 10);
@@ -63,7 +67,10 @@ function wrapNotifier(rawNotify) {
     }
     let outgoing = message;
     if (typeof outgoing === 'string' && !outgoing.includes('🕐')) {
-      outgoing = withTimestamp(outgoing, 'bottom');
+      // For private chats chatId === userId, so we can use it as a TZ key.
+      // Group chats fall through and render UTC (timezoneManager returns
+      // DEFAULT_TZ for unknown ids).
+      outgoing = withTimestamp(outgoing, 'bottom', chatId);
     }
     return rawNotify(chatId, outgoing, opts);
   };
@@ -511,13 +518,29 @@ function bootstrap({
     commands.attachCommands(bot);
   }
 
+  // 6b. R-PUBLIC — /track UI + /timezone command
+  if (bot) {
+    try { commandsTrack.attach(bot); }
+    catch (e) {
+      console.error(
+        '[extensions] commandsTrack.attach failed:',
+        e && e.message ? e.message : e
+      );
+    }
+    try { commandsTimezone.attach(bot); }
+    catch (e) {
+      console.error(
+        '[extensions] commandsTimezone.attach failed:',
+        e && e.message ? e.message : e
+      );
+    }
+  }
+
   // 7. Monkey-patch monitor for lifecycle hooks
   patchMonitor(monitor, hooks);
 
-  // 8. R(v3) — External wallet tracker (whales/top traders intel).
-  //    Idempotent: returns null and logs if EXTERNAL_WALLETS_JSON empty
-  //    or no primaryChatId. Wallets configured later via Railway env var
-  //    will pick up after redeploy.
+  // 8. R(v3) — External wallet tracker (legacy env-var-driven path).
+  //    Kept for backward-compat; per-user wallet tracking lives in module 9.
   let externalTrackerTimer = null;
   if (primaryChatId && externalWalletTracker.isEnabled()) {
     try {
@@ -533,7 +556,23 @@ function bootstrap({
     }
   }
 
-  console.log('[extensions] R(v2)+R(v3) bootstrap complete.');
+  // 9. R-PUBLIC — Per-user wallet tracker scheduler.
+  //    Polls all addresses subscribed via /track (across all users) and
+  //    fans out OPEN/CLOSE alerts to each subscriber with their local TZ
+  //    + Pear "Copy trade" inline-keyboard button.
+  let walletTrackerTimer = null;
+  try {
+    walletTrackerTimer = walletTrackerScheduler.startSchedule({
+      notify: wrappedNotify,
+    });
+  } catch (e) {
+    console.error(
+      '[extensions] walletTrackerScheduler.startSchedule failed:',
+      e && e.message ? e.message : e
+    );
+  }
+
+  console.log('[extensions] R(v2)+R(v3)+R-PUBLIC bootstrap complete.');
 
   return {
     hooks,
@@ -556,6 +595,10 @@ function bootstrap({
       try {
         externalWalletTracker.stopSchedule();
       } catch (_) {}
+      try {
+        if (walletTrackerTimer) clearInterval(walletTrackerTimer);
+      } catch (_) {}
+      try { walletTrackerScheduler.stopSchedule(); } catch (_) {}
     },
   };
 }

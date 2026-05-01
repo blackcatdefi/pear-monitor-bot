@@ -1,35 +1,39 @@
 'use strict';
 
 /**
- * Round v2 — Multi-wallet awareness with labels.
+ * Wallet configuration utility.
  *
- * Identifies whether a given wallet is BCD's primary (which controls referral
- * footer behaviour) or a tracked referral wallet. The current canonical BCD
- * wallet for Pear basket is 0xc7AE...1505 — see auto-memory project_real_wallets.
+ * Identifies whether a given wallet is the operator's primary wallet (which
+ * controls some optional branding/footer behavior). The address is set via
+ * the env var PRIMARY_WALLET_ADDRESS. Without it, no wallet is treated as
+ * primary and all messages render the standard public footer.
  *
- * BCD_WALLET_ADDRESS env var overrides the default. Comparison is
- * case-insensitive.
+ * Legacy env var BCD_WALLET_ADDRESS is still honored for backward compat.
+ * Comparison is case-insensitive.
  */
 
-const DEFAULT_BCD_WALLET =
-  '0xc7AE9550A37e72fed7B40dCC95Bd17e5BB1F1505';
-
-function bcdWalletAddress() {
-  return (process.env.BCD_WALLET_ADDRESS || DEFAULT_BCD_WALLET).toLowerCase();
+function primaryWalletAddress() {
+  const raw =
+    process.env.PRIMARY_WALLET_ADDRESS ||
+    process.env.BCD_WALLET_ADDRESS ||
+    '';
+  return String(raw).toLowerCase();
 }
 
 function isPrimaryWallet(address) {
   if (!address) return false;
-  return String(address).toLowerCase() === bcdWalletAddress();
+  const primary = primaryWalletAddress();
+  if (!primary) return false;
+  return String(address).toLowerCase() === primary;
 }
 
 function labelFor(address, fallback) {
-  if (isPrimaryWallet(address)) return 'BCD';
+  if (isPrimaryWallet(address)) return fallback || 'Primary';
   return fallback || (address ? `${address.slice(0, 6)}…${address.slice(-4)}` : '?');
 }
 
 function isTrackedReferral(address) {
-  // Future: list referrals via env var REFERRAL_WALLETS=0x..,0x..
+  // Optional list configured via env var REFERRAL_WALLETS=0x..,0x..
   const raw = process.env.REFERRAL_WALLETS || '';
   if (!raw) return false;
   return raw
@@ -40,9 +44,10 @@ function isTrackedReferral(address) {
 }
 
 module.exports = {
-  bcdWalletAddress,
+  primaryWalletAddress,
+  // legacy alias kept for any caller still importing bcdWalletAddress
+  bcdWalletAddress: primaryWalletAddress,
   isPrimaryWallet,
   isTrackedReferral,
   labelFor,
-  DEFAULT_BCD_WALLET,
 };

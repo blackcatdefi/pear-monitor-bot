@@ -63,7 +63,7 @@ test('formatBasketOpenAlert: includes Spanish "NUEVA BASKET ABIERTA"', () => {
   assert.match(msg, /NUEVA BASKET ABIERTA/);
   assert.match(msg, /Notional total/);
   assert.match(msg, /Leverage/);
-  assert.match(msg, /NORBER WAY/);
+  assert.match(msg, /TWAP entry/);
 });
 
 test('formatIndividualOpenAlert: includes Spanish "NUEVA POSICIÓN ABIERTA"', () => {

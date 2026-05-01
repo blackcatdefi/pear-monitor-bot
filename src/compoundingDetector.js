@@ -3,10 +3,10 @@
 /**
  * Round v2 — Compounding detector.
  *
- * If BCD's basket has the SAME positions (same coins + same sides) but the
- * total notional has grown >= COMPOUNDING_GROWTH_THRESHOLD between snapshots,
- * he added capital — a NORBER-WAY compound. Emit a single alert when the
- * threshold is crossed; reset the snapshot afterwards so we don't keep
+ * If a tracked basket has the SAME positions (same coins + same sides) but
+ * the total notional has grown >= COMPOUNDING_GROWTH_THRESHOLD between
+ * snapshots, capital was added — a compound event. Emit a single alert when
+ * the threshold is crossed; reset the snapshot afterwards so we don't keep
  * re-firing.
  *
  * State keyed by chatId:wallet so multiple users monitoring different
@@ -117,14 +117,14 @@ function formatCompoundAlert(label, result) {
     '🔄 *COMPOUNDING DETECTADO*',
     '',
     `📍 Wallet: ${label}`,
-    `BCD aumentó el size de la basket activa.`,
+    `Se incrementó el size de la basket activa.`,
     '',
     `Notional anterior: $${Math.round(result.prevNotional).toLocaleString()}`,
     `Notional actual: $${Math.round(result.currentNotional).toLocaleString()}`,
     `Crecimiento: +${pct}%`,
     '',
     `Las posiciones siguen siendo las mismas (mismos tokens, mismo side).`,
-    `BCD agregó capital a la posición ganadora — NORBER WAY compounding.`,
+    `Se agregó capital a la posición — compounding (TWAP entry).`,
   ].join('\n');
 }
 

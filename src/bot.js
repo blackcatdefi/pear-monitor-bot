@@ -17,6 +17,14 @@ function createBot(token, hlApi, monitor, hlendApi = null) {
     { command: 'wallets', description: '📋 List monitored wallets' },
     { command: 'check', description: '🔍 Force check now' },
     { command: 'borrow', description: '🏦 HyperLend Borrow Available' },
+    { command: 'track', description: '🎯 Track wallets externas (whales)' },
+    { command: 'timezone', description: '🌐 Setear tu zona horaria' },
+    { command: 'history', description: '📜 Últimos cierres' },
+    { command: 'pnl', description: '💰 PnL por período' },
+    { command: 'status', description: '✅ Health del bot' },
+    { command: 'export', description: '📤 Exportar CSV' },
+    { command: 'summary', description: '📊 Resumen semanal' },
+    { command: 'healthcheck', description: '✅ Health check' },
   ]);
 
   function mainMenu() {

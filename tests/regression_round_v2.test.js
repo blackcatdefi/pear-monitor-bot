@@ -89,13 +89,14 @@ test('REGRESSION individual open alert is Spanish', () => {
   assert.doesNotMatch(m, /New position/i);
 });
 
-test('REGRESSION compounding alert is Spanish + NORBER WAY', () => {
+test('REGRESSION compounding alert is Spanish + neutral language', () => {
   const m = formatCompoundAlert('Wallet primaria', {
     type: 'COMPOUND_DETECTED', prevNotional: 10000, currentNotional: 12000, growth: 0.20,
   });
   assert.match(m, /COMPOUNDING DETECTADO/);
-  assert.match(m, /NORBER WAY/);
+  assert.match(m, /compounding|TWAP entry/i);
   assert.doesNotMatch(m, /Compounding detected/i);
+  assert.doesNotMatch(m, /NORBER/i);
 });
 
 test('REGRESSION branding footer appended only when enabled+primary', () => {

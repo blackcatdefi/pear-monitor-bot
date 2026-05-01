@@ -5,9 +5,9 @@
  *
  * Polls a configurable list of Hyperliquid wallets (whales, top traders,
  * benchmark accounts) and emits a Telegram alert whenever any of them
- * OPENs or CLOSEs a position. BCD uses these alerts as intel signal — to
- * validate or invalidate the fund's thesis (e.g., "if a top trader opens
- * BTC long while we're short, flag it").
+ * OPENs or CLOSEs a position. Operators use these alerts as intel signal —
+ * to track whales/top traders and inform their own trades (e.g., "top trader
+ * just opened BTC long").
  *
  * Configuration:
  *   EXTERNAL_WALLETS_ENABLED              — kill-switch (default true)
@@ -146,7 +146,7 @@ function formatExternalOpenAlert(config, position) {
     `📦 Size: ${_formatNumber(position.size)}`,
     `💰 Notional: $${_formatNumber(position.notional)}`,
     ``,
-    `💡 Intel: ¿valida o invalida la tesis del fondo?`,
+    `💡 Intel: posible señal de mercado.`,
   ].join('\n');
 }
 
@@ -165,7 +165,7 @@ function formatExternalCloseAlert(config, position) {
     `💲 Entry había sido: $${_formatPx(position.entryPx)}`,
     `📦 Size cerrado: ${_formatNumber(position.size)}`,
     ``,
-    `💡 Intel: ¿BCD debería ajustar posición?`,
+    `💡 Intel: posible señal de cierre — revisá tu posición.`,
   ].join('\n');
 }
 

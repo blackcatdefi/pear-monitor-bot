@@ -3,9 +3,9 @@
 /**
  * Round v2 — OPEN-event detection.
  *
- * Counterpart to closeAlerts.js. When BCD opens a new position, alert.
- * If 3+ new positions appear within 5 minutes for the same wallet, treat
- * it as a basket OPEN and emit a consolidated message instead of N
+ * Counterpart to closeAlerts.js. When the tracked wallet opens a new position,
+ * alert. If 3+ new positions appear within 5 minutes for the same wallet,
+ * treat it as a basket OPEN and emit a consolidated message instead of N
  * individual alerts.
  *
  * Edge-triggered: this module owns no state; the caller passes the previous
@@ -14,6 +14,7 @@
  */
 
 const { shouldSendAlert } = require('./closeAlerts');
+const pearUrlBuilder = require('./pearUrlBuilder');
 
 const BASKET_WINDOW_MS = 5 * 60 * 1000;
 const BASKET_MIN_COUNT = 3;
@@ -93,7 +94,7 @@ function formatBasketOpenAlert(label, positions) {
   lines.push('');
   lines.push(`💰 Notional total: ${_fmtUsd(totalNotional)}`);
   lines.push(`⚡ Leverage: ${lev}`);
-  lines.push(`🎯 Estrategia: NORBER WAY (TWAP entry)`);
+  lines.push(`🎯 Estrategia: TWAP entry (DCA temporal)`);
   return lines.join('\n');
 }
 
@@ -121,6 +122,15 @@ function formatIndividualOpenAlert(label, pos) {
  * The notifier signature is (wallet, coin, message) so the dedupe layer can
  * key on (wallet, coin). For basket opens we use a synthetic coin "BASKET".
  */
+function _enrichWithNotional(positions) {
+  return (positions || []).map((p) => {
+    if (Number.isFinite(p && p.notional) && p.notional > 0) return p;
+    const sz = Math.abs(Number(p && p.size) || 0);
+    const px = Number((p && (p.entryPrice || p.markPrice)) || 0);
+    return Object.assign({}, p, { notional: sz * px });
+  });
+}
+
 async function emitAlerts({ chatId, wallet, label, newPositions, notify }) {
   if (!isEnabled()) return { dispatched: 0, type: 'DISABLED' };
   const ev = classifyOpenEvent(newPositions);
@@ -129,7 +139,10 @@ async function emitAlerts({ chatId, wallet, label, newPositions, notify }) {
   if (ev.type === 'BASKET_OPEN') {
     if (shouldSendAlert(wallet, 'BASKET_OPEN')) {
       const msg = formatBasketOpenAlert(label, ev.positions);
-      await notify(chatId, msg);
+      const keyboard = pearUrlBuilder.buildInlineKeyboard(
+        _enrichWithNotional(ev.positions)
+      );
+      await notify(chatId, msg, keyboard ? { reply_markup: keyboard } : undefined);
       return { dispatched: 1, type: 'BASKET_OPEN' };
     }
     return { dispatched: 0, type: 'BASKET_OPEN_DEDUPED' };
@@ -139,7 +152,10 @@ async function emitAlerts({ chatId, wallet, label, newPositions, notify }) {
   for (const pos of ev.positions) {
     if (!shouldSendAlert(wallet, `OPEN_${pos.coin}`)) continue;
     const msg = formatIndividualOpenAlert(label, pos);
-    await notify(chatId, msg);
+    const keyboard = pearUrlBuilder.buildInlineKeyboard(
+      _enrichWithNotional([pos])
+    );
+    await notify(chatId, msg, keyboard ? { reply_markup: keyboard } : undefined);
     count += 1;
   }
   return { dispatched: count, type: 'INDIVIDUAL_OPEN' };
