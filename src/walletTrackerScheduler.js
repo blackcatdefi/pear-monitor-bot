@@ -15,6 +15,7 @@
 const wt = require('./walletTracker');
 const tzMgr = require('./timezoneManager');
 const pearUrl = require('./pearUrlBuilder');
+const alertButtons = require('./alertButtons');
 const { fetchHyperliquidPositions } = require('./externalWalletTracker');
 
 const POLL_INTERVAL_SEC = parseInt(
@@ -58,12 +59,17 @@ function _diffPositions(prev, curr) {
 }
 
 function _renderOpenForUser(userId, label, address, opens) {
+  const isBasket = opens.length >= 3;
+  const heading = isBasket
+    ? '🚀 *NUEVA BASKET ABIERTA*'
+    : '🐋 *NUEVA POSICIÓN ABIERTA*';
+  const traderLabel = label || _shortAddr(address);
   const lines = [
-    opens.length >= 3 ? '🚀 *NUEVA BASKET DETECTADA*' : '🐋 *NUEVA POSICIÓN ABIERTA*',
+    heading,
     '',
-    `Wallet: ${label || _shortAddr(address)} (\`${_shortAddr(address)}\`)`,
+    `👤 Trader: ${traderLabel} (\`${_shortAddr(address)}\`)`,
     '',
-    `Posiciones (${opens.length}):`,
+    `📊 Composición (${opens.length}):`,
   ];
   let totalNotional = 0;
   for (const p of opens) {
@@ -74,10 +80,13 @@ function _renderOpenForUser(userId, label, address, opens) {
     lines.push(`  • ${p.coin} ${side} @ $${_fmtPx(px)}`);
   }
   lines.push('');
-  lines.push(`💰 Notional total: ${_fmtUsd(totalNotional)}`);
+  lines.push(`💰 Notional: ${_fmtUsd(totalNotional)}`);
   if (opens[0] && opens[0].leverage) {
     lines.push(`⚡ Leverage: ${opens[0].leverage}x`);
   }
+  lines.push('');
+  // R-START — copy-trade invitation text precedes the hero button row.
+  lines.push(alertButtons.getCopyCtaText());
   lines.push('');
   lines.push(`🕐 ${tzMgr.formatLocalTime(userId)}`);
   return lines.join('\n');
@@ -144,7 +153,10 @@ async function pollOnce() {
     }
     const { opens, closes } = _diffPositions(prev, curr);
     if (opens.length > 0) {
-      const keyboard = pearUrl.buildInlineKeyboard(opens);
+      // R-START — hero CTA layout (Pear copy button row 1, mute button row 2).
+      const keyboard = alertButtons.buildAlertKeyboard(opens, 'open', {
+        wallet: address,
+      });
       await _fanOut(
         subs,
         (uid, lbl) => _renderOpenForUser(uid, lbl, address, opens),

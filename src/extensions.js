@@ -42,6 +42,8 @@ const basketDedup = require('./basketDedup');
 const commandsTrack = require('./commandsTrack');
 const commandsTimezone = require('./commandsTimezone');
 const walletTrackerScheduler = require('./walletTrackerScheduler');
+// R-START — /start onboarding (first-time vs recurring + inline keyboard).
+const commandsStart = require('./commandsStart');
 
 function _safeInt(v, d) {
   const n = parseInt(v, 10);
@@ -531,6 +533,13 @@ function bootstrap({
     catch (e) {
       console.error(
         '[extensions] commandsTimezone.attach failed:',
+        e && e.message ? e.message : e
+      );
+    }
+    try { commandsStart.attach(bot); }
+    catch (e) {
+      console.error(
+        '[extensions] commandsStart.attach failed:',
         e && e.message ? e.message : e
       );
     }

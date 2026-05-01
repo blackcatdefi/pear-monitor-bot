@@ -10,13 +10,13 @@ function createBot(token, hlApi, monitor, hlendApi = null) {
 
   // Register bot commands menu
   bot.setMyCommands([
-    { command: 'start', description: '🍐 Get started' },
-    { command: 'menu', description: '🍐 Open main menu' },
-    { command: 'positions', description: '📊 View open positions' },
-    { command: 'balance', description: '💰 Check available funds' },
-    { command: 'wallets', description: '📋 List monitored wallets' },
-    { command: 'check', description: '🔍 Force check now' },
-    { command: 'borrow', description: '🏦 HyperLend Borrow Available' },
+    { command: 'start', description: '🍐 Empezar' },
+    { command: 'menu', description: '🍐 Menú principal' },
+    { command: 'positions', description: '📊 Ver posiciones abiertas' },
+    { command: 'balance', description: '💰 Fondos disponibles' },
+    { command: 'wallets', description: '📋 Wallets monitoreadas' },
+    { command: 'check', description: '🔍 Chequear ahora' },
+    { command: 'borrow', description: '🏦 HyperLend Borrow disponible' },
     { command: 'track', description: '🎯 Track wallets externas (whales)' },
     { command: 'timezone', description: '🌐 Setear tu zona horaria' },
     { command: 'history', description: '📜 Últimos cierres' },
@@ -55,26 +55,29 @@ function createBot(token, hlApi, monitor, hlendApi = null) {
     };
   }
 
-  // /start and /menu - NEVER deletes user data
-  bot.onText(/\/(start|menu)/, (msg) => {
+  // /menu - inline-keyboard for personal wallet management.
+  // /start is handled by commandsStart.js (R-START) — see extensions.js.
+  // /menu intentionally still uses the legacy mainMenu so the bot operator
+  // (BCD) keeps the Add/Remove Wallet flow they were used to.
+  bot.onText(/^\/menu(?:@\w+)?$/i, (msg) => {
     const chatId = msg.chat.id;
     const wallets = getWallets(chatId);
 
     const lines = [
-      '🍐 *Pear Protocol Monitor*',
+      '🍐 *Pear Protocol Monitor — Menu*',
       '',
-      'I watch your positions on Pear/Hyperliquid and notify you when:',
+      'Te aviso cuando pasa algo importante en tus wallets:',
       '',
-      '🎯 Your *Take Profit* hits',
-      '🛑 Your *Stop Loss* triggers',
-      '💰 You have *funds available* to trade',
-      '🏦 You have *borrow available* on HyperLend',
+      '🎯 *Take Profit* alcanzado',
+      '🛑 *Stop Loss* activado',
+      '💰 *Fondos disponibles* para tradear',
+      '🏦 *Borrow disponible* en HyperLend',
     ];
 
     if (wallets.length > 0) {
-      lines.push('', `✅ You have *${wallets.length} wallet(s)* being monitored.`);
+      lines.push('', `✅ Tenés *${wallets.length} wallet(s)* monitoreada(s).`);
     } else {
-      lines.push('', 'Tap ➕ *Add Wallet* to get started!');
+      lines.push('', 'Tocá ➕ *Add Wallet* para empezar.');
     }
 
     bot.sendMessage(chatId, lines.join('\n'), mainMenu());
