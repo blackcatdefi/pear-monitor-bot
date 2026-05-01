@@ -59,6 +59,9 @@ const commandsShare = require('./commandsShare');
 const commandsLearn = require('./commandsLearn');
 const commandsFeedback = require('./commandsFeedback');
 const commandsHelp = require('./commandsHelp');
+// R-AUTOCOPY-MENU — unified copy_trading menu (BCD wallet / signals / custom)
+const copyTrading = require('./copyTrading');
+const commandsCopyTrading = require('./commandsCopyTrading');
 
 function _safeInt(v, d) {
   const n = parseInt(v, 10);
@@ -573,6 +576,8 @@ function bootstrap({
       ['commandsShare', () => commandsShare.attach(bot)],
       ['commandsLearn', () => commandsLearn.attach(bot)],
       ['commandsHelp', () => commandsHelp.attach(bot)],
+      // R-AUTOCOPY-MENU
+      ['commandsCopyTrading', () => commandsCopyTrading.attach(bot)],
     ];
     for (const [name, fn] of wireAutocopy) {
       try { fn(); }
@@ -631,6 +636,18 @@ function bootstrap({
       e && e.message ? e.message : e
     );
   }
+
+  // 10b. R-AUTOCOPY-MENU — start the 3 unified-copy-trading schedulers
+  //      (BCD wallet poller, custom-wallet poller, signals scraper).
+  try {
+    copyTrading.attach(wrappedNotify);
+    copyTrading.startSchedulers();
+  } catch (e) {
+    console.error(
+      '[extensions] copyTrading.startSchedulers failed:',
+      e && e.message ? e.message : e
+    );
+  }
   if (bot) {
     try {
       commandsFeedback.attach(bot, () => wrappedNotify);
@@ -682,6 +699,7 @@ function bootstrap({
         if (dailyDigestTimer) clearInterval(dailyDigestTimer);
       } catch (_) {}
       try { dailyDigest.stopSchedule(); } catch (_) {}
+      try { copyTrading.stopSchedulers(); } catch (_) {}
     },
   };
 }

@@ -58,13 +58,15 @@ function buildStartKeyboard(/* isReturning unused — same layout */) {
         { text: '📋 Mis wallets', callback_data: 'start:track_list' },
       ],
       [
-        // R-AUTOCOPY — signals + copy auto in row 2.
-        { text: '📡 Signals oficiales', callback_data: 'start:signals_menu' },
-        { text: '🤖 Copy auto', callback_data: 'start:copyauto_menu' },
+        // R-AUTOCOPY-MENU — unified Copy Trading entry replaces the separate
+        // signals + copy_auto buttons. Inside the menu the user picks one of
+        // 3 modes (BCD wallet / BCD Signals / custom wallets).
+        { text: '🤖 Copy Trading', callback_data: 'start:copytrading_menu' },
+        { text: '📊 Status', callback_data: 'start:status_view' },
       ],
       [
         { text: '🌎 Mi TZ', callback_data: 'start:tz_menu' },
-        { text: '📊 Status', callback_data: 'start:status_view' },
+        { text: '📚 Aprender', callback_data: 'start:learn_menu' },
       ],
       [
         { text: '🍐 Abrir Pear Protocol', url: _heroUrl() },
@@ -256,6 +258,33 @@ async function _handleCallback(bot, cb) {
       await cmdCA.showMenu(bot, chatId, userId);
     } catch (_) {
       await bot.sendMessage(chatId, 'Tocá /copy_auto.', { parse_mode: 'Markdown' });
+    }
+    return true;
+  }
+
+  if (action === 'copytrading_menu') {
+    try {
+      const cmdCT = require('./commandsCopyTrading');
+      await cmdCT.showTopMenu(bot, chatId, userId);
+    } catch (_) {
+      await bot.sendMessage(chatId, 'Tocá /copy_trading.', { parse_mode: 'Markdown' });
+    }
+    return true;
+  }
+
+  if (action === 'learn_menu') {
+    try {
+      const cmdLearn = require('./commandsLearn');
+      // commandsLearn exposes `attach(bot)` which wires `/learn` — for the
+      // inline-keyboard entry we re-use the same body builder if present,
+      // else fall back to a hint message.
+      if (typeof cmdLearn.showMenu === 'function') {
+        await cmdLearn.showMenu(bot, chatId, userId);
+      } else {
+        await bot.sendMessage(chatId, 'Tocá /learn para ver los tutoriales.', { parse_mode: 'Markdown' });
+      }
+    } catch (_) {
+      await bot.sendMessage(chatId, 'Tocá /learn.', { parse_mode: 'Markdown' });
     }
     return true;
   }

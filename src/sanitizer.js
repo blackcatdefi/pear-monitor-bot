@@ -62,6 +62,12 @@ function isAllowedBlackCat(line) {
   if (/@BlackCatDeFiSignals/i.test(line)) return true;
   if (/SIGNALS_CHANNEL/i.test(line)) return true;
   if (/blackcatdefisignals/i.test(line)) return true;
+  // R-AUTOCOPY-MENU env-var keys + source-label callsigns rendered to
+  // public users (same flavor as the @BlackCatDeFiSignals handle — public
+  // identifier of a wallet/signal feed, not persona reference).
+  if (/BCD_SIGNALS_CHANNEL/i.test(line)) return true;
+  if (/BCD_WALLET\b/.test(line)) return true;
+  if (/\bBCD\s+(?:Wallet|Signals)\b/i.test(line)) return true;
   return false;
 }
 
