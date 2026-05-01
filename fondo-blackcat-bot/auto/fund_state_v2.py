@@ -179,6 +179,13 @@ async def detect_active_baskets(
     basket_tokens = _basket_perp_tokens()
     registered = _registered_wallets()
 
+    log.info(
+        "fund_state_v2: detect_active_baskets START — wallets_in=%d basket_tokens=%d registered=%d",
+        len(wallets or []),
+        len(basket_tokens),
+        len(registered),
+    )
+
     wallets_out: dict[str, dict[str, Any]] = {}
     total_notional = 0.0
     anomalies: list[dict[str, Any]] = []
@@ -195,26 +202,68 @@ async def detect_active_baskets(
         label = d.get("label") or registered.get(addr) or addr[:10]
         is_registered = addr in registered
 
+        raw_positions = d.get("positions") or []
+        log.info(
+            "fund_state_v2: wallet=%s label=%r registered=%s raw_positions=%d",
+            addr,
+            label,
+            is_registered,
+            len(raw_positions),
+        )
+
         shorts: list[dict[str, Any]] = []
         wallet_basket_notional = 0.0
-        for pos in d.get("positions") or []:
+        for pos in raw_positions:
             coin = (pos.get("coin") or "").upper()
+            # R-DASH bugfix: accept BOTH naming conventions.
+            #
+            # Raw HyperLiquid info-API uses ``szi`` / ``positionValue`` /
+            # ``entryPx``. The fund's ``modules.portfolio._summarize_positions``
+            # normalises those to ``size`` / ``notional_usd`` / ``entry_px``.
+            # The previous fund_state_v2 only read the raw shape, so when
+            # production data flowed through portfolio.py (the production
+            # path) every notional was 0 and every position got dropped by
+            # the dust filter — symptom: dashboard "Sin posiciones abiertas"
+            # despite a live v6 basket on 0xc7AE…1505.
             try:
-                szi = float(pos.get("szi") or 0.0)
+                size_val = pos.get("szi")
+                if size_val is None:
+                    size_val = pos.get("size")
+                szi = float(size_val or 0.0)
             except Exception:  # noqa: BLE001
                 szi = 0.0
             if szi >= 0:
                 continue  # only SHORTs interest us for basket detection
             try:
-                ntl = float(pos.get("position_value") or pos.get("ntl_pos") or 0.0)
+                ntl_val = (
+                    pos.get("position_value")
+                    or pos.get("notional_usd")
+                    or pos.get("ntl_pos")
+                    or pos.get("positionValue")
+                )
+                ntl = float(ntl_val or 0.0)
             except Exception:  # noqa: BLE001
                 ntl = 0.0
             if abs(ntl) < 1.0:
+                log.debug(
+                    "fund_state_v2: skip dust pos coin=%s szi=%s ntl=%s wallet=%s",
+                    coin,
+                    szi,
+                    ntl,
+                    addr,
+                )
                 continue  # dust
             if coin not in basket_tokens:
+                log.debug(
+                    "fund_state_v2: skip non-basket pos coin=%s wallet=%s",
+                    coin,
+                    addr,
+                )
                 continue
             try:
-                entry_px = float(pos.get("entryPx") or pos.get("entry_px") or 0.0)
+                entry_px = float(
+                    pos.get("entryPx") or pos.get("entry_px") or 0.0
+                )
             except Exception:  # noqa: BLE001
                 entry_px = 0.0
             shorts.append(
@@ -227,6 +276,13 @@ async def detect_active_baskets(
                 }
             )
             wallet_basket_notional += abs(ntl)
+
+        log.info(
+            "fund_state_v2: wallet=%s shorts_kept=%d basket_notional=%.2f",
+            addr,
+            len(shorts),
+            wallet_basket_notional,
+        )
 
         if shorts:
             coins = {s["coin"] for s in shorts}
@@ -259,6 +315,13 @@ async def detect_active_baskets(
         "total_basket_notional_usd": total_notional,
         "anomalies": anomalies,
     }
+    log.info(
+        "fund_state_v2: detect_active_baskets DONE — any_active=%s total_ntl=%.2f anomalies=%d wallets_out=%d",
+        summary["any_active"],
+        summary["total_basket_notional_usd"],
+        len(anomalies),
+        len(wallets_out),
+    )
     return {
         "ts_utc": datetime.now(timezone.utc).isoformat(),
         "wallets": wallets_out,

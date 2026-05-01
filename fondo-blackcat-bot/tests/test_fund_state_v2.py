@@ -288,3 +288,104 @@ def test_long_positions_ignored(monkeypatch):
     result = asyncio.run(fund_state_v2.detect_active_baskets(_fetch))
     assert result["wallets"][REGISTERED_WALLET]["status"] == "IDLE"
     assert result["wallets"][REGISTERED_WALLET]["shorts"] == []
+
+
+# ---------------------------------------------------------------------------
+# R-DASH regression — production naming convention (size/notional_usd)
+# ---------------------------------------------------------------------------
+def _v6_short_prod(coin: str, ntl: float, entry_px: float) -> dict:
+    """Production-shape position dict — matches what
+    ``modules.portfolio._summarize_positions`` emits.
+
+    R-DASH bug: the previous fund_state_v2 only read the raw HL info-API
+    shape (``szi`` / ``position_value`` / ``entryPx``), so when the data
+    flowed through portfolio.py it was always classified as dust.
+    """
+    return {
+        "coin": coin,
+        "size": -100.0,
+        "side": "SHORT",
+        "notional_usd": ntl,
+        "entry_px": entry_px,
+    }
+
+
+def test_v6_basket_visible_with_production_field_names(monkeypatch):
+    """REGRESSION: the production data flow uses size/notional_usd/entry_px.
+
+    Before the R-DASH fix, every basket position would show notional=0
+    after the field-name lookup miss → dropped by the dust filter →
+    wallet IDLE → dashboard "Sin posiciones abiertas" despite live v6.
+    """
+    _patch_registered(monkeypatch, [REGISTERED_WALLET, HL_WALLET])
+
+    async def _fetch():
+        return [
+            {
+                "status": "ok",
+                "data": {
+                    "wallet": REGISTERED_WALLET,
+                    "label": "Cross 5x",
+                    "positions": [
+                        _v6_short_prod("DYDX", 4500.0, 0.65),
+                        _v6_short_prod("OP", 4500.0, 1.20),
+                        _v6_short_prod("ARB", 4500.0, 0.45),
+                        _v6_short_prod("PYTH", 4500.0, 0.18),
+                        _v6_short_prod("ENA", 4500.0, 0.40),
+                    ],
+                },
+            }
+        ]
+
+    result = asyncio.run(fund_state_v2.detect_active_baskets(_fetch))
+
+    assert result["summary"]["any_active"] is True, (
+        "Production-shape data must trigger ACTIVE — this is the exact "
+        "regression that caused dashboard 'Sin posiciones abiertas' on "
+        "1 may 2026 13:31 UTC."
+    )
+    assert result["summary"]["total_basket_notional_usd"] == pytest.approx(22500.0)
+
+    w = result["wallets"][REGISTERED_WALLET]
+    assert w["status"] == "ACTIVE"
+    assert w["basket_id_inferido"] == "v6"
+    assert {s["coin"] for s in w["shorts"]} == {
+        "DYDX",
+        "OP",
+        "ARB",
+        "PYTH",
+        "ENA",
+    }
+
+
+def test_v6_basket_visible_with_mixed_field_names(monkeypatch):
+    """Defensive: a wallet with positions emitted by the raw HL fetcher
+    AND another emitted by portfolio.py must both be detected."""
+    _patch_registered(monkeypatch, [REGISTERED_WALLET])
+
+    async def _fetch():
+        return [
+            {
+                "status": "ok",
+                "data": {
+                    "wallet": REGISTERED_WALLET,
+                    "positions": [
+                        # Raw HL shape (legacy)
+                        {
+                            "coin": "DYDX",
+                            "szi": -100.0,
+                            "position_value": 4500.0,
+                            "entryPx": 0.65,
+                        },
+                        # Production-normalised shape
+                        _v6_short_prod("OP", 4500.0, 1.20),
+                    ],
+                },
+            }
+        ]
+
+    result = asyncio.run(fund_state_v2.detect_active_baskets(_fetch))
+    w = result["wallets"][REGISTERED_WALLET]
+    assert w["status"] == "ACTIVE"
+    coins = {s["coin"] for s in w["shorts"]}
+    assert coins == {"DYDX", "OP"}

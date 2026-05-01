@@ -190,6 +190,63 @@ def format_quick_positions(wallets: list[dict[str, Any]],
     lines.append(f"📊 Snapshot Fondo Black Cat — {now}")
     lines.append("")
 
+    # ─── R-DASH: NET CAPITAL banner (single-source-of-truth) ────────────
+    # Compute totals from the same wallet+HL data so the dashboard and
+    # /reporte agree on the headline number. UPnL is NOT added separately
+    # (already inside perp accountValue under Hyperliquid Unified Account).
+    try:
+        _hl_list = hyperlend if isinstance(hyperlend, list) else [hyperlend]
+        _hl_coll_total = 0.0
+        _hl_debt_total = 0.0
+        for _hl in _hl_list:
+            if isinstance(_hl, dict) and _hl.get("status") == "ok":
+                _hd = _hl.get("data") or {}
+                try:
+                    _hl_coll_total += float(_hd.get("total_collateral_usd") or 0.0)
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    _hl_debt_total += float(_hd.get("total_debt_usd") or 0.0)
+                except (TypeError, ValueError):
+                    pass
+
+        _perp_total = 0.0
+        _spot_non_usdc_total = 0.0
+        _upnl_total = 0.0
+        for _w in wallets:
+            if not isinstance(_w, dict) or _w.get("status") != "ok":
+                continue
+            _d = _w.get("data") or {}
+            try:
+                _pe = float(_d.get("account_value") or 0.0)
+            except (TypeError, ValueError):
+                _pe = 0.0
+            _perp_total += _pe
+            try:
+                _spot_non_usdc_total += float(
+                    _estimate_spot_usd(_d.get("spot_balances") or [], _pe)
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                _upnl_total += float(_d.get("unrealized_pnl_total") or 0.0)
+            except (TypeError, ValueError):
+                pass
+
+        from auto.capital_calc import compute_net_capital, format_net_capital_telegram
+        _net = compute_net_capital({
+            "hl_collateral_total": _hl_coll_total,
+            "hl_debt_total": _hl_debt_total,
+            "perp_equity_total": _perp_total,
+            "spot_usd_total": _spot_non_usdc_total,
+            "upnl_perp_total": _upnl_total,
+        })
+        lines.append(format_net_capital_telegram(_net))
+        lines.append("")
+    except Exception:  # noqa: BLE001
+        # Never break the formatter — capital banner is best-effort.
+        pass
+
     # ── Build HyperLend collateral map: wallet_addr (lower) → data ──
     hl_list = hyperlend if isinstance(hyperlend, list) else [hyperlend]
     hl_by_wallet: dict[str, dict[str, float]] = {}

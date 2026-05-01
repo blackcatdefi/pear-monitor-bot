@@ -155,6 +155,20 @@ def _render_html(state: dict[str, Any]) -> str:
     cap_total = _fmt_compact_usd(state["capital_total"])
     upnl_cls, upnl_fmt = _signed(state["upnl_perp_total"])
 
+    # ─── R-DASH: NET CAPITAL via single-source-of-truth ───────────────────
+    # Replaces the misleading "Total: $79K" first line that summed gross
+    # exposure including leveraged HL collateral. NET is the post-leverage
+    # number; gross is rendered as informative footer.
+    from auto.capital_calc import compute_net_capital, render_net_capital_html
+    _net_cap = compute_net_capital(state)
+    capital_block_html = render_net_capital_html(
+        _net_cap,
+        fmt_compact_usd=_fmt_compact_usd,
+        signed=_signed,
+        upnl_cls=upnl_cls,
+        upnl_fmt=upnl_fmt,
+    )
+
     # ─── Flywheel principal ───────────────────────────────────────────────
     main = state.get("main_flywheel")
     if main is not None:
@@ -365,12 +379,7 @@ def _render_html(state: dict[str, Any]) -> str:
     <div class="grid">
         <div class="card">
             <h2>Capital</h2>
-            <p>Total: <strong>{_esc(cap_total)}</strong></p>
-            <p>HL collateral: {_esc(_fmt_compact_usd(state["hl_collateral_total"]))}</p>
-            <p>HL debt: {_esc(_fmt_compact_usd(state["hl_debt_total"]))}</p>
-            <p>Account Value (perp+USDC unif.): {_esc(_fmt_compact_usd(state["perp_equity_total"]))}</p>
-            <p>Spot non-USDC: {_esc(_fmt_compact_usd(state["spot_usd_total"]))}</p>
-            <p>UPnL perp: <span class="{upnl_cls}">{_esc(upnl_fmt)}</span></p>
+            {capital_block_html}
         </div>
 
         <div class="card">
