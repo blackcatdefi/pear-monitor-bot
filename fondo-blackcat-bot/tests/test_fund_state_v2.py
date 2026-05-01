@@ -263,8 +263,13 @@ def test_infer_basket_id_unknown():
     assert fund_state_v2._infer_basket_id({"BTC", "ETH"}) is None
 
 
-def test_long_positions_ignored(monkeypatch):
-    """Only SHORTs feed basket detection — LONG positions are filtered."""
+def test_long_positions_visible_with_side_long(monkeypatch):
+    """R-DASH-FIX (1 may 2026): the detector is no longer SHORT-only.
+
+    Pre-fix: szi >= 0 was hard-skipped → LONG hedge wallets always IDLE.
+    Post-fix: side derives from sign of szi → LONG positions appear in
+    ``positions`` with side="LONG", legacy ``shorts`` view stays empty,
+    basket_id_inferido is None (not classifiable as SHORT basket)."""
     _patch_registered(monkeypatch, [REGISTERED_WALLET])
 
     async def _fetch():
@@ -286,8 +291,12 @@ def test_long_positions_ignored(monkeypatch):
         ]
 
     result = asyncio.run(fund_state_v2.detect_active_baskets(_fetch))
-    assert result["wallets"][REGISTERED_WALLET]["status"] == "IDLE"
-    assert result["wallets"][REGISTERED_WALLET]["shorts"] == []
+    w = result["wallets"][REGISTERED_WALLET]
+    assert w["status"] == "ACTIVE"  # any non-dust position → ACTIVE
+    assert len(w["positions"]) == 1
+    assert w["positions"][0]["side"] == "LONG"
+    assert w["shorts"] == []  # legacy view stays SHORT-only filtered
+    assert w["basket_id_inferido"] is None  # not a SHORT basket
 
 
 # ---------------------------------------------------------------------------
@@ -389,3 +398,293 @@ def test_v6_basket_visible_with_mixed_field_names(monkeypatch):
     assert w["status"] == "ACTIVE"
     coins = {s["coin"] for s in w["shorts"]}
     assert coins == {"DYDX", "OP"}
+
+
+# ---------------------------------------------------------------------------
+# R-DASH-FIX (1 may 2026) — basket-agnostic regression
+# ---------------------------------------------------------------------------
+def _patch_registered_no_whitelist(monkeypatch, registered_addrs):
+    """Like _patch_registered but does NOT touch ``_basket_perp_tokens``.
+
+    The whole point of R-DASH-FIX is that the detector no longer uses a
+    token whitelist — these tests must pass without patching it. If they
+    relied on the patched whitelist, regression to a whitelist-based
+    detector would silently re-pass.
+    """
+    monkeypatch.setattr(
+        fund_state_v2,
+        "_registered_wallets",
+        lambda: {a.lower(): "test" for a in registered_addrs},
+    )
+
+
+def test_rdashfix_5_positions_mix_field_names_all_visible(monkeypatch):
+    """REGRESSION 1 may 2026 14:17 UTC.
+
+    Pear shows 5 open positions on 0xc7AE…1505 (DYDX/OP/ARB/PYTH/ENA
+    SHORT, total ntl ~$22,645, total UPnL +$78.84). Bot reported 1 of 5
+    because fund_state.BASKET_PERP_TOKENS lacks DYDX/OP/ARB/PYTH (v6
+    deployed 29 abr 2026 was never added to the whitelist).
+
+    This test reproduces the exact observed payload — mix of raw HL and
+    portfolio-normalised field names, the same 5 coins, similar notionals
+    — and asserts ALL 5 positions appear. NO whitelist patching: the
+    detector must not depend on BASKET_PERP_TOKENS for inclusion.
+    """
+    _patch_registered_no_whitelist(monkeypatch, [REGISTERED_WALLET])
+
+    async def _fetch():
+        return [
+            {
+                "status": "ok",
+                "data": {
+                    "wallet": REGISTERED_WALLET,
+                    "label": "Cross 5x basket v6",
+                    "positions": [
+                        # Raw HL shape — szi/positionValue/entryPx/unrealizedPnl
+                        {
+                            "coin": "DYDX",
+                            "szi": -28503.0,
+                            "positionValue": 4460.0,
+                            "entryPx": 0.157,
+                            "unrealizedPnl": 52.53,
+                        },
+                        # Portfolio-normalised — size/notional_usd/entry_px/upnl
+                        {
+                            "coin": "OP",
+                            "size": -37430.0,
+                            "side": "SHORT",
+                            "notional_usd": 4534.0,
+                            "entry_px": 0.120,
+                            "upnl": -20.29,
+                        },
+                        # Raw HL again
+                        {
+                            "coin": "ARB",
+                            "szi": -35736.0,
+                            "positionValue": 4485.0,
+                            "entryPx": 0.126,
+                            "unrealizedPnl": 29.23,
+                        },
+                        # Portfolio-normalised
+                        {
+                            "coin": "PYTH",
+                            "size": -96712.0,
+                            "side": "SHORT",
+                            "notional_usd": 4510.0,
+                            "entry_px": 0.046,
+                            "upnl": 3.31,
+                        },
+                        # Mixed alias for upnl (unrealized_pnl)
+                        {
+                            "coin": "ENA",
+                            "size": -43682.0,
+                            "side": "SHORT",
+                            "notional_usd": 4477.0,
+                            "entry_px": 0.103,
+                            "unrealized_pnl": 36.18,
+                        },
+                    ],
+                },
+            }
+        ]
+
+    result = asyncio.run(fund_state_v2.detect_active_baskets(_fetch))
+
+    assert result["summary"]["any_active"] is True
+    w = result["wallets"][REGISTERED_WALLET]
+    assert w["status"] == "ACTIVE"
+
+    # All 5 must be visible — NOT 1 (regression target)
+    assert len(w["positions"]) == 5, (
+        f"Expected 5 positions (regression 1 may 14:17), got "
+        f"{len(w['positions'])} — whitelist filter likely re-introduced"
+    )
+    coins = {p["coin"] for p in w["positions"]}
+    assert coins == {"DYDX", "OP", "ARB", "PYTH", "ENA"}
+
+    # Every position must be SHORT (szi negative or explicit side)
+    assert all(p["side"] == "SHORT" for p in w["positions"])
+
+    # Notional total matches Pear screenshot ($22,645 → sum of 4460+4534+4485+4510+4477 = $22,466 ≈)
+    total = w["basket_notional_usd"]
+    assert 22000 < total < 23000, f"basket_notional_usd={total} outside Pear range"
+
+    # UPnL aggregates from inline upnl field (no snapshot lookup needed)
+    upnls = {p["coin"]: p["upnl"] for p in w["positions"]}
+    assert upnls["DYDX"] == pytest.approx(52.53)
+    assert upnls["OP"] == pytest.approx(-20.29)
+    assert upnls["ARB"] == pytest.approx(29.23)
+    assert upnls["PYTH"] == pytest.approx(3.31)
+    assert upnls["ENA"] == pytest.approx(36.18)
+    total_upnl = sum(upnls.values())
+    assert 70 < total_upnl < 110, f"total UPnL={total_upnl} outside Pear range +$78.84"
+
+    # Legacy `shorts` view must also be populated (backward compat)
+    assert len(w["shorts"]) == 5
+    assert {s["coin"] for s in w["shorts"]} == coins
+
+
+def test_rdashfix_no_token_whitelist_unknown_token_visible(monkeypatch):
+    """A token never seen by the bot before MUST still be detected.
+
+    Pre-fix: any new HL listing the fund shorted (XRPMOON, KAITO, etc.)
+    would silently disappear from the dashboard until BASKET_PERP_TOKENS
+    was manually edited. Post-fix: the detector is content-neutral,
+    surfaces whatever HL returns.
+    """
+    _patch_registered_no_whitelist(monkeypatch, [REGISTERED_WALLET])
+
+    async def _fetch():
+        return [
+            {
+                "status": "ok",
+                "data": {
+                    "wallet": REGISTERED_WALLET,
+                    "positions": [
+                        {
+                            "coin": "XRPMOON",  # fictional token, not in any list
+                            "size": -1000.0,
+                            "side": "SHORT",
+                            "notional_usd": 1500.0,
+                            "entry_px": 1.5,
+                            "upnl": 12.0,
+                        }
+                    ],
+                },
+            }
+        ]
+
+    result = asyncio.run(fund_state_v2.detect_active_baskets(_fetch))
+    w = result["wallets"][REGISTERED_WALLET]
+    assert w["status"] == "ACTIVE"
+    assert len(w["positions"]) == 1
+    assert w["positions"][0]["coin"] == "XRPMOON"
+
+
+def test_rdashfix_dust_filter_50usd(monkeypatch):
+    """Position with notional below $50 is dropped as dust.
+
+    Edge: a $30 phantom position should not turn the wallet ACTIVE.
+    """
+    _patch_registered_no_whitelist(monkeypatch, [REGISTERED_WALLET])
+
+    async def _fetch():
+        return [
+            {
+                "status": "ok",
+                "data": {
+                    "wallet": REGISTERED_WALLET,
+                    "positions": [
+                        {
+                            "coin": "ZRO",
+                            "size": -10.0,
+                            "side": "SHORT",
+                            "notional_usd": 30.0,  # dust
+                            "entry_px": 3.0,
+                            "upnl": 0.1,
+                        }
+                    ],
+                },
+            }
+        ]
+
+    result = asyncio.run(fund_state_v2.detect_active_baskets(_fetch))
+    w = result["wallets"][REGISTERED_WALLET]
+    assert w["status"] == "IDLE", "dust ($30 < $50) must not turn wallet ACTIVE"
+    assert w["positions"] == []
+
+
+def test_rdashfix_dust_filter_just_above_threshold(monkeypatch):
+    """Position with notional ≥ $50 is kept."""
+    _patch_registered_no_whitelist(monkeypatch, [REGISTERED_WALLET])
+
+    async def _fetch():
+        return [
+            {
+                "status": "ok",
+                "data": {
+                    "wallet": REGISTERED_WALLET,
+                    "positions": [
+                        {
+                            "coin": "ZRO",
+                            "size": -10.0,
+                            "side": "SHORT",
+                            "notional_usd": 75.0,  # $75 > $50 = kept
+                            "entry_px": 3.0,
+                            "upnl": 0.1,
+                        }
+                    ],
+                },
+            }
+        ]
+
+    result = asyncio.run(fund_state_v2.detect_active_baskets(_fetch))
+    w = result["wallets"][REGISTERED_WALLET]
+    assert w["status"] == "ACTIVE"
+    assert len(w["positions"]) == 1
+
+
+def test_rdashfix_long_position_appears_with_correct_side(monkeypatch):
+    """Side detection works for LONG positions too.
+
+    Pre-fix: the detector hard-skipped szi >= 0, so a LONG hedge wallet
+    would always be IDLE. Post-fix: side derives from sign of szi (or
+    explicit `side` field if present).
+    """
+    _patch_registered_no_whitelist(monkeypatch, [REGISTERED_WALLET])
+
+    async def _fetch():
+        return [
+            {
+                "status": "ok",
+                "data": {
+                    "wallet": REGISTERED_WALLET,
+                    "positions": [
+                        {
+                            "coin": "BTC",
+                            "size": 0.5,  # positive → LONG
+                            "notional_usd": 30000.0,
+                            "entry_px": 60000.0,
+                            "upnl": 100.0,
+                        }
+                    ],
+                },
+            }
+        ]
+
+    result = asyncio.run(fund_state_v2.detect_active_baskets(_fetch))
+    w = result["wallets"][REGISTERED_WALLET]
+    assert w["status"] == "ACTIVE"
+    assert len(w["positions"]) == 1
+    assert w["positions"][0]["side"] == "LONG"
+    # Legacy shorts view should be empty (it's a LONG)
+    assert w["shorts"] == []
+    assert w["basket_id_inferido"] is None  # not classifiable as a SHORT basket
+
+
+def test_rdashfix_basket_notional_does_not_doublecount(monkeypatch):
+    """basket_notional_usd should sum each position's ntl exactly once."""
+    _patch_registered_no_whitelist(monkeypatch, [REGISTERED_WALLET])
+
+    async def _fetch():
+        return [
+            {
+                "status": "ok",
+                "data": {
+                    "wallet": REGISTERED_WALLET,
+                    "positions": [
+                        {"coin": "DYDX", "size": -100, "notional_usd": 4500.0,
+                         "side": "SHORT", "entry_px": 0.65, "upnl": 10.0},
+                        {"coin": "OP", "size": -200, "notional_usd": 4500.0,
+                         "side": "SHORT", "entry_px": 1.20, "upnl": 5.0},
+                    ],
+                },
+            }
+        ]
+
+    result = asyncio.run(fund_state_v2.detect_active_baskets(_fetch))
+    w = result["wallets"][REGISTERED_WALLET]
+    assert w["basket_notional_usd"] == pytest.approx(9000.0)
+    # summary total also matches
+    assert result["summary"]["total_basket_notional_usd"] == pytest.approx(9000.0)

@@ -29,7 +29,8 @@ Public API:
             "0xabc...": {
                 "status": "ACTIVE" | "IDLE" | "UNKNOWN",
                 "label": "...",
-                "shorts": [{coin, side, szi, ntl, entryPx}, ...],
+                "positions": [{coin, side, szi, ntl, entryPx, upnl}, ...],
+                "shorts": [...],   # legacy view, SHORT-side filtered
                 "basket_id_inferido": "v6" | None,
                 "is_registered": True | False,
             }, ...
@@ -40,6 +41,15 @@ Public API:
             "anomalies": [{wallet, reason}, ...],   # only unregistered/mismatch
           }
         }
+
+R-DASH-FIX (1 may 2026):
+    The detector is now BASKET-AGNOSTIC. No token whitelist, no basket-id
+    pre-filter, no SHORT-only assumption. Side is detected dynamically.
+    The ONLY filter is a dust gate (notional < $50). Rationale: previous
+    detector used fund_state.BASKET_PERP_TOKENS as whitelist — that
+    constant froze on the v4/v5 token universe and silently dropped
+    DYDX/OP/ARB/PYTH from v6 (deployed 29 abr 2026), so the dashboard
+    showed only 1 of 5 active positions on 1 may 2026.
 
     build_authoritative_state_block(...) -> str
         Replacement for templates.system_prompt.build_fund_state_block(),
@@ -61,6 +71,11 @@ log = logging.getLogger(__name__)
 
 ENABLED = os.getenv("FUND_STATE_AUTODETECT", "true").strip().lower() != "false"
 ANOMALY_NOTIONAL_USD = float(os.getenv("FUND_STATE_ANOMALY_USD", "500") or 500)
+# R-DASH-FIX: dust gate — the ONLY filter applied to raw positions.
+# A real basket leg in v6 is ~$4.5K notional. $50 keeps headroom for
+# small hedges while excluding floating-point noise / closed-but-not-yet-
+# pruned ghost positions.
+DUST_NOTIONAL_USD = float(os.getenv("FUND_STATE_DUST_USD", "50") or 50)
 
 
 def _basket_perp_tokens() -> set[str]:
@@ -176,14 +191,13 @@ async def detect_active_baskets(
             },
         }
 
-    basket_tokens = _basket_perp_tokens()
     registered = _registered_wallets()
 
     log.info(
-        "fund_state_v2: detect_active_baskets START — wallets_in=%d basket_tokens=%d registered=%d",
+        "fund_state_v2: detect_active_baskets START — wallets_in=%d registered=%d dust_threshold=$%.0f",
         len(wallets or []),
-        len(basket_tokens),
         len(registered),
+        DUST_NOTIONAL_USD,
     )
 
     wallets_out: dict[str, dict[str, Any]] = {}
@@ -211,20 +225,25 @@ async def detect_active_baskets(
             len(raw_positions),
         )
 
-        shorts: list[dict[str, Any]] = []
+        # R-DASH-FIX: basket-agnostic detection.
+        # NO whitelist by token, NO basket-id pre-filter, NO SHORT-only
+        # assumption. Side is detected dynamically from szi sign. The only
+        # filter is a dust gate (notional < $50).
+        #
+        # Why: previous fund_state_v2 used fund_state.BASKET_PERP_TOKENS as
+        # a whitelist (line 256, deleted). That constant lists only the
+        # v4/v5 universe (WLD/STRK/ZRO/AVAX/ENA/EIGEN/SCR/ZETA) — DYDX/OP/
+        # ARB/PYTH from v6 (deployed 29 abr 2026 21:45 UTC) were never
+        # added, so 4 of the 5 v6 SHORTs got silently dropped, and the
+        # dashboard reported only ENA. Symptom: 1 may 2026 14:17 UTC,
+        # Pear shows 5 positions but bot shows 1.
+        positions: list[dict[str, Any]] = []
         wallet_basket_notional = 0.0
         for pos in raw_positions:
             coin = (pos.get("coin") or "").upper()
-            # R-DASH bugfix: accept BOTH naming conventions.
-            #
-            # Raw HyperLiquid info-API uses ``szi`` / ``positionValue`` /
-            # ``entryPx``. The fund's ``modules.portfolio._summarize_positions``
-            # normalises those to ``size`` / ``notional_usd`` / ``entry_px``.
-            # The previous fund_state_v2 only read the raw shape, so when
-            # production data flowed through portfolio.py (the production
-            # path) every notional was 0 and every position got dropped by
-            # the dust filter — symptom: dashboard "Sin posiciones abiertas"
-            # despite a live v6 basket on 0xc7AE…1505.
+            if not coin:
+                continue
+            # Accept ALL aliases for size: szi (raw HL), size (portfolio.py)
             try:
                 size_val = pos.get("szi")
                 if size_val is None:
@@ -232,61 +251,80 @@ async def detect_active_baskets(
                 szi = float(size_val or 0.0)
             except Exception:  # noqa: BLE001
                 szi = 0.0
-            if szi >= 0:
-                continue  # only SHORTs interest us for basket detection
+            if szi == 0.0:
+                continue
+            # Accept ALL aliases for notional
             try:
                 ntl_val = (
                     pos.get("position_value")
                     or pos.get("notional_usd")
                     or pos.get("ntl_pos")
                     or pos.get("positionValue")
+                    or pos.get("notional")
                 )
-                ntl = float(ntl_val or 0.0)
+                ntl = abs(float(ntl_val or 0.0))
             except Exception:  # noqa: BLE001
                 ntl = 0.0
-            if abs(ntl) < 1.0:
+            # DUST FILTER — the ONLY filter
+            if ntl < DUST_NOTIONAL_USD:
                 log.debug(
-                    "fund_state_v2: skip dust pos coin=%s szi=%s ntl=%s wallet=%s",
+                    "fund_state_v2: skip dust pos coin=%s szi=%s ntl=%.2f wallet=%s threshold=$%.0f",
                     coin,
                     szi,
                     ntl,
                     addr,
-                )
-                continue  # dust
-            if coin not in basket_tokens:
-                log.debug(
-                    "fund_state_v2: skip non-basket pos coin=%s wallet=%s",
-                    coin,
-                    addr,
+                    DUST_NOTIONAL_USD,
                 )
                 continue
+            # Accept ALL aliases for entry price
             try:
                 entry_px = float(
                     pos.get("entryPx") or pos.get("entry_px") or 0.0
                 )
             except Exception:  # noqa: BLE001
                 entry_px = 0.0
-            shorts.append(
+            # Accept ALL aliases for unrealized pnl
+            try:
+                upnl = float(
+                    pos.get("unrealizedPnl")
+                    or pos.get("unrealized_pnl")
+                    or pos.get("upnl")
+                    or 0.0
+                )
+            except Exception:  # noqa: BLE001
+                upnl = 0.0
+            # Side: prefer explicit field if present, else derive from szi
+            side = (pos.get("side") or "").upper().strip()
+            if side not in ("LONG", "SHORT"):
+                side = "SHORT" if szi < 0 else "LONG"
+            positions.append(
                 {
                     "coin": coin,
-                    "side": "SHORT",
+                    "side": side,
                     "szi": szi,
-                    "ntl": abs(ntl),
+                    "ntl": ntl,
                     "entryPx": entry_px,
+                    "upnl": upnl,
                 }
             )
-            wallet_basket_notional += abs(ntl)
+            wallet_basket_notional += ntl
+
+        # Backward-compat: legacy consumers (dashboard rendering) read the
+        # ``shorts`` key. Keep it populated as a derived view of SHORT-side
+        # positions so old code paths don't break.
+        shorts = [p for p in positions if p["side"] == "SHORT"]
 
         log.info(
-            "fund_state_v2: wallet=%s shorts_kept=%d basket_notional=%.2f",
+            "fund_state_v2: wallet=%s positions_kept=%d shorts=%d basket_notional=%.2f",
             addr,
+            len(positions),
             len(shorts),
             wallet_basket_notional,
         )
 
-        if shorts:
-            coins = {s["coin"] for s in shorts}
-            basket_id = _infer_basket_id(coins)
+        if positions:
+            coins_short = {p["coin"] for p in shorts}
+            basket_id = _infer_basket_id(coins_short) if coins_short else None
             status = "ACTIVE"
             total_notional += wallet_basket_notional
             if not is_registered and wallet_basket_notional >= ANOMALY_NOTIONAL_USD:
@@ -304,7 +342,8 @@ async def detect_active_baskets(
         wallets_out[addr] = {
             "status": status,
             "label": label,
-            "shorts": shorts,
+            "positions": positions,  # NEW: all sides, basket-agnostic
+            "shorts": shorts,         # legacy compat (SHORT-side view)
             "basket_id_inferido": basket_id,
             "is_registered": is_registered,
             "basket_notional_usd": wallet_basket_notional,

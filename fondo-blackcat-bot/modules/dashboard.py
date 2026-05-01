@@ -226,29 +226,37 @@ def _render_html(state: dict[str, Any]) -> str:
             active_wallets.append((addr, w))
 
     if active_wallets:
-        # Por wallet → mostrar shorts ordenados por notional desc
+        # Por wallet → mostrar posiciones ordenadas por notional desc.
+        # R-DASH-FIX: prefer ``positions`` (basket-agnostic, all sides)
+        # with fallback to legacy ``shorts`` (SHORT-only view) for older
+        # callers / cached snapshots.
         for addr, w in active_wallets:
             short_addr = addr[:6] + "…" + addr[-4:] if len(addr) >= 10 else addr
             basket_rows.append(
                 f"<p>Wallet: <span class='dim'>{_esc(short_addr)}</span>"
                 f" <strong>{_esc(w.get('label', ''))}</strong></p>"
             )
+            entries = w.get("positions") or w.get("shorts") or []
             # Sort by notional desc
-            shorts = sorted(
-                w.get("shorts") or [],
+            entries_sorted = sorted(
+                entries,
                 key=lambda s: float(s.get("ntl") or 0.0),
                 reverse=True,
             )
-            for s in shorts:
-                # Find UPnL for this position from snap.basket_positions if available
-                upnl = None
-                for bp in state.get("basket_positions") or []:
-                    if str(bp.get("coin", "")).upper() == str(s.get("coin", "")).upper():
-                        upnl = bp.get("upnl")
-                        break
+            for s in entries_sorted:
+                # Prefer the inline upnl carried in the position dict
+                # (basket-agnostic detector now ships it). Fall back to
+                # snapshot lookup for older basket_positions feed.
+                upnl = s.get("upnl")
+                if upnl is None:
+                    for bp in state.get("basket_positions") or []:
+                        if str(bp.get("coin", "")).upper() == str(s.get("coin", "")).upper():
+                            upnl = bp.get("upnl")
+                            break
                 cls, fmt = _signed(upnl) if upnl is not None else ("dim", "—")
+                side = (s.get("side") or "SHORT").upper()
                 basket_rows.append(
-                    f"<p>&nbsp;&nbsp;{_esc(s.get('coin'))} SHORT"
+                    f"<p>&nbsp;&nbsp;{_esc(s.get('coin'))} {_esc(side)}"
                     f" <span class='{cls}'>{_esc(fmt)}</span>"
                     f" <span class='dim'>(ntl ${float(s.get('ntl') or 0.0):,.0f})</span></p>"
                 )
