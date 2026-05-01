@@ -31,9 +31,11 @@ test('OPEN alert renders source + composition + capital + risk', () => {
   assert.match(text, /STRK SHORT/);
   assert.match(text, /\$250/);
   assert.match(text, /SL 50%/);
-  // hero pear button
+  // hero pear button — R-CTAOPTIMIZE format: "🍐 Copiar $250 en Pear"
+  // (label may carry amount if capital > 0; backward-compat falls back to
+  // "🍐 Copiar en Pear" when capital is 0).
   const allButtons = keyboard.inline_keyboard.flat();
-  assert.ok(allButtons.find((b) => /Copiar en Pear/i.test(b.text)));
+  assert.ok(allButtons.find((b) => /Copiar.*en Pear/i.test(b.text)));
 });
 
 test('CLOSE alert renders close text and no Pear button', () => {

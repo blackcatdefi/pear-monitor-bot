@@ -1,7 +1,8 @@
 'use strict';
 
 /**
- * R-AUTOCOPY-MENU — Unified alert template for the 3 copy-trading sources.
+ * R-AUTOCOPY-MENU + R-CTAOPTIMIZE — Unified alert template for the 3
+ * copy-trading sources.
  *
  * Builds the message body + inline keyboard for copy-trading alerts. The
  * template is shared across:
@@ -12,6 +13,13 @@
  *
  * The {source} label tells the user where the signal came from.
  *
+ * R-CTAOPTIMIZE additions (OPEN events):
+ *   - hero CTA label includes pre-fill amount: "🍐 Copiar $500 en Pear"
+ *   - hero URL carries pre-fill (?amount=…) + anonymized utm tracking
+ *   - quick-amount row [0.5x · 1x · 2x] when capital is configured
+ *   - source-aware utm_source ('tg-alert-bcd-wallet' / 'tg-signal-channel' /
+ *     'tg-alert-custom') so we can attribute conversions per source.
+ *
  * Output:
  *   { text, keyboard }   — pass directly to bot.sendMessage(opts)
  */
@@ -19,6 +27,8 @@
 const tzMgr = require('./timezoneManager');
 const { buildPearUrlFromSides } = require('./signalsChannelParser');
 const store = require('./copyTradingStore');
+const pearUrl = require('./pearUrlBuilder');
+const buttons = require('./alertButtons');
 
 function _money(n) {
   if (!Number.isFinite(n)) return '$0';
@@ -44,8 +54,11 @@ function _sourceLabel(source) {
   }
 }
 
-function _buildPearUrl({ pearUrl, longTokens, shortTokens, positions }) {
-  if (pearUrl) return pearUrl;
+function _buildPearUrl(spec) {
+  // Backward-compatible fallback used when no pre-fill / utm is required.
+  // Prefer _buildPearUrlWithOpts for OPEN alerts.
+  const { pearUrl: pre, longTokens, shortTokens, positions } = spec || {};
+  if (pre) return pre;
   if (Array.isArray(longTokens) || Array.isArray(shortTokens)) {
     return buildPearUrlFromSides({ longTokens, shortTokens });
   }
@@ -55,6 +68,40 @@ function _buildPearUrl({ pearUrl, longTokens, shortTokens, positions }) {
     return buildPearUrlFromSides({ longTokens: longs, shortTokens: shorts });
   }
   return null;
+}
+
+// R-CTAOPTIMIZE — map the alert source to a UTM-friendly identifier.
+function _utmSource(source) {
+  switch (source) {
+    case 'BCD_WALLET':
+      return 'tg-alert-bcd-wallet';
+    case 'BCD_SIGNALS':
+      return 'tg-signal-channel';
+    case 'CUSTOM_WALLET':
+      return 'tg-alert-custom';
+    default:
+      return 'tg-alert';
+  }
+}
+
+// R-CTAOPTIMIZE — build the Pear URL for a given side, carrying capital
+// pre-fill + UTM tracking. Returns null if no positions match the side.
+function _ctaUrlForSide(positions, side, opts) {
+  const o = opts || {};
+  if (!Array.isArray(positions) || positions.length === 0) return null;
+  const cap = Number.isFinite(Number(o.capital)) && Number(o.capital) > 0
+    ? Number(o.capital)
+    : null;
+  const ctaOpts = {};
+  if (cap) ctaOpts.capital = cap;
+  if (Number.isFinite(Number(o.leverage)) && Number(o.leverage) > 0) {
+    ctaOpts.leverage = Number(o.leverage);
+  }
+  if (o.userId !== undefined && o.userId !== null && o.userId !== '') {
+    ctaOpts.userId = o.userId;
+  }
+  if (o.source) ctaOpts.source = _utmSource(o.source);
+  return pearUrl.buildPearCopyUrl(positions, side, ctaOpts);
 }
 
 /**
@@ -138,12 +185,78 @@ function buildAlert(spec) {
 
   const keyboard = { inline_keyboard: [] };
   if (event === 'OPEN') {
-    const pearUrl = _buildPearUrl(spec);
-    if (pearUrl) {
+    // R-CTAOPTIMIZE — capital-aware hero rows + optional quick-amount row.
+    // We try to build per-side URLs first (with pre-fill + UTM); fall back to
+    // the legacy single URL if those return null (e.g. mixed-side basket
+    // pulled from a pre-built pearUrl string).
+    const ctaOpts = {
+      capital: cap,
+      leverage: spec.leverage,
+      userId: spec.userId,
+      source: spec.source,
+    };
+    const shortsUrl = _ctaUrlForSide(positions, 'SHORT', ctaOpts);
+    const longsUrl = _ctaUrlForSide(positions, 'LONG', ctaOpts);
+    const capLabel = buttons.formatAmount(cap);
+
+    const heroLabelFor = (side) => {
+      const tag = side === 'SHORT' ? 'SHORTs' : 'LONGs';
+      if (capLabel) return `🍐 Copiar ${tag} ${capLabel} en Pear`;
+      return `🍐 Copiar ${tag} en Pear`;
+    };
+    const heroLabelSingle = capLabel
+      ? `🍐 Copiar ${capLabel} en Pear`
+      : '🍐 Copiar en Pear';
+
+    if (shortsUrl && longsUrl) {
       keyboard.inline_keyboard.push([
-        { text: `🍐 Copiar en Pear (${_money(cap)})`, url: pearUrl },
+        { text: heroLabelFor('SHORT'), url: shortsUrl },
       ]);
+      keyboard.inline_keyboard.push([
+        { text: heroLabelFor('LONG'), url: longsUrl },
+      ]);
+    } else if (shortsUrl || longsUrl) {
+      const url = shortsUrl || longsUrl;
+      const side = shortsUrl ? 'SHORT' : 'LONG';
+      keyboard.inline_keyboard.push([{ text: heroLabelSingle, url }]);
+
+      // Quick-amount row — only when capital known + single-side basket.
+      if (cap > 0 && buttons.QUICK_AMOUNT_MULTIPLIERS.length > 0
+        && (spec.showQuickAmounts !== false)
+        && buttons.QUICK_AMOUNTS_ENABLED) {
+        const quickRow = [];
+        for (const m of buttons.QUICK_AMOUNT_MULTIPLIERS) {
+          const amt = buttons._roundQuickAmount(cap * m);
+          if (amt <= 0) continue;
+          const url2 = pearUrl.buildPearCopyUrl(positions, side, {
+            ...buttons._ctaOpts({
+              leverage: spec.leverage,
+              userId: spec.userId,
+              source: _utmSource(spec.source),
+            }),
+            capital: amt,
+          });
+          if (!url2) continue;
+          const mLabel = m === Math.floor(m)
+            ? `${m}x`
+            : `${m.toFixed(1).replace(/\.0$/, '')}x`;
+          quickRow.push({
+            text: `${mLabel} (${buttons.formatAmount(amt)})`,
+            url: url2,
+          });
+        }
+        if (quickRow.length > 0) keyboard.inline_keyboard.push(quickRow);
+      }
+    } else {
+      // Fallback: pre-built Pear URL passed in spec, or buildPearUrlFromSides
+      const fallbackUrl = _buildPearUrl(spec);
+      if (fallbackUrl) {
+        keyboard.inline_keyboard.push([
+          { text: capLabel ? `🍐 Copiar ${capLabel} en Pear` : '🍐 Copiar en Pear', url: fallbackUrl },
+        ]);
+      }
     }
+
     keyboard.inline_keyboard.push([
       { text: '⏭️ Skip', callback_data: 'copytrade:skip' },
       { text: '⚙️ Config', callback_data: 'copytrade:menu' },
@@ -161,6 +274,8 @@ module.exports = {
   buildAlert,
   _sourceLabel,
   _buildPearUrl,
+  _ctaUrlForSide,
+  _utmSource,
   _formatPositionLine,
   _money,
 };

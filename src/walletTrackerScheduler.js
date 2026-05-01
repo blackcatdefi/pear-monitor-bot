@@ -111,12 +111,20 @@ function _renderCloseForUser(userId, label, address, closes) {
 }
 
 async function _fanOut(subscribers, msgFn, opts) {
+  // R-CTAOPTIMIZE — opts may now be either:
+  //   • an object   → broadcast same opts to every user (legacy path)
+  //   • a function  → invoked per-user with (userId, sub) so the call site
+  //                   can build a per-user inline_keyboard carrying that
+  //                   user's anonymized utm_id.
   for (const sub of subscribers) {
     const userId = parseInt(sub.userId, 10);
     if (!userId) continue;
     try {
       const personalized = msgFn(userId, sub.label);
-      await _notify(userId, personalized, opts || { parse_mode: 'Markdown' });
+      const sendOpts = typeof opts === 'function'
+        ? opts(userId, sub) || { parse_mode: 'Markdown' }
+        : opts || { parse_mode: 'Markdown' };
+      await _notify(userId, personalized, sendOpts);
     } catch (err) {
       console.error(
         '[walletTrackerScheduler] notify failed for',
@@ -154,15 +162,22 @@ async function pollOnce() {
     const { opens, closes } = _diffPositions(prev, curr);
     if (opens.length > 0) {
       // R-START — hero CTA layout (Pear copy button row 1, mute button row 2).
-      const keyboard = alertButtons.buildAlertKeyboard(opens, 'open', {
-        wallet: address,
-      });
+      // R-CTAOPTIMIZE — build per-user keyboard so each carries its own
+      // anonymized utm_id. Source 'tg-track' is the wallet-tracker channel
+      // (distinct from copy-trading sources).
       await _fanOut(
         subs,
         (uid, lbl) => _renderOpenForUser(uid, lbl, address, opens),
-        keyboard
-          ? { parse_mode: 'Markdown', reply_markup: keyboard }
-          : { parse_mode: 'Markdown' }
+        (uid) => {
+          const keyboard = alertButtons.buildAlertKeyboard(opens, 'open', {
+            wallet: address,
+            userId: uid,
+            source: 'tg-track',
+          });
+          return keyboard
+            ? { parse_mode: 'Markdown', reply_markup: keyboard }
+            : { parse_mode: 'Markdown' };
+        }
       );
     }
     if (closes.length > 0) {
