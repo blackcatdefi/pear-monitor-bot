@@ -67,6 +67,7 @@ COMMANDS: List[BotCommand] = [
     BotCommand("remove_event", "Borrar evento del calendar <event_id>", "admin", "cmd_remove_event"),
     BotCommand("export", "Export CSV <tipo> <periodo> (fills|pnl|positions|intel|errors × 7d|30d|90d|ytd|all)", "admin", "cmd_export"),
     BotCommand("scheduler_health", "Tabla health de schedulers (R18 add-on)", "admin", "cmd_scheduler_health"),
+    BotCommand("silent", "Toggle silent mode (on/off/status) — R-SILENT denoise", "admin", "cmd_silent"),
 
     # ─── DEBUG / OBSERVABILIDAD ───
     BotCommand("debug_x", "Diagnóstico de conectividad X/Twitter", "debug", "cmd_debug_x"),

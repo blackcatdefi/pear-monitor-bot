@@ -1187,6 +1187,82 @@ async def cmd_scheduler_health(update: Update, context: ContextTypes.DEFAULT_TYP
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
+# ─── R-SILENT: /silent command ───────────────────────────────────────────────
+
+
+@authorized
+@with_error_logging
+async def cmd_silent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-SILENT — toggle bot a modo emergency-only.
+
+    Usage:
+        /silent on      → suppresses everything except HF<1.05 + post-event critical
+        /silent off     → normal mode (with R-SILENT gates applied)
+        /silent status  → muestra estado actual y configuración de los gates
+    """
+    from auto import silent_mode as _silent
+    from auto import hf_alert_gate as _hfg
+    from auto import catalyst_alert_gate as _cgate
+
+    args = (context.args or [])
+    cmd = (args[0] if args else "status").strip().lower()
+
+    if cmd == "on":
+        s = _silent.set_silent(True)
+        msg = (
+            "🔇 SILENT MODE: ON\n\n"
+            f"Activado: {s.get('since_iso', '?')}\n\n"
+            "Suprimido:\n"
+            "  • HF warn (1.05–1.10) — solo critical/preliq escapan\n"
+            "  • Catalyst T-30min — incluso critical\n"
+            "  • Boot announcements\n"
+            "  • Heartbeats / morning brief / weekly summary (vía gate)\n\n"
+            "Sigue activo:\n"
+            "  • HF critical (<1.05) y preliq (<1.02)\n"
+            "  • Post-event critical T+15min (CATALYST_POST_ALLOWED_IN_SILENT=true)\n"
+            "  • Basket close detector (siempre edge-triggered)\n\n"
+            "Tipea /silent off para volver a modo normal."
+        )
+    elif cmd == "off":
+        s = _silent.set_silent(False)
+        msg = (
+            "🔊 SILENT MODE: OFF\n\n"
+            f"Desactivado: {s.get('since_iso', '?')}\n\n"
+            "Bot vuelve a modo normal con gates R-SILENT aplicados:\n"
+            f"  • HF gate: warn <{_hfg.THRESHOLD:.2f} | critical <{_hfg.CRITICAL:.2f} | preliq <{_hfg.PRELIQ:.2f}\n"
+            f"  • Catalyst gate: impacts={sorted(_cgate.ALLOW_IMPACTS)} timings={sorted(_cgate.ALLOW_TIMINGS)}\n"
+            f"  • Boot dedup window: {os.getenv('BOOT_DEDUP_WINDOW_MIN', '30')} min"
+        )
+    else:  # status
+        s = _silent.status()
+        hfs = _hfg.status_summary()
+        cs = _cgate.status_summary()
+        bot_status = "ON" if s.get("silent") else "OFF"
+        emoji = "🔇" if s.get("silent") else "🔊"
+        lines = [
+            f"{emoji} SILENT MODE: {bot_status}",
+            f"Desde: {s.get('since_iso', '?')} ({s.get('age_s', 0)//3600}h{(s.get('age_s', 0)%3600)//60}min)",
+            f"Source: {s.get('source', '?')}",
+            "",
+            "── HF gate ──",
+            f"  enabled={hfs['enabled']} threshold={hfs['threshold']:.2f} critical={hfs['critical']:.2f} preliq={hfs['preliq']:.2f}",
+            f"  dedup={hfs['dedup_min']}min Δ={hfs['dedup_delta']} preliq_repeat={hfs['preliq_repeat_min']}min",
+            f"  wallets tracked: {len(hfs.get('tracked_wallets') or [])}",
+            "",
+            "── Catalyst gate ──",
+            f"  enabled={cs['enabled']} impacts={cs['allow_impacts']} timings={cs['allow_timings']}",
+            f"  post: T+{cs['postevent_delay_min']}min (window {cs['postevent_window_min']}min)",
+            f"  recent post-alerts: {len(cs.get('recent_post_alerts') or [])}",
+            "",
+            "── Boot dedup ──",
+            f"  window: {os.getenv('BOOT_DEDUP_WINDOW_MIN', '30')} min",
+            f"  data_dir: {os.getenv('DATA_DIR', '(default)')}",
+        ]
+        msg = "\n".join(lines)
+
+    await send_long_message(update, msg, reply_markup=MAIN_KEYBOARD)
+
+
 # ─── Scheduler jobs ──────────────────────────────────────────────────────────
 
 
@@ -1825,6 +1901,8 @@ HANDLER_MAP = {
     "compounding_history": cmd_compounding_history,
     # Round 18 add-on
     "scheduler_health": cmd_scheduler_health,
+    # R-SILENT
+    "silent": cmd_silent,
 }
 
 

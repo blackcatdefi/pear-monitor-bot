@@ -75,7 +75,18 @@ def _clear(state: dict[str, Any], key: str) -> None:
 async def run_alert_cycle(bot) -> None:  # noqa: C901
     state = _load_state()
 
-    # 1. HyperLend HF (all wallets)
+    # 1. HyperLend HF (all wallets) — R-SILENT: gated by auto.hf_alert_gate
+    # Threshold defaults: 1.10 / 1.05 / 1.02 (warn / critical / preliq).
+    # Dedup 2h, delta 0.05; preliq fires every 5min until recovery.
+    try:
+        from auto import hf_alert_gate as hfg  # noqa: WPS433
+    except Exception:  # noqa: BLE001
+        hfg = None  # type: ignore[assignment]
+    try:
+        from auto import silent_mode as _silent  # noqa: WPS433
+    except Exception:  # noqa: BLE001
+        _silent = None  # type: ignore[assignment]
+
     hl_list = await fetch_all_hyperlend()
     for hl in hl_list:
         if hl.get("status") != "ok":
@@ -86,27 +97,62 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
         wallet_addr = hld.get("wallet", "")
         short_addr = wallet_addr[:6] + "\u2026" + wallet_addr[-4:] if wallet_addr else ""
         ident = f"{label} ({short_addr})" if label else short_addr
-        wallet_key = wallet_addr[-8:] if wallet_addr else "unknown"
 
-        if hf is not None and not math.isinf(hf):
-            # Round to 4 decimals to avoid float noise
-            hf_r = round(hf, 4)
-            if hf_r < HF_CRITICAL:  # strict <, exact threshold does NOT alert
+        if hf is None or math.isinf(hf) or math.isnan(hf):
+            continue
+        hf_r = round(hf, 4)
+
+        if hfg is None:
+            # Gate import failed: legacy passthrough (warn under HF_WARN, critical under HF_CRITICAL)
+            wallet_key = wallet_addr[-8:] if wallet_addr else "unknown"
+            if hf_r < HF_CRITICAL:
                 await _emit(
                     bot, f"hf_critical_{wallet_key}", state,
                     f"\U0001f6a8 HYPERLEND HF CR\u00cdTICO: {hf_r:.4f} \u2014 {ident} \u2014 acci\u00f3n inmediata!"
                 )
             else:
                 _clear(state, f"hf_critical_{wallet_key}")
+            continue
 
-            if hf_r < HF_WARN:  # strict <, exact 1.20 does NOT alert
-                await _emit(
-                    bot, f"hf_warn_{wallet_key}", state,
-                    f"\u26a0\ufe0f HYPERLEND HF: {hf_r:.4f} \u2014 {ident} \u2014 por debajo de {HF_WARN:.2f}"
+        decision = hfg.decide(wallet_addr, hf_r)
+        if not decision.should_emit:
+            # If recovered above threshold, clear the dedup state so next drop
+            # is a fresh first-cross alert.
+            if decision.severity is None:
+                hfg.clear_wallet(wallet_addr)
+            continue
+
+        # Silent-mode hardening: only critical/preliq escape silent mode.
+        if _silent is not None and _silent.is_silent():
+            if decision.severity not in {"critical", "preliq"}:
+                log.info(
+                    "alerts.HF: suppressed (silent_mode ON, severity=%s) %s hf=%.4f",
+                    decision.severity, ident, hf_r,
                 )
-            else:
-                _clear(state, f"hf_warn_{wallet_key}")
-                _clear(state, f"hf_critical_{wallet_key}")
+                continue
+
+        if decision.severity == "preliq":
+            msg = (
+                f"\U0001f6a8\U0001f6a8 HYPERLEND PRE-LIQUIDACI\u00d3N: HF {hf_r:.4f} \u2014 {ident} \u2014 "
+                f"acci\u00f3n inmediata, repay urgente. (Repite c/{hfg.PRELIQ_REPEAT_MIN}min hasta recuperar)"
+            )
+        elif decision.severity == "critical":
+            msg = (
+                f"\U0001f6a8 HYPERLEND HF CR\u00cdTICO: {hf_r:.4f} \u2014 {ident} \u2014 "
+                f"por debajo de {hfg.CRITICAL:.2f}, evaluar repay/colateral"
+            )
+        else:  # warn
+            msg = (
+                f"\u26a0\ufe0f HYPERLEND HF: {hf_r:.4f} \u2014 {ident} \u2014 "
+                f"por debajo de {hfg.THRESHOLD:.2f} (zona warn)"
+            )
+        try:
+            if TELEGRAM_CHAT_ID:
+                await send_bot_message(bot, TELEGRAM_CHAT_ID, msg)
+            log.warning("ALERT hf_%s: %s", decision.severity, msg)
+            hfg.record_emit(wallet_addr, hf_r, decision.severity)
+        except Exception:  # noqa: BLE001
+            log.exception("alerts.HF send failed for %s", ident)
 
     # 2. HYPE price
     hype_px = await get_spot_price("HYPE")

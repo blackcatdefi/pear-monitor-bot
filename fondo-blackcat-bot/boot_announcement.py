@@ -60,29 +60,28 @@ def _build_boot_text() -> str:
 
     pending.sort(key=lambda x: x[0])
 
-    if pending:
+    # R-SILENT: filter to *critical* impact only — those are the events the bot
+    # will actually alert on (catalyst gate). Anything else is noise on boot.
+    critical_only = [
+        (ev_utc, ev)
+        for ev_utc, ev in pending
+        if str(ev.get("impact_level", "")).lower() == "critical"
+    ]
+
+    if critical_only:
         lines = []
-        for ev_utc, ev in pending:
+        for ev_utc, ev in critical_only:
             t_str = ev_utc.strftime("%H:%M UTC")
             name = ev.get("name", "evento")
             lines.append(f"  • {t_str} — {name}")
-        events_section = "\n".join(lines)
-        events_count = len(pending)
+        events_section = "📋 Catalysts hoy:\n" + "\n".join(lines)
     else:
-        events_section = "  Ningún evento catalyst pendiente hoy."
-        events_count = 0
+        events_section = "📋 Sin catalysts critical hoy."
 
-    plural = "s" if events_count != 1 else ""
-    cal_line = "✅ Calendar refresh OK" if calendar_ok else "⚠️ Calendar refresh failed"
+    if not calendar_ok:
+        events_section = "⚠️ Calendar refresh failed.\n" + events_section
 
-    return (
-        "🟢 BOT ONLINE\n\n"
-        "✅ Reloj sistema validado UTC\n"
-        f"{cal_line}\n"
-        f"📋 {events_count} catalyst{plural} pendiente{plural} hoy:\n"
-        f"{events_section}\n\n"
-        "Schedulers operativos. Listo para alertar."
-    )
+    return events_section
 
 
 async def announce_boot(bot) -> None:
@@ -107,7 +106,7 @@ async def announce_boot(bot) -> None:
         return
 
     body = _build_boot_text()
-    final = f"{format_header()}\n\n{body}"
+    final = f"{format_header()}\n\n🟢 BOT ONLINE\n{body}"
 
     try:
         await send_bot_message(bot, TELEGRAM_CHAT_ID, final)

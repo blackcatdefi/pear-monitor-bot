@@ -201,21 +201,53 @@ def _render_html(state: dict[str, Any]) -> str:
             "</div>"
         )
 
-    # ─── Basket v5 ────────────────────────────────────────────────────────
+    # ─── Basket activa (R-SILENT autodetect) ─────────────────────────────
+    # Datos vienen de auto.fund_state_v2.detect_active_baskets() (on-chain).
+    # No hardcodeamos número de basket — eso es metadata humana, no del bot.
     basket_rows: list[str] = []
-    for p in state.get("basket_positions") or []:
-        cls, fmt = _signed(p.get("upnl"))
-        basket_rows.append(
-            f"<p>{_esc(p.get('coin'))}: <span class='{cls}'>{_esc(fmt)}</span>"
-            f" <span class='dim'>(ntl ${abs(float(p.get('notional_usd') or 0)):,.0f})</span></p>"
-        )
-    if not basket_rows:
-        basket_rows.append("<p class='dim'>Sin posiciones SHORT activas (notional &gt;$50)</p>")
-    else:
+    basket_state = state.get("basket_state") or {}
+    active_wallets = []
+    for addr, w in (basket_state.get("wallets") or {}).items():
+        if w.get("status") == "ACTIVE":
+            active_wallets.append((addr, w))
+
+    if active_wallets:
+        # Por wallet → mostrar shorts ordenados por notional desc
+        for addr, w in active_wallets:
+            short_addr = addr[:6] + "…" + addr[-4:] if len(addr) >= 10 else addr
+            basket_rows.append(
+                f"<p>Wallet: <span class='dim'>{_esc(short_addr)}</span>"
+                f" <strong>{_esc(w.get('label', ''))}</strong></p>"
+            )
+            # Sort by notional desc
+            shorts = sorted(
+                w.get("shorts") or [],
+                key=lambda s: float(s.get("ntl") or 0.0),
+                reverse=True,
+            )
+            for s in shorts:
+                # Find UPnL for this position from snap.basket_positions if available
+                upnl = None
+                for bp in state.get("basket_positions") or []:
+                    if str(bp.get("coin", "")).upper() == str(s.get("coin", "")).upper():
+                        upnl = bp.get("upnl")
+                        break
+                cls, fmt = _signed(upnl) if upnl is not None else ("dim", "—")
+                basket_rows.append(
+                    f"<p>&nbsp;&nbsp;{_esc(s.get('coin'))} SHORT"
+                    f" <span class='{cls}'>{_esc(fmt)}</span>"
+                    f" <span class='dim'>(ntl ${float(s.get('ntl') or 0.0):,.0f})</span></p>"
+                )
+        # Total
         bcls, bfmt = _signed(state.get("basket_upnl") or 0.0)
+        total_ntl = float(basket_state.get("summary", {}).get("total_basket_notional_usd") or 0.0)
         basket_rows.append(
-            f"<p class='dim'>Total: <span class='{bcls}'>{_esc(bfmt)}</span>"
-            f" · ntl ${float(state.get('basket_notional') or 0):,.0f}</p>"
+            f"<p class='dim'>Total UPnL: <span class='{bcls}'>{_esc(bfmt)}</span>"
+            f" · ntl ${total_ntl:,.0f}</p>"
+        )
+    else:
+        basket_rows.append(
+            "<p class='dim'>Sin posiciones abiertas en wallets del fondo.</p>"
         )
 
     # ─── Próximos catalysts (macro calendar) ──────────────────────────────
@@ -258,18 +290,35 @@ def _render_html(state: dict[str, Any]) -> str:
     fg_value = state.get("fg_value")
     fg_label = state.get("fg_label")
 
+    # R-SILENT: prices fallback via persistent cache.
+    cached_prices = state.get("cached_prices") or {}
+    cache_age = cached_prices.get("age_s")
+    cached_btc = cached_prices.get("btc")
+    cached_eth = cached_prices.get("eth")
+    cached_hype = cached_prices.get("hype")
+
+    btc_eff = btc if btc is not None else cached_btc
+    eth_eff = eth if eth is not None else cached_eth
+    hype_eff = hype if hype is not None else cached_hype
+
     market_loading = (btc is None and eth is None and hype is None)
     market_html = (
-        f"<p>BTC: {_esc(_fmt_usd(btc))}</p>"
-        f"<p>ETH: {_esc(_fmt_usd(eth))}</p>"
-        f"<p>HYPE: {_esc(_fmt_usd(hype, dec=2))}</p>"
+        f"<p>BTC: {_esc(_fmt_usd(btc_eff))}</p>"
+        f"<p>ETH: {_esc(_fmt_usd(eth_eff))}</p>"
+        f"<p>HYPE: {_esc(_fmt_usd(hype_eff, dec=2))}</p>"
         f"<p>F&amp;G: {_esc(fg_value)} ({_esc(fg_label)})</p>"
     )
     if market_loading:
-        market_html = (
-            "<p class='dim'>Cargando precios… (cache vacío o API timeout, "
-            "se refresca en 60s)</p>" + market_html
-        )
+        if (cached_btc is not None or cached_eth is not None or cached_hype is not None):
+            age_min = (cache_age or 0) // 60
+            market_html = (
+                f"<p class='dim'>⚠️ API down — usando cache (hace {age_min}min)</p>"
+                + market_html
+            )
+        else:
+            market_html = (
+                "<p class='dim'>(API down — sin cache disponible)</p>" + market_html
+            )
 
     html_doc = f"""<!DOCTYPE html>
 <html lang="es">
@@ -332,7 +381,7 @@ def _render_html(state: dict[str, Any]) -> str:
         {secondary_html}
 
         <div class="card">
-            <h2>Basket v5 (SHORTs notional &gt;$50)</h2>
+            <h2>Basket activa (autodetect)</h2>
             {''.join(basket_rows)}
         </div>
 
@@ -366,6 +415,27 @@ async def _build_state() -> dict[str, Any]:
 
     snap = await build_portfolio_snapshot()
     snap_age = (_time.time() - snap.built_at_ts) if getattr(snap, "built_at_ts", 0) else None
+
+    # R-SILENT: on-chain basket autodetect (single source of truth).
+    basket_state: dict[str, Any] = {}
+    try:
+        from auto.fund_state_v2 import detect_active_baskets
+        basket_state = await detect_active_baskets()
+    except Exception:  # noqa: BLE001
+        log.exception("dashboard: fund_state_v2 detect_active_baskets failed (non-fatal)")
+
+    # R-SILENT: persist prices for fallback when fetch_market_data 502s.
+    cached_prices: dict[str, Any] = {}
+    try:
+        from auto import price_cache as _pc
+        _pc.record(
+            getattr(snap.market, "btc", None),
+            getattr(snap.market, "eth", None),
+            getattr(snap.market, "hype", None),
+        )
+        cached_prices = _pc.read()
+    except Exception:  # noqa: BLE001
+        log.exception("dashboard: price_cache failed (non-fatal)")
 
     def _ws_to_dict(ws):
         if ws is None:
@@ -422,6 +492,9 @@ async def _build_state() -> dict[str, Any]:
         "snap_age_sec": snap_age,
         "is_fresh": getattr(snap, "is_fresh", True),
         "last_error": getattr(snap, "last_error", None),
+        # R-SILENT: on-chain basket autodetect + price cache fallback.
+        "basket_state": basket_state,
+        "cached_prices": cached_prices,
     }
 
 

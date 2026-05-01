@@ -121,6 +121,38 @@ def _build_alert_body(event: Dict[str, Any], alert_type: str) -> str:
     return add_message_timestamp(body, position="bottom")
 
 
+def _build_post_alert_body(event: Dict[str, Any]) -> str:
+    """Render the T+post (post-event) alert body for a critical catalyst.
+
+    Pure post-event summary: reminds BCD to check positions/HF/basket
+    UPnL, reads the event metadata. The LLM-driven analytical block lives
+    elsewhere — this is a hook that BCD can act on.
+    """
+    event_utc = event.get("timestamp_utc")
+    if isinstance(event_utc, str):
+        event_utc = datetime.fromisoformat(event_utc.replace("Z", "+00:00"))
+    when_abs = event_utc.strftime("%Y-%m-%d %H:%M") if event_utc else "?"
+    name = event.get("name", "evento")
+    impact = event.get("impact") or event.get("impact_level", "critical")
+    category = event.get("category", "macro")
+    affects = event.get("affects") or "—"
+    notes = event.get("notes") or ""
+    body = (
+        f"🔴 CATALYST T+post — {name}\n\n"
+        f"📅 Evento: {when_abs} UTC (hace ~15min)\n"
+        f"📂 Categoría: {category} | Impact: {impact}\n"
+        f"⚠️ Afecta: {affects}\n\n"
+        "Post-evento checklist:\n"
+        "  • Re-evaluar HF de cada wallet\n"
+        "  • UPnL de basket vs pre-evento\n"
+        "  • Triggers de kill (BTC, basket DD, UETH APY)\n"
+        "  • Re-leer la tesis si la dirección quedó comprometida\n"
+    )
+    if notes:
+        body += f"\n📝 {notes}"
+    return add_message_timestamp(body, position="bottom")
+
+
 async def _send_telegram(bot, message: str) -> None:
     """Adapter to existing send_bot_message helper."""
     try:
@@ -152,11 +184,40 @@ async def run_calendar_alert_check(application) -> int:
     sent = 0
     bot = getattr(application, "bot", application)
 
+    # R-SILENT: catalyst gate filters by impact_level + timing.
+    try:
+        from auto import catalyst_alert_gate as cgate  # noqa: WPS433
+    except Exception:  # noqa: BLE001
+        cgate = None  # type: ignore[assignment]
+    try:
+        from auto import silent_mode as _silent  # noqa: WPS433
+    except Exception:  # noqa: BLE001
+        _silent = None  # type: ignore[assignment]
+
     for alert_type in ("T-24h", "T-2h", "T-30min"):
         eligible = filter_events_for_alerts(all_events, alert_type)
         for event in eligible:
             event_id = event.get("id") or event.get("event_id")
             if not event_id:
+                continue
+
+            # R-SILENT gate: only critical T-30min by default.
+            if cgate is not None and not cgate.should_fire_pre(event, alert_type):
+                logger.info(
+                    "scheduler_v2: gate skip %s for %s (impact=%s, gate denied)",
+                    alert_type, event_id, event.get("impact_level") or event.get("impact"),
+                )
+                # Mark as sent so we don't keep evaluating this slot every minute.
+                _mark_alert_sent(event_id, alert_type)
+                continue
+
+            # Silent-mode override: even allowed pre-alerts (T-30min critical) skipped.
+            if _silent is not None and _silent.is_silent():
+                logger.info(
+                    "scheduler_v2: silent_mode ON, suppress %s for %s",
+                    alert_type, event_id,
+                )
+                _mark_alert_sent(event_id, alert_type)
                 continue
 
             if _was_alert_sent(event_id, alert_type):
@@ -195,6 +256,32 @@ async def run_calendar_alert_check(application) -> int:
                     "scheduler_v2: failed to dispatch %s for %s",
                     alert_type,
                     event_id,
+                )
+
+    # R-SILENT: post-event T+15min critical analysis.
+    if cgate is not None:
+        for event in all_events:
+            event_id = event.get("id") or event.get("event_id")
+            if not event_id:
+                continue
+            if not cgate.should_fire_post(event):
+                continue
+            if _silent is not None and _silent.is_silent():
+                if not _silent.catalyst_post_allowed():
+                    logger.info(
+                        "scheduler_v2: silent_mode suppresses post for %s", event_id,
+                    )
+                    cgate.mark_post_sent(event)
+                    continue
+            try:
+                msg = _build_post_alert_body(event)
+                await _send_telegram(bot, msg)
+                cgate.mark_post_sent(event)
+                sent += 1
+                logger.info("scheduler_v2: dispatched T+post alert for %s", event_id)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "scheduler_v2: failed to dispatch T+post for %s", event_id,
                 )
 
     if sent:
