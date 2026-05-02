@@ -1,0 +1,24 @@
+# Python sub-project — not needed in Node build
+fondo-blackcat-bot/
+
+# Dev/test artifacts
+tests/
+docs/
+scripts/
+auto/
+
+# Node local dev
+node_modules/
+
+# Git
+.git/
+.gitignore
+
+# Env files (secrets should come from Railway env vars)
+.env
+.env.*
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
