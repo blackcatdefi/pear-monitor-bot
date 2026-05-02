@@ -11,12 +11,24 @@ Telegram bot that monitors Hyperliquid positions for multiple wallets and sends 
 
 ## Architecture
 - `index.js` — Entry point, wires bot + monitor + HyperLend API
-- `src/bot.js` — Telegram commands and user interface (includes HyperLend Borrow menu)
+- `src/bot.js` — Operator Telegram UI (HyperLend Borrow menu, /menu, personal wallets)
+- `src/extensions.js` — Bootstrap hub: wires all R(v2)+R-PUBLIC+R-AUTOCOPY modules
+- `src/commandsStart.js` — Public /start handler (first-time onboarding + recurring dashboard)
+- `src/commandsTrack.js` — /track: external wallet add/remove/list for any public user
+- `src/commandsCopyTrading.js` — /copy_trading: unified menu (BCD wallet / BCD signals / custom)
+- `src/i18n/en.js` — Single source of truth for ALL English user-facing strings
+- `src/i18n/index.js` — `t(key, vars)` helper; returns `[MISSING_STRING: key]` on miss
 - `src/monitor.js` — Core polling loop, TP/SL/position change detection, HyperLend borrow check
 - `src/hyperliquidApi.js` — Hyperliquid API client (positions, fills, trigger orders)
 - `src/hyperLendApi.js` — HyperLend API client via HyperEVM RPC (Aave v3 fork, `getUserAccountData`)
 - `src/pearApi.js` — Pear Protocol API (not actively used in monitor)
 - `src/store.js` — JSON file persistence in `data/` directory (wallets + borrowWallets)
+
+## Language
+- **Bot is English-only.** All user-facing strings live in `src/i18n/en.js` (nested keys).
+- Call via `const { t } = require('./i18n/index'); t('start.recurring_welcome')`.
+- Spanish-leak detector: `spanishLeakRegex()` / `strictSpanishRegex()` in `src/i18n/index.js`.
+- Tests: `tests/i18n_en_only.test.js` + `tests/i18n_consistency.test.js` — 438 pass.
 
 ## Key Configuration (src/monitor.js)
 - `this.minAvailableBalance = 50` — Minimum $50 balance to trigger "funds available" alert
@@ -83,6 +95,7 @@ Reglas:
 - Mantener este manual actualizado cuando el usuario agregue nuevas preferencias de flujo.
 
 ## Historial de interacciones
+- **2026-05-02** — **R-EN verified** (Node.js public bot). All user-facing strings confirmed English: `src/i18n/en.js` is the single source of truth. `/start` recurring dashboard shows "Welcome back 👋", "Your setup:", "Tracked wallets: N/M", "Bot status: active". Keyboard buttons: "Track wallet", "My wallets", "Copy Trading", "Status", "My TZ", "Learn", "Open Pear Protocol". Zero Spanish strings in src/. CLAUDE.md architecture section updated. Pushed to master to trigger Railway redeploy.
 - **2026-04-13** — Feature "HyperLend Borrow Available" agregada (PR #2, merge `299c6fc`).
 - **2026-04-13** — Umbral de borrow subido de $10 a $50 por pedido del usuario. Se agregó manual de procedimientos y regla de auto-update de memoria en cada mensaje.
 - **2026-04-14** — Umbral TP/SL subido de $1 a $50. Umbral fondos disponibles subido de $10 a $50. Ambos por pedido del usuario para eliminar falsas alertas.
