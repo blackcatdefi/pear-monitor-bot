@@ -224,13 +224,13 @@ function getTarget(userId, type, ref) {
 function _validateCapital(v) {
   const n = parseFloat(v);
   if (!Number.isFinite(n) || n <= 0) {
-    throw new Error('Monto inválido');
+    throw new Error('Invalid amount');
   }
   if (n < MIN_CAPITAL) {
-    throw new Error(`Monto mínimo: $${MIN_CAPITAL}`);
+    throw new Error(`Minimum amount: $${MIN_CAPITAL}`);
   }
   if (n > MAX_CAPITAL) {
-    throw new Error(`Monto máximo: $${MAX_CAPITAL.toLocaleString()}`);
+    throw new Error(`Maximum amount: $${MAX_CAPITAL.toLocaleString()}`);
   }
   return n;
 }
@@ -245,7 +245,7 @@ function _validateMode(v) {
  */
 function setTarget(userId, type, ref, partial) {
   if (!VALID_TYPES.includes(type)) {
-    throw new Error(`tipo inválido: ${type}`);
+    throw new Error(`invalid type: ${type}`);
   }
   const slot = _ensureUserSlot(userId);
   const t = _now();
@@ -287,7 +287,7 @@ function setTarget(userId, type, ref, partial) {
   // CUSTOM_WALLET
   const lc = String(ref || '').toLowerCase();
   if (!ADDRESS_RX.test(lc)) {
-    throw new Error('Address inválida — debe ser 0x + 40 hex');
+    throw new Error('Invalid address — must be 0x + 40 hex chars');
   }
   const arr = slot[TYPE_CUSTOM_WALLET];
   let entry = arr.find(
@@ -296,7 +296,7 @@ function setTarget(userId, type, ref, partial) {
   if (!entry) {
     if (arr.length >= MAX_CUSTOM_PER_USER) {
       throw new Error(
-        `Máximo ${MAX_CUSTOM_PER_USER} custom wallets por user.`
+        `Maximum ${MAX_CUSTOM_PER_USER} custom wallets per user.`
       );
     }
     entry = {

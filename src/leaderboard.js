@@ -47,25 +47,25 @@ function getLeaderboard(opts) {
 function formatLeaderboard(leaderboard) {
   if (!leaderboard || leaderboard.length === 0) {
     return [
-      '🏆 *Top wallets trackeadas*',
+      '🏆 *Top tracked wallets*',
       '',
-      '_Aún no hay suficientes datos para armar un ranking._',
-      `_(necesitamos al menos ${MIN_TRACKERS} users trackeando la misma wallet)_`,
+      '_Not enough data yet to build a ranking._',
+      `_(need at least ${MIN_TRACKERS} users tracking the same wallet)_`,
       '',
-      'Trackeá wallets con /track para que aparezcan acá.',
+      'Track wallets with /track so they show up here.',
     ].join('\n');
   }
   const lines = [
-    '🏆 *Top wallets trackeadas (anonimizado)*',
+    '🏆 *Top tracked wallets (anonymized)*',
     '',
   ];
   leaderboard.forEach((row, idx) => {
     const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : `${idx + 1}.`;
-    const word = row.count === 1 ? 'user la sigue' : 'users la siguen';
+    const word = row.count === 1 ? 'user follows' : 'users follow';
     lines.push(`${medal} \`${row.addressShort}\` — ${row.count} ${word}`);
   });
   lines.push('');
-  lines.push('_Tocá una wallet para trackearla:_');
+  lines.push('_Tap a wallet to track it:_');
   return lines.join('\n');
 }
 
@@ -75,7 +75,7 @@ function buildKeyboard(leaderboard) {
   leaderboard.slice(0, 5).forEach((row, idx) => {
     rows.push([
       {
-        text: `➕ Trackear top ${idx + 1}`,
+        text: `➕ Track top ${idx + 1}`,
         callback_data: `lb:track:${row.address.slice(2, 10)}`,
       },
     ]);

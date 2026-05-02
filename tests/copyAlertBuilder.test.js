@@ -26,16 +26,16 @@ test('OPEN alert renders source + composition + capital + risk', () => {
     ],
     event: 'OPEN',
   });
-  assert.match(text, /NUEVA BASKET — BCD Wallet/);
+  assert.match(text, /NEW BASKET — BCD Wallet/);
   assert.match(text, /WLD SHORT/);
   assert.match(text, /STRK SHORT/);
   assert.match(text, /\$250/);
   assert.match(text, /SL 50%/);
-  // hero pear button — R-CTAOPTIMIZE format: "🍐 Copiar $250 en Pear"
+  // hero pear button — R-CTAOPTIMIZE format: "🍐 Copy $250 on Pear"
   // (label may carry amount if capital > 0; backward-compat falls back to
-  // "🍐 Copiar en Pear" when capital is 0).
+  // "🍐 Copy on Pear" when capital is 0).
   const allButtons = keyboard.inline_keyboard.flat();
-  assert.ok(allButtons.find((b) => /Copiar.*en Pear/i.test(b.text)));
+  assert.ok(allButtons.find((b) => /Copy.*on Pear/i.test(b.text)));
 });
 
 test('CLOSE alert renders close text and no Pear button', () => {
@@ -49,7 +49,7 @@ test('CLOSE alert renders close text and no Pear button', () => {
     positions: [{ coin: 'ENA', side: 'SHORT' }],
     event: 'CLOSE',
   });
-  assert.match(text, /BASKET CERRADA — BCD Signals/);
+  assert.match(text, /BASKET CLOSED — BCD Signals/);
   const allButtons = keyboard.inline_keyboard.flat();
   // No Pear hero button on close
   assert.ok(!allButtons.find((b) => b.url && /pear\.garden/.test(b.url)));
@@ -67,7 +67,7 @@ test('AUTO mode adds the AUTO wording', () => {
     positions: [{ coin: 'BTC', side: 'LONG' }],
     event: 'OPEN',
   });
-  assert.match(text, /Mode AUTO/);
+  assert.match(text, /AUTO mode/i);
 });
 
 test('uses provided pearUrl when given (signals path)', () => {
@@ -120,7 +120,7 @@ test('custom source uses sourceLabel override (e.g. user-provided wallet label)'
     positions: [{ coin: 'BTC', side: 'LONG' }],
     event: 'OPEN',
   });
-  assert.match(text, /NUEVA BASKET — Whale 1/);
+  assert.match(text, /NEW BASKET — Whale 1/);
 });
 
 test('keyboard contains Skip + Config callbacks', () => {

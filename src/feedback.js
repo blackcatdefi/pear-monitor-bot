@@ -54,7 +54,7 @@ function _logAudit(userId, len) {
 function truncate(text) {
   if (typeof text !== 'string') return '';
   return text.length > MAX_FEEDBACK_LEN
-    ? text.slice(0, MAX_FEEDBACK_LEN) + '\n\n_(truncado)_'
+    ? text.slice(0, MAX_FEEDBACK_LEN) + '\n\n_(truncated)_'
     : text;
 }
 
@@ -81,10 +81,10 @@ async function forwardFeedback({ notify, fromUserId, fromUsername, text }) {
   const safe = truncate(text);
   const handle = fromUsername ? `@${fromUsername}` : `(no username)`;
   const body = [
-    '📬 *FEEDBACK USUARIO*',
+    '📬 *USER FEEDBACK*',
     '',
-    `De: \`${fromUserId}\` — ${handle}`,
-    `Largo: ${safe.length} chars`,
+    `From: \`${fromUserId}\` — ${handle}`,
+    `Length: ${safe.length} chars`,
     '',
     safe,
   ].join('\n');

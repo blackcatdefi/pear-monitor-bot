@@ -145,35 +145,35 @@ function buildAlert(spec) {
   if (!positions) positions = [];
 
   if (event === 'CLOSE') {
-    lines.push(`✅ *BASKET CERRADA — ${sourceLabel}*`);
+    lines.push(`✅ *BASKET CLOSED — ${sourceLabel}*`);
   } else {
-    lines.push(`🚀 *NUEVA BASKET — ${sourceLabel}*`);
+    lines.push(`🚀 *NEW BASKET — ${sourceLabel}*`);
   }
   lines.push('');
   if (positions.length > 0) {
-    lines.push(`📊 Composición (${positions.length}):`);
+    lines.push(`📊 Composition (${positions.length}):`);
     for (const p of positions) lines.push(_formatPositionLine(p));
   }
   if (event === 'OPEN') {
     if (spec.leverage) {
       lines.push('');
-      lines.push(`⚡ Leverage: ${spec.leverage}x · Notional sugerido: ${_money(cap)}`);
+      lines.push(`⚡ Leverage: ${spec.leverage}x · Suggested notional: ${_money(cap)}`);
     } else if (cap > 0) {
       lines.push('');
-      lines.push(`💰 Capital configurado: ${_money(cap)}`);
+      lines.push(`💰 Capital set: ${_money(cap)}`);
     }
     lines.push(
-      `🎯 Risk: SL ${sl}% / Trailing ${trailing}% activación ${trailingAct}%`
+      `🎯 Risk: SL ${sl}% / Trailing ${trailing}% activation ${trailingAct}%`
     );
     if (spec.mode === 'AUTO') {
       lines.push('');
       lines.push(
-        '_Mode AUTO — link pre-armado, vos firmás en tu wallet._'
+        '_AUTO mode — link pre-armed, you sign from your wallet._'
       );
     } else {
       lines.push('');
       lines.push(
-        '_Tocá el botón para abrir Pear con la basket pre-cargada._'
+        '_Tap the button to open Pear with the basket pre-loaded._'
       );
     }
   } else {
@@ -201,12 +201,12 @@ function buildAlert(spec) {
 
     const heroLabelFor = (side) => {
       const tag = side === 'SHORT' ? 'SHORTs' : 'LONGs';
-      if (capLabel) return `🍐 Copiar ${tag} ${capLabel} en Pear`;
-      return `🍐 Copiar ${tag} en Pear`;
+      if (capLabel) return `🍐 Copy ${tag} ${capLabel} on Pear`;
+      return `🍐 Copy ${tag} on Pear`;
     };
     const heroLabelSingle = capLabel
-      ? `🍐 Copiar ${capLabel} en Pear`
-      : '🍐 Copiar en Pear';
+      ? `🍐 Copy ${capLabel} on Pear`
+      : '🍐 Copy on Pear';
 
     if (shortsUrl && longsUrl) {
       keyboard.inline_keyboard.push([
@@ -252,7 +252,7 @@ function buildAlert(spec) {
       const fallbackUrl = _buildPearUrl(spec);
       if (fallbackUrl) {
         keyboard.inline_keyboard.push([
-          { text: capLabel ? `🍐 Copiar ${capLabel} en Pear` : '🍐 Copiar en Pear', url: fallbackUrl },
+          { text: capLabel ? `🍐 Copy ${capLabel} on Pear` : '🍐 Copy on Pear', url: fallbackUrl },
         ]);
       }
     }

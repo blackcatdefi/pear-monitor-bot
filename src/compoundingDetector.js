@@ -114,17 +114,17 @@ function checkForCompounding(chatId, wallet, currentPositions) {
 function formatCompoundAlert(label, result) {
   const pct = (result.growth * 100).toFixed(1);
   return [
-    '🔄 *COMPOUNDING DETECTADO*',
+    '🔄 *COMPOUNDING DETECTED*',
     '',
     `📍 Wallet: ${label}`,
-    `Se incrementó el size de la basket activa.`,
+    `Active basket size has been increased.`,
     '',
-    `Notional anterior: $${Math.round(result.prevNotional).toLocaleString()}`,
-    `Notional actual: $${Math.round(result.currentNotional).toLocaleString()}`,
-    `Crecimiento: +${pct}%`,
+    `Previous notional: $${Math.round(result.prevNotional).toLocaleString()}`,
+    `Current notional: $${Math.round(result.currentNotional).toLocaleString()}`,
+    `Growth: +${pct}%`,
     '',
-    `Las posiciones siguen siendo las mismas (mismos tokens, mismo side).`,
-    `Se agregó capital a la posición — compounding (TWAP entry).`,
+    `Positions are unchanged (same tokens, same side).`,
+    `Capital was added to the position — compounding (TWAP entry).`,
   ].join('\n');
 }
 

@@ -7,11 +7,11 @@
 const ac = require('./alertsConfig');
 
 const LABELS = {
-  basket_open: 'Nueva basket abierta',
-  basket_close: 'Basket cerrada (SL/TP)',
-  signals: 'Signals oficiales',
-  compounding: 'Compounding detectado',
-  hf_critical: 'HF crítico en wallets trackeadas',
+  basket_open: 'New basket opened',
+  basket_close: 'Basket closed (SL/TP)',
+  signals: 'Official signals',
+  compounding: 'Compounding detected',
+  hf_critical: 'Critical HF on tracked wallets',
   daily_summary: 'Daily summary',
 };
 
@@ -24,15 +24,15 @@ function _buildKeyboard(cfg) {
       { text: `${checkmark} ${label}`, callback_data: `ac:toggle:${cat}` },
     ]);
   }
-  rows.push([{ text: '✖️ Cerrar', callback_data: 'ac:close' }]);
+  rows.push([{ text: '✖️ Close', callback_data: 'ac:close' }]);
   return { inline_keyboard: rows };
 }
 
 function _formatBody(cfg) {
   const lines = [
-    '🔔 *Configurar alertas*',
+    '🔔 *Alert settings*',
     '',
-    'Tocá una categoría para activarla/desactivarla:',
+    'Tap a category to toggle it:',
   ];
   return lines.join('\n');
 }

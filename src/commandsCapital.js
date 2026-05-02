@@ -11,21 +11,21 @@ const store = require('./copyAutoStore');
 
 function _bodyShow(cfg) {
   return [
-    '💰 *Capital por signal*',
+    '💰 *Capital per signal*',
     '',
-    `Actual: $${Math.round(cfg.capital_usdc).toLocaleString()} USDC`,
-    `Rango permitido: $${store.MIN_CAPITAL} – $${store.MAX_CAPITAL.toLocaleString()}`,
+    `Current: $${Math.round(cfg.capital_usdc).toLocaleString()} USDC`,
+    `Allowed range: $${store.MIN_CAPITAL} – $${store.MAX_CAPITAL.toLocaleString()}`,
     '',
-    'Para cambiar: `/capital <monto>` (ej. `/capital 500`)',
+    'To change: `/capital <amount>` (e.g. `/capital 500`)',
   ].join('\n');
 }
 
 function _bodyConfirm(amount) {
-  return `✅ Capital configurado: $${Math.round(amount).toLocaleString()} USDC.\n\n_Lo voy a usar en próximas signals._`;
+  return `✅ Capital set: $${Math.round(amount).toLocaleString()} USDC.\n\n_Will be applied on the next signals._`;
 }
 
 function _bodyError(msg) {
-  return `⚠️ ${msg}\n\nUsá: \`/capital <monto>\` (ej. \`/capital 500\`)`;
+  return `⚠️ ${msg}\n\nUsage: \`/capital <amount>\` (e.g. \`/capital 500\`)`;
 }
 
 async function handle(bot, msg) {
@@ -42,7 +42,7 @@ async function handle(bot, msg) {
     const cfg = store.setCapital(userId, arg.replace(/[\$,\s]/g, ''));
     await bot.sendMessage(chatId, _bodyConfirm(cfg.capital_usdc), { parse_mode: 'Markdown' });
   } catch (e) {
-    await bot.sendMessage(chatId, _bodyError(e.message || 'Monto inválido'), { parse_mode: 'Markdown' });
+    await bot.sendMessage(chatId, _bodyError(e.message || 'Invalid amount'), { parse_mode: 'Markdown' });
   }
 }
 

@@ -26,12 +26,12 @@ async function sendHeartbeat(notifier, chatId) {
   if (!isEnabled()) return false;
   const status = healthServer.getStatus();
   const msg = [
-    `✅ Pear Alerts Bot operativo`,
+    `✅ Pear Alerts Bot online`,
     `· Uptime ${_formatHours(status.uptime_ms)}h`,
-    `· Errores 24h: ${status.errors_24h_count}`,
+    `· Errors 24h: ${status.errors_24h_count}`,
     status.last_successful_poll
-      ? `· Último poll: ${status.last_successful_poll.replace('T', ' ').slice(0, 16)} UTC`
-      : '· Último poll: nunca',
+      ? `· Last poll: ${status.last_successful_poll.replace('T', ' ').slice(0, 16)} UTC`
+      : '· Last poll: never',
   ].join('\n');
   try {
     await notifier(chatId, msg, { silent: true });

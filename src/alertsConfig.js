@@ -94,7 +94,7 @@ function getConfig(userId) {
 }
 
 function setCategory(userId, category, enabled) {
-  if (!CATEGORIES.includes(category)) throw new Error(`Categoría desconocida: ${category}`);
+  if (!CATEGORIES.includes(category)) throw new Error(`Unknown category: ${category}`);
   const s = _load();
   const key = String(userId);
   if (!s[key]) s[key] = {};

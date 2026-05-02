@@ -51,27 +51,27 @@ function _heroButtons(positions, capital) {
   const rows = [];
   const cap = `$${Math.round(Number(capital) || 0).toLocaleString()}`;
   if (shorts && longs) {
-    rows.push([{ text: `🍐 Copiar SHORTs (${cap})`, url: shorts }]);
-    rows.push([{ text: `🍐 Copiar LONGs (${cap})`, url: longs }]);
+    rows.push([{ text: `🍐 Copy SHORTs (${cap})`, url: shorts }]);
+    rows.push([{ text: `🍐 Copy LONGs (${cap})`, url: longs }]);
   } else if (shorts) {
-    rows.push([{ text: `🍐 Copiar en Pear (${cap})`, url: shorts }]);
+    rows.push([{ text: `🍐 Copy on Pear (${cap})`, url: shorts }]);
   } else if (longs) {
-    rows.push([{ text: `🍐 Copiar en Pear (${cap})`, url: longs }]);
+    rows.push([{ text: `🍐 Copy on Pear (${cap})`, url: longs }]);
   }
   return rows;
 }
 
 function buildManualMessage(signal, cfg, userId) {
   const lines = [
-    `🚀 *NUEVA SIGNAL OFICIAL${signal.signal_id ? ` #${signal.signal_id}` : ''}*`,
+    `🚀 *NEW OFFICIAL SIGNAL${signal.signal_id ? ` #${signal.signal_id}` : ''}*`,
     '',
     `📊 Basket (${signal.positions.length} tokens):`,
     _formatBasket(signal.positions),
     '',
-    `💰 Tu capital configurado: $${Math.round(cfg.capital_usdc)} USDC`,
+    `💰 Your set capital: $${Math.round(cfg.capital_usdc)} USDC`,
   ];
   if (signal.leverage) lines.push(`⚡ Leverage: ${signal.leverage}x`);
-  lines.push(`🎯 SL ${cfg.sl_pct}% / Trailing ${cfg.trailing_pct}% activación ${cfg.trailing_activation_pct}%`);
+  lines.push(`🎯 SL ${cfg.sl_pct}% / Trailing ${cfg.trailing_pct}% activation ${cfg.trailing_activation_pct}%`);
   if (signal.twap_hours || signal.twap_bullets) {
     const twapParts = [];
     if (signal.twap_hours) twapParts.push(`${signal.twap_hours}h`);
@@ -79,7 +79,7 @@ function buildManualMessage(signal, cfg, userId) {
     lines.push(`⏱️ TWAP: ${twapParts.join(', ')}`);
   }
   lines.push('');
-  lines.push('_Tocá el botón para abrir Pear con la basket pre-cargada. Firmá en tu wallet para ejecutar._');
+  lines.push('_Tap the button to open Pear with the basket pre-loaded. Sign in your wallet to execute._');
   lines.push('');
   lines.push(`🕐 ${tzMgr.formatLocalTime(userId)}`);
   return lines.join('\n');
@@ -89,7 +89,7 @@ function buildAutoMessage(signal, cfg, userId) {
   const lines = [
     `🤖 *COPY AUTO — Signal${signal.signal_id ? ` #${signal.signal_id}` : ''}*`,
     '',
-    'Te preparé el link directo. Click + firmá en tu wallet:',
+    'Direct link is ready. Click + sign in your wallet:',
     '',
     `  • $${Math.round(cfg.capital_usdc)} USDC capital`,
     `  • ${signal.tokens.join('+')} ${[...new Set(signal.sides)].join('/')}`,
@@ -97,7 +97,7 @@ function buildAutoMessage(signal, cfg, userId) {
   if (signal.leverage) lines.push(`  • ${signal.leverage}x leverage cross`);
   lines.push(`  • SL ${cfg.sl_pct}% + Trailing ${cfg.trailing_pct}%`);
   lines.push('');
-  lines.push('_Pear no expone API pública de execution — vos firmás siempre desde tu wallet (única forma legítima)._');
+  lines.push('_Pear has no public execution API — you always sign from your own wallet (only legit way)._');
   lines.push('');
   lines.push(`🕐 ${tzMgr.formatLocalTime(userId)}`);
   return lines.join('\n');

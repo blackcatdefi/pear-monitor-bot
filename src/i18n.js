@@ -1,72 +1,36 @@
 'use strict';
 
 /**
- * R-PUBLIC — i18n.
- * Public bot speaks Spanish. Technical tokens (PnL, TP, SL, TWAP, basket) stay
- * in English because that's how Pear Protocol surfaces them.
+ * R-EN — Backward-compat shim.
+ *
+ * Public bot is now English-only. This file preserves the legacy `t(key)` /
+ * `MESSAGES` / `isSpanish()` interface so existing consumers (branding.js,
+ * messageFormatters.js, weeklySummary.js, sanitizer.js) keep working without
+ * code changes — but the actual strings come from `src/i18n/en.js`.
+ *
+ * The original Spanish dictionary lives at `src/legacy_es.js` for reference
+ * and is NOT imported by any code path.
  */
 
-const MESSAGES = {
-  es: {
-    POSITION_CLOSED: 'Posición cerrada',
-    POSITION_OPENED: 'Nueva posición abierta',
-    NEW_BASKET: 'NUEVA BASKET ABIERTA',
-    BASKET_CLOSED: 'BASKET CERRADA',
-    TAKE_PROFIT_HIT: 'TAKE PROFIT alcanzado',
-    STOP_LOSS_TRIGGERED: 'STOP LOSS activado',
-    TRAILING_STOP_TRIGGERED: 'TRAILING STOP activado',
-    MANUAL_CLOSE: 'Cierre manual',
-    PARTIAL_CLOSE: 'Cierre parcial',
-    COMPOUND_DETECTED: 'COMPOUNDING DETECTADO',
-    WALLET: 'Wallet',
-    ENTRY: 'Entrada',
-    CLOSE: 'Cierre',
-    PNL: 'PnL',
-    LEVERAGE: 'Apalancamiento',
-    NOTIONAL: 'Notional',
-    POSITIONS: 'Posiciones',
-    POSITIONS_LIST: 'Composición',
-    TOTAL_PNL: 'PnL Total',
-    DURATION: 'Duración',
-    NOTIONAL_BEFORE: 'Notional anterior',
-    NOTIONAL_NOW: 'Notional actual',
-    GROWTH: 'Crecimiento',
-    REFERRAL_CTA:
-      'Usá este código para 10% off en fees de Pear Protocol',
-    AMBASSADOR_TAGLINE: 'Pear Protocol Alerts · Community Bot',
-    WEEKLY_SUMMARY_TITLE: 'RESUMEN SEMANAL — Performance',
-    WEEKLY_WEEK: 'Semana',
-    WEEKLY_PNL_NET: 'PnL Neto',
-    WEEKLY_TRADES: 'Trades',
-    WEEKLY_WIN_RATE: 'Win Rate',
-    WEEKLY_VOLUME: 'Volumen',
-    WEEKLY_FEES: 'Fees',
-    WEEKLY_BEST: 'Mejor',
-    WEEKLY_WORST: 'Peor',
-    WEEKLY_FOLLOW_CTA:
-      'Querés copiar este estilo? Usá el código para 10% off en Pear.',
-    HEARTBEAT_OK: 'Pear Alerts Bot operativo',
-    UPTIME: 'Uptime',
-    ERRORS_24H: 'Errores 24h',
-    LAST_POLL: 'Último poll',
-    HISTORY_HEADER: 'ÚLTIMOS CIERRES',
-    HISTORY_EMPTY: 'Sin cierres registrados.',
-    PNL_PERIOD_HEADER: 'PnL',
-    EXPORT_CAPTION: 'Export de cierres',
-    STATUS_OK: 'Bot operativo',
-    SUMMARY_FORCED: 'Forzando weekly summary...',
-    PNL_DISCREPANCY: 'PnL DISCREPANCY DETECTADA',
-  },
-};
+const en = require('./i18n/en');
+
+// Build a flat MESSAGES.en map keyed by the legacy uppercase keys.
+const MESSAGES = { en: { ...en.alerts } };
 
 function t(key, lang) {
-  const code = (lang || process.env.LANGUAGE || 'es').toLowerCase();
-  const dict = MESSAGES[code] || MESSAGES.es;
-  return dict[key] || key;
+  // `lang` arg is ignored — only English supported.
+  if (!key) return '';
+  if (Object.prototype.hasOwnProperty.call(MESSAGES.en, key)) {
+    return MESSAGES.en[key];
+  }
+  return key;
 }
 
+/**
+ * Kept for source compatibility — always returns false now (bot is English).
+ */
 function isSpanish() {
-  return (process.env.LANGUAGE || 'es').toLowerCase() === 'es';
+  return false;
 }
 
 module.exports = { t, MESSAGES, isSpanish };

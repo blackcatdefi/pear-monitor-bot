@@ -27,12 +27,12 @@
  */
 
 const SIGNAL_HASHTAG_REGEX = /#signal\b/i;
-const SIGNAL_HEADER_REGEX = /signal\s+oficial\s+#?(\d+)/i;
+const SIGNAL_HEADER_REGEX = /signal\s+(?:oficial|official)\s+#?(\d+)/i;
 const ALT_SIGNAL_HEADER_REGEX = /signal\s+#?(\d+)/i;
 const LEVERAGE_REGEX = /(?:leverage|leverag\w*|apalancamiento)[^\d]*?(\d+(?:\.\d+)?)\s*x/i;
 const SL_REGEX = /SL[^\d%]*?(\d+(?:\.\d+)?)\s*%/i;
 const TRAILING_REGEX = /trailing[^\d%]*?(\d+(?:\.\d+)?)\s*%/i;
-const TRAILING_ACTIVATION_REGEX = /activaci[oó]n[^\d%]*?(\d+(?:\.\d+)?)\s*%/i;
+const TRAILING_ACTIVATION_REGEX = /(?:activation|activaci[oó]n)[^\d%]*?(\d+(?:\.\d+)?)\s*%/i;
 const TWAP_HOURS_REGEX = /TWAP[^\d]*?(\d+(?:\.\d+)?)\s*h/i;
 const TWAP_BULLETS_REGEX = /(\d+)\s*bullets?/i;
 

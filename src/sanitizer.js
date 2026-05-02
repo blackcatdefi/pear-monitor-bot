@@ -150,6 +150,7 @@ function collectAllUserFacingStrings() {
       (f) =>
         f.endsWith('.js') &&
         f !== 'sanitizer.js' &&
+        f !== 'legacy_es.js' && // R-EN: legacy Spanish dictionary, not consumed
         !f.endsWith('.test.js')
     );
     for (const f of files) {

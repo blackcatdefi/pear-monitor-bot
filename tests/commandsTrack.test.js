@@ -131,7 +131,7 @@ test('invalid address rejected, state preserved for retry', async () => {
   const rec = sm.getState(userId);
   // still awaiting because it was rejected
   assert.strictEqual(rec.state, sm.STATES.AWAITING_WALLET_ADDRESS);
-  const errMsg = bot._state.messages.find((m) => /no parece válida/i.test(m.text));
+  const errMsg = bot._state.messages.find((m) => /doesn't look valid/i.test(m.text));
   assert.ok(errMsg);
 });
 

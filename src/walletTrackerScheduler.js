@@ -61,15 +61,15 @@ function _diffPositions(prev, curr) {
 function _renderOpenForUser(userId, label, address, opens) {
   const isBasket = opens.length >= 3;
   const heading = isBasket
-    ? '🚀 *NUEVA BASKET ABIERTA*'
-    : '🐋 *NUEVA POSICIÓN ABIERTA*';
+    ? '🚀 *NEW BASKET OPENED*'
+    : '🐋 *NEW POSITION OPENED*';
   const traderLabel = label || _shortAddr(address);
   const lines = [
     heading,
     '',
     `👤 Trader: ${traderLabel} (\`${_shortAddr(address)}\`)`,
     '',
-    `📊 Composición (${opens.length}):`,
+    `📊 Composition (${opens.length}):`,
   ];
   let totalNotional = 0;
   for (const p of opens) {
@@ -94,11 +94,11 @@ function _renderOpenForUser(userId, label, address, opens) {
 
 function _renderCloseForUser(userId, label, address, closes) {
   const lines = [
-    '✅ *POSICIÓN CERRADA EN WALLET TRACKEADA*',
+    '✅ *POSITION CLOSED ON TRACKED WALLET*',
     '',
     `Wallet: ${label || _shortAddr(address)} (\`${_shortAddr(address)}\`)`,
     '',
-    `Cerradas (${closes.length}):`,
+    `Closed (${closes.length}):`,
   ];
   for (const p of closes) {
     const side = p.side || 'SHORT';

@@ -26,24 +26,24 @@ const sampleMixedBasket = [
   { coin: 'DYDX', side: 'SHORT', notional: 4000 },
 ];
 
-test('alert keyboard tiene CTA Pear como primer botón en SHORT-only basket', () => {
+test('alert keyboard has Pear CTA as first button on SHORT-only basket', () => {
   const kb = alertButtons.buildAlertKeyboard(sampleShortBasket, 'open');
   assert.ok(kb, 'keyboard should not be null');
   const firstBtn = kb.inline_keyboard[0][0];
-  assert.match(firstBtn.text, /Copiar en Pear/);
+  assert.match(firstBtn.text, /Copy on Pear/);
   assert.match(firstBtn.url, /referral=BlackCatDeFi/);
 });
 
-test('mixed-side basket emite 2 hero buttons (SHORTs + LONGs)', () => {
+test('mixed-side basket emits 2 hero buttons (SHORTs + LONGs)', () => {
   const kb = alertButtons.buildAlertKeyboard(sampleMixedBasket, 'open');
   assert.ok(kb);
   // Two hero rows when basket has both sides.
   const labels = kb.inline_keyboard.flat().map((b) => b.text);
-  assert.ok(labels.some((l) => /SHORTs en Pear/.test(l)));
-  assert.ok(labels.some((l) => /LONGs en Pear/.test(l)));
+  assert.ok(labels.some((l) => /SHORTs on Pear/.test(l)));
+  assert.ok(labels.some((l) => /LONGs on Pear/.test(l)));
 });
 
-test('hero button labels NUNCA mencionan referral o BlackCat en texto', () => {
+test('hero button labels NEVER mention referral or BlackCat in visible text', () => {
   const kb = alertButtons.buildAlertKeyboard(sampleShortBasket, 'open');
   for (const row of kb.inline_keyboard) {
     for (const btn of row) {
@@ -53,7 +53,7 @@ test('hero button labels NUNCA mencionan referral o BlackCat en texto', () => {
   }
 });
 
-test('mute callback aparece en row 2 cuando se pasa wallet', () => {
+test('mute callback appears in row 2 when wallet is passed', () => {
   const wallet = '0xABCDEF0123456789ABCDEF0123456789ABCDEF01';
   const kb = alertButtons.buildAlertKeyboard(sampleShortBasket, 'open', {
     wallet,
@@ -65,38 +65,38 @@ test('mute callback aparece en row 2 cuando se pasa wallet', () => {
       (b) => b.callback_data && b.callback_data.startsWith('mute:')
     );
   assert.ok(muteBtn, 'mute button missing');
-  assert.match(muteBtn.text, /Silenciar wallet/);
+  assert.match(muteBtn.text, /Mute wallet/i);
   assert.strictEqual(
     muteBtn.callback_data,
     `mute:${wallet.toLowerCase()}`
   );
 });
 
-test('keyboard sin positions retorna null', () => {
+test('keyboard without positions returns null', () => {
   const kb = alertButtons.buildAlertKeyboard([], 'open');
   assert.strictEqual(kb, null);
 });
 
-test('close-event keyboard NO incluye copy CTA (solo silenciar)', () => {
+test('close-event keyboard does NOT include copy CTA (mute only)', () => {
   const wallet = '0x' + '1'.repeat(40);
   const kb = alertButtons.buildAlertKeyboard(sampleShortBasket, 'close', {
     wallet,
   });
   assert.ok(kb);
   const labels = kb.inline_keyboard.flat().map((b) => b.text);
-  assert.ok(!labels.some((l) => /Copiar en Pear/.test(l)));
-  assert.ok(labels.some((l) => /Silenciar wallet/.test(l)));
+  assert.ok(!labels.some((l) => /Copy on Pear/.test(l)));
+  assert.ok(labels.some((l) => /Mute wallet/i.test(l)));
 });
 
-test('getCopyCtaText respeta env override', () => {
+test('getCopyCtaText respects env override', () => {
   const original = process.env.COPY_CTA_TEXT;
-  process.env.COPY_CTA_TEXT = '🔥 Copiá esto ya:';
-  assert.strictEqual(alertButtons.getCopyCtaText(), '🔥 Copiá esto ya:');
+  process.env.COPY_CTA_TEXT = '🔥 Copy this now:';
+  assert.strictEqual(alertButtons.getCopyCtaText(), '🔥 Copy this now:');
   if (original == null) delete process.env.COPY_CTA_TEXT;
   else process.env.COPY_CTA_TEXT = original;
 });
 
-test('getCopyCtaText default cuando env no seteada', () => {
+test('getCopyCtaText default when env is unset', () => {
   const original = process.env.COPY_CTA_TEXT;
   delete process.env.COPY_CTA_TEXT;
   assert.strictEqual(

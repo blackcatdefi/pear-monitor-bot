@@ -27,14 +27,14 @@ function attach(bot, getNotify) {
     if (!feedback.ownerConfigured()) {
       await bot.sendMessage(
         chatId,
-        '⚠️ Feedback temporalmente no disponible (owner no configurado). Probá más tarde.'
+        '⚠️ Feedback temporarily unavailable (owner not configured). Try again later.'
       );
       return;
     }
     sm.setState(chatId, STATE_AWAITING_FEEDBACK, {});
     await bot.sendMessage(
       chatId,
-      '💬 *Enviar feedback*\n\nEscribí tu mensaje. Lo recibo directamente.\n\n_(escribí /cancel para volver)_',
+      '💬 *Send feedback*\n\nWrite your message. It goes straight to me.\n\n_(type /cancel to go back)_',
       { parse_mode: 'Markdown' }
     );
   });
@@ -46,7 +46,7 @@ function attach(bot, getNotify) {
       // /cancel handled below; any other slash-cmd also exits state
       sm.reset(msg.chat.id);
       if (/^\/cancel/i.test(msg.text)) {
-        await bot.sendMessage(msg.chat.id, '✖️ Cancelado.');
+        await bot.sendMessage(msg.chat.id, '✖️ Cancelled.');
       }
       return;
     }
@@ -55,7 +55,7 @@ function attach(bot, getNotify) {
     if (typeof notify !== 'function') {
       await bot.sendMessage(
         msg.chat.id,
-        '⚠️ No pude reenviar tu feedback ahora (notifier no listo). Probá más tarde.'
+        '⚠️ Could not forward your feedback right now (notifier not ready). Try again later.'
       );
       return;
     }
@@ -67,11 +67,11 @@ function attach(bot, getNotify) {
     });
     if (r && r.ok) {
       stats.incrementFeedback(msg.from && msg.from.id);
-      await bot.sendMessage(msg.chat.id, '✅ Feedback recibido. Gracias.');
+      await bot.sendMessage(msg.chat.id, '✅ Feedback received. Thanks.');
     } else {
       await bot.sendMessage(
         msg.chat.id,
-        `⚠️ No pude reenviar tu feedback (${r && r.error ? r.error : 'error'}).`
+        `⚠️ Could not forward your feedback (${r && r.error ? r.error : 'error'}).`
       );
     }
   });

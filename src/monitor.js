@@ -155,7 +155,7 @@ class PositionMonitor {
           await this.notify(
             chatId,
             [
-              `📈 *Nueva posición abierta*`,
+              `📈 *New position opened*`,
               ``,
               `📍 Wallet: ${label}`,
               `🪙 ${pos.coin}${dexTag} ${pos.side}`,

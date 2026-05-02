@@ -110,21 +110,21 @@ function hasWallet(userId, address) {
 }
 
 function addWallet(userId, address, label) {
-  if (userId == null) throw new Error('userId requerido');
+  if (userId == null) throw new Error('userId required');
   if (!isValidAddress(address)) {
-    throw new Error('Dirección inválida — debe ser 0x + 40 caracteres hex');
+    throw new Error('Invalid address — must be 0x + 40 hex chars');
   }
   const s = _load();
   const key = String(userId);
   if (!s.byUser[key]) s.byUser[key] = [];
   if (s.byUser[key].length >= MAX_WALLETS_PER_USER) {
     throw new Error(
-      `Llegaste al máximo de ${MAX_WALLETS_PER_USER} wallets — eliminá alguna con /track antes de agregar otra.`
+      `You hit the ${MAX_WALLETS_PER_USER}-wallet limit — remove one with /track before adding another.`
     );
   }
   const lc = address.toLowerCase();
   if (s.byUser[key].some((w) => String(w.address).toLowerCase() === lc)) {
-    throw new Error('Ya tenés esa wallet trackeada.');
+    throw new Error('You\'re already tracking that wallet.');
   }
   s.byUser[key].push({
     address,

@@ -11,17 +11,17 @@ function _body(userId) {
   const stats = share.getStats(userId);
   const remaining = Math.max(0, share.PREMIUM_THRESHOLD - stats.count);
   const lines = [
-    '🎁 *Compartí el bot*',
+    '🎁 *Share the bot*',
     '',
-    'Tu link único:',
+    'Your unique link:',
     `\`${link}\``,
     '',
-    'Cuando alguien se une con tu link:',
-    '  • Vos sumás 1 referido',
-    `  • Después de ${share.PREMIUM_THRESHOLD} referidos → Premium (${share.PREMIUM_SLOTS} slots vs ${share.DEFAULT_SLOTS})`,
+    'When someone joins with your link:',
+    '  • You get +1 referral',
+    `  • After ${share.PREMIUM_THRESHOLD} referrals → Premium (${share.PREMIUM_SLOTS} slots vs ${share.DEFAULT_SLOTS})`,
     '',
-    `Compartidos: ${stats.count}`,
-    `Premium: ${stats.premium ? '✨ SÍ' : 'NO'}${remaining > 0 && !stats.premium ? ` (faltan ${remaining})` : ''}`,
+    `Referrals: ${stats.count}`,
+    `Premium: ${stats.premium ? '✨ YES' : 'NO'}${remaining > 0 && !stats.premium ? ` (${remaining} to go)` : ''}`,
   ];
   return lines.join('\n');
 }
@@ -29,12 +29,12 @@ function _body(userId) {
 function _keyboard(userId) {
   const link = share.buildReferralLink(userId);
   const txt = encodeURIComponent(
-    'Te recomiendo este bot de alertas para Pear Protocol — copy-trade en 1 toque:'
+    'Check out this Pear Protocol alert bot — 1-tap copy-trade:'
   );
   const tgShare = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${txt}`;
   return {
     inline_keyboard: [
-      [{ text: '📤 Compartir en Telegram', url: tgShare }],
+      [{ text: '📤 Share on Telegram', url: tgShare }],
     ],
   };
 }

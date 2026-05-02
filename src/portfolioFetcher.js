@@ -52,7 +52,7 @@ function _fmtUsd(n) {
 async function fetchPortfolio(address, opts) {
   const o = opts || {};
   if (!isValidAddress(address)) {
-    return { ok: false, error: 'Dirección inválida (debe ser 0x + 40 hex)' };
+    return { ok: false, error: 'Invalid address (must be 0x + 40 hex chars)' };
   }
   try {
     const url = `${HL_API}/info`;
@@ -62,7 +62,7 @@ async function fetchPortfolio(address, opts) {
       { timeout: o.timeoutMs || 12000 }
     );
     if (!data || typeof data !== 'object') {
-      return { ok: false, error: 'Respuesta vacía de HyperLiquid' };
+      return { ok: false, error: 'Empty response from HyperLiquid' };
     }
     const ms = data.marginSummary || {};
     const equity = parseFloat(ms.accountValue || '0');
@@ -107,10 +107,10 @@ async function fetchPortfolio(address, opts) {
  * Render a portfolio object into Telegram-ready Markdown.
  */
 function formatPortfolio(p, label) {
-  if (!p) return '⚠️ Sin datos.';
-  if (p.ok === false) return `⚠️ ${p.error || 'Error desconocido'}`;
+  if (!p) return '⚠️ No data.';
+  if (p.ok === false) return `⚠️ ${p.error || 'Unknown error'}`;
   const lines = [
-    `📊 *Tu portfolio*`,
+    `📊 *Your portfolio*`,
     '',
     `Wallet: \`${_shortAddr(p.address)}\`${label ? ` — ${label}` : ''}`,
     '',
@@ -118,7 +118,7 @@ function formatPortfolio(p, label) {
     `📉 Margin used: ${_fmtUsd(p.marginUsed)}`,
     `💰 Free collateral: ${_fmtUsd(p.freeCollateral)}`,
     '',
-    `📊 Posiciones activas: ${p.positions.length}`,
+    `📊 Active positions: ${p.positions.length}`,
   ];
   if (p.positions.length > 0) {
     lines.push('');
@@ -131,10 +131,10 @@ function formatPortfolio(p, label) {
       );
     }
     lines.push('');
-    lines.push(`💵 PnL no realizado: ${(totalUpnl >= 0 ? '+' : '')}${_fmtUsd(totalUpnl)}`);
+    lines.push(`💵 Unrealized PnL: ${(totalUpnl >= 0 ? '+' : '')}${_fmtUsd(totalUpnl)}`);
   } else {
     lines.push('');
-    lines.push('_Sin posiciones abiertas en este momento._');
+    lines.push('_No open positions right now._');
   }
   return lines.join('\n');
 }

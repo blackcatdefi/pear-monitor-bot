@@ -39,12 +39,12 @@ test('addWallet persists and getUserWallets returns it', () => {
 });
 
 test('addWallet rejects invalid address', () => {
-  assert.throws(() => wt.addWallet(1, ADDR_INVALID, 'Bad'), /inválida/);
+  assert.throws(() => wt.addWallet(1, ADDR_INVALID, 'Bad'), /Invalid address/i);
 });
 
 test('addWallet rejects duplicate per same user', () => {
   wt.addWallet(1, ADDR_A, 'A');
-  assert.throws(() => wt.addWallet(1, ADDR_A, 'A2'), /Ya tenés/);
+  assert.throws(() => wt.addWallet(1, ADDR_A, 'A2'), /already tracking/i);
 });
 
 test('Same address by different users → independent records', () => {
@@ -63,7 +63,7 @@ test('Max wallets per user enforced', () => {
   }
   assert.throws(
     () => wt.addWallet(2, ADDR_B, null),
-    /máximo/
+    /wallet limit/i
   );
 });
 

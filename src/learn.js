@@ -6,55 +6,58 @@
  * Each lesson is a Markdown body. Pagination buttons are wired by
  * commandsLearn.js — this module is content-only so tests don't need
  * a bot instance.
+ *
+ * R-EN — Migrated to English. Lesson titles & bodies are now native English
+ * (not translated Spanish). Tone: concise, action-oriented, trader vernacular.
  */
 
 const LESSONS = [
   {
     id: 1,
-    title: '📘 Cómo trackear una wallet (30s)',
+    title: '📘 How to track a wallet (30s)',
     body: [
-      '*Cómo trackear una wallet*',
+      '*How to track a wallet*',
       '',
-      '1️⃣ Tocá /track o el botón *🎯 Trackear wallet* en /start.',
-      '2️⃣ Pegá la dirección de la wallet (formato `0x...` con 40 hex).',
-      '3️⃣ Opcional: ponele un alias (ej. "Whale 1") o tocá /skip.',
-      '4️⃣ Listo — recibís alertas cuando esa wallet abra/cierre baskets.',
+      '1️⃣ Tap /track or the *🎯 Track wallet* button on /start.',
+      '2️⃣ Paste the wallet address (format `0x...` with 40 hex chars).',
+      '3️⃣ Optional: give it an alias (e.g. "Whale 1") or tap /skip.',
+      '4️⃣ Done — you\'ll get alerts when that wallet opens/closes baskets.',
       '',
-      '_Podés trackear hasta 10 wallets (25 si activás Premium con 3 referidos)._',
+      '_You can track up to 10 wallets (25 with Premium when you hit 3 referrals)._',
     ].join('\n'),
   },
   {
     id: 2,
-    title: '📗 Cómo configurar copy auto (1min)',
+    title: '📗 How to set up copy auto (1min)',
     body: [
-      '*Cómo configurar copy auto*',
+      '*How to set up copy auto*',
       '',
-      '1️⃣ Tocá /copy_auto.',
-      '2️⃣ Setea tu *capital por signal* con `/capital 500` (entre $10 y $50K).',
-      '3️⃣ Elegí modo:',
-      '  • *MANUAL* — recibís alert con botón "Copiar en Pear"',
-      '  • *AUTO* — alert pre-armado listo para 1-tap firma',
-      '4️⃣ Activá con el toggle *🚦 ON / OFF*.',
+      '1️⃣ Tap /copy_auto.',
+      '2️⃣ Set your *capital per signal* with `/capital 500` (between $10 and $50K).',
+      '3️⃣ Pick a mode:',
+      '  • *MANUAL* — alert with a "Copy on Pear" button',
+      '  • *AUTO* — pre-armed alert ready for a 1-tap signature',
+      '4️⃣ Toggle *🚦 ON / OFF*.',
       '',
-      'Cuando llega una signal a @BlackCatDeFiSignals, recibís el link directo a Pear con tu capital pre-cargado y la basket exacta.',
+      'When a signal hits @BlackCatDeFiSignals, you get the direct Pear link with your capital pre-loaded and the exact basket.',
       '',
-      '⚠️ *Vos firmás siempre desde tu wallet* — Pear no expone API pública de execution. Esa es la única forma legítima.',
+      '⚠️ *You always sign from your wallet* — Pear has no public execution API. That\'s the only legit way.',
     ].join('\n'),
   },
   {
     id: 3,
-    title: '📕 Qué es una basket en Pear (2min)',
+    title: '📕 What is a basket on Pear (2min)',
     body: [
-      '*Qué es una basket*',
+      '*What is a basket*',
       '',
-      'Una basket en Pear es un conjunto de posiciones del mismo lado (todas SHORT o todas LONG) sobre varios tokens de un mismo "tipo" (ej. memecoins, L2s, AI, etc.).',
+      'A basket on Pear is a set of same-side positions (all SHORT or all LONG) across several tokens of the same "type" (e.g. memecoins, L2s, AI, etc.).',
       '',
-      '*Ventajas vs. trades sueltos:*',
-      '  • Diversificación intra-tema',
-      '  • Reduce riesgo idiosincrático de un solo token',
-      '  • Stops y trailing aplican al basket completo',
+      '*Edge over standalone trades:*',
+      '  • Intra-theme diversification',
+      '  • Reduces idiosyncratic risk of a single token',
+      '  • Stops and trailing apply to the whole basket',
       '',
-      '*Ejemplo:* basket SHORT de L2s = SHORT en ARB+OP+DYDX+PYTH+ENA. Si la narrative se rompe, todos caen juntos → ganás más; si no, el SL te protege.',
+      '*Example:* L2s SHORT basket = SHORT on ARB+OP+DYDX+PYTH+ENA. If the narrative breaks, all drop together → bigger upside; if not, your SL protects you.',
     ].join('\n'),
   },
   {
@@ -63,36 +66,36 @@ const LESSONS = [
     body: [
       '*Risk management 101*',
       '',
-      '🎯 *SL (Stop Loss)*: % máximo que estás dispuesto a perder. Default 50% del capital de la basket.',
+      '🎯 *SL (Stop Loss)*: max % you\'re willing to lose. Default 50% of basket capital.',
       '',
-      '📈 *Trailing Stop*: SL que se mueve a tu favor cuando estás en ganancia.',
-      '  • *Activación*: % de profit a partir del cual el trailing empieza (default 30%).',
-      '  • *Distancia*: cuánto deja correr antes de cerrar (default 10%).',
+      '📈 *Trailing Stop*: SL that moves in your favor when you\'re in profit.',
+      '  • *Activation*: profit % at which trailing kicks in (default 30%).',
+      '  • *Distance*: how much room before closing (default 10%).',
       '',
-      '⚡ *Leverage*: multiplica ganancia y pérdida por igual. Default 4x = ganás/perdés 4x el movimiento del precio.',
+      '⚡ *Leverage*: multiplies gain and loss equally. Default 4x = you win/lose 4x the price move.',
       '',
-      '⏱️ *TWAP* (Time-Weighted Avg Price): partir tu entrada en N "bullets" durante X horas → mejor precio promedio que un market order de un golpe.',
+      '⏱️ *TWAP* (Time-Weighted Avg Price): split your entry into N "bullets" over X hours → better average price than a single market order.',
       '',
-      '_Regla: nunca riesgues más del 1-2% de tu capital total en un solo trade._',
+      '_Rule: never risk more than 1-2% of your total capital on a single trade._',
     ].join('\n'),
   },
   {
     id: 5,
-    title: '📒 Cómo leer signals oficiales (1min)',
+    title: '📒 How to read official signals (1min)',
     body: [
-      '*Cómo leer signals oficiales*',
+      '*How to read official signals*',
       '',
-      'Cuando @BlackCatDeFiSignals publica una signal, vas a ver:',
+      'When @BlackCatDeFiSignals posts a signal, you\'ll see:',
       '',
-      '🚀 *SIGNAL OFICIAL #N*',
-      '📊 *Basket*: lista de tokens con su lado (LONG/SHORT)',
-      '⚡ *Leverage*: cuántos x apalancar',
-      '🎯 *SL / Trailing*: configuración de risk',
-      '⏱️ *TWAP*: cómo entrar (horas + bullets)',
+      '🚀 *OFFICIAL SIGNAL #N*',
+      '📊 *Basket*: list of tokens with their side (LONG/SHORT)',
+      '⚡ *Leverage*: how many x to apply',
+      '🎯 *SL / Trailing*: risk config',
+      '⏱️ *TWAP*: how to enter (hours + bullets)',
       '',
-      'Si tenés copy auto ON, recibís la signal personalizada con tu capital y el botón directo a Pear.',
+      'If copy auto is ON, you get the personalized signal with your capital and a one-tap Pear button.',
       '',
-      'Si no, tocá /signals para suscribirte al canal manualmente.',
+      'If not, tap /signals to subscribe to the channel manually.',
     ].join('\n'),
   },
 ];
@@ -113,25 +116,25 @@ function getAllTitles() {
 function buildKeyboard(idx) {
   const total = LESSONS.length;
   const row = [];
-  if (idx > 0) row.push({ text: '◀️ Anterior', callback_data: `learn:nav:${idx - 1}` });
-  if (idx < total - 1) row.push({ text: 'Siguiente ▶️', callback_data: `learn:nav:${idx + 1}` });
+  if (idx > 0) row.push({ text: '◀️ Previous', callback_data: `learn:nav:${idx - 1}` });
+  if (idx < total - 1) row.push({ text: 'Next ▶️', callback_data: `learn:nav:${idx + 1}` });
   const rows = [];
   if (row.length > 0) rows.push(row);
-  rows.push([{ text: '✖️ Salir', callback_data: 'learn:exit' }]);
+  rows.push([{ text: '✖️ Exit', callback_data: 'learn:exit' }]);
   return { inline_keyboard: rows };
 }
 
 function formatLesson(idx) {
   const l = getLesson(idx);
-  if (!l) return '⚠️ Lección no encontrada.';
-  return `${l.body}\n\n_Lección ${idx + 1} de ${LESSONS.length}_`;
+  if (!l) return '⚠️ Lesson not found.';
+  return `${l.body}\n\n_Lesson ${idx + 1} of ${LESSONS.length}_`;
 }
 
 function formatIndex() {
   const lines = [
-    '📚 *Aprendé el bot*',
+    '📚 *Learn the bot*',
     '',
-    'Tutoriales cortos — tocá uno para empezar:',
+    'Short tutorials — tap one to start:',
     '',
   ];
   LESSONS.forEach((l, idx) => {

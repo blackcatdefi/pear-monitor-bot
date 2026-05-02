@@ -1,10 +1,10 @@
 'use strict';
 
 /**
- * Regression test for ROUND v2.
+ * Regression test for ROUND v2 + R-EN.
  * Locks in:
  *   - The apr-28 19:07 UTC BLUR multi-fill TWAP close → +$406.94 aggregate
- *   - Spanish-only user-facing alerts
+ *   - English-only user-facing alerts (R-EN)
  *   - Branding footer present on primary wallet
  *   - Rate-limit ceiling + dedupe behavior coexist
  */
@@ -48,54 +48,54 @@ test('REGRESSION apr28 19:07: ARB single-fill aggregate → +$136.77', () => {
   assert.ok(Math.abs(r.pnl - 136.77) < 0.01);
 });
 
-test('REGRESSION close alert text is in Spanish', () => {
+test('R-EN: close alert text is in English', () => {
   const oldPos = {
     coin: 'BLUR', side: 'SHORT', size: 126_941, entryPrice: 0.0314,
   };
   const msg = formatCloseAlert({
-    label: 'Wallet primaria',
+    label: 'Primary wallet',
     oldPos,
     pnl: 406.94,
     exitPrice: 0.02822,
     reason: 'TAKE_PROFIT',
     dexTag: '',
   });
-  // No English markers in user-facing strings:
-  assert.doesNotMatch(msg, /Position closed/i);
-  assert.doesNotMatch(msg, /Take Profit hit/i);
-  assert.doesNotMatch(msg, /Closed at/i);
-  // Spanish markers expected:
+  // No Spanish markers in user-facing strings:
+  assert.doesNotMatch(msg, /[áéíóúñ]/);
+  assert.doesNotMatch(msg, /Posición/);
+  assert.doesNotMatch(msg, /alcanzado/i);
+  // English markers expected:
   assert.match(msg, /Wallet/);
   assert.match(msg, /BLUR/);
   assert.match(msg, /PnL/);
 });
 
-test('REGRESSION basket open alert is Spanish', () => {
+test('R-EN: basket open alert is English', () => {
   const positions = [
     { coin: 'BTC', size: -1, entryPrice: 100000 },
     { coin: 'ETH', size: -10, entryPrice: 3000 },
     { coin: 'SOL', size: -100, entryPrice: 200 },
   ];
-  const m = formatBasketOpenAlert('Wallet primaria', positions);
-  assert.match(m, /NUEVA BASKET ABIERTA/);
-  assert.doesNotMatch(m, /New basket opened/i);
+  const m = formatBasketOpenAlert('Primary wallet', positions);
+  assert.match(m, /NEW BASKET OPENED/);
+  assert.doesNotMatch(m, /NUEVA BASKET ABIERTA/i);
 });
 
-test('REGRESSION individual open alert is Spanish', () => {
-  const m = formatIndividualOpenAlert('Wallet primaria', {
+test('R-EN: individual open alert is English', () => {
+  const m = formatIndividualOpenAlert('Primary wallet', {
     coin: 'BLUR', size: -100000, entryPrice: 0.0314, side: 'SHORT', leverage: 4,
   });
-  assert.match(m, /NUEVA POSICIÓN ABIERTA/);
-  assert.doesNotMatch(m, /New position/i);
+  assert.match(m, /NEW POSITION OPENED/);
+  assert.doesNotMatch(m, /NUEVA POSICIÓN/i);
 });
 
-test('REGRESSION compounding alert is Spanish + neutral language', () => {
-  const m = formatCompoundAlert('Wallet primaria', {
+test('R-EN: compounding alert is English + neutral language', () => {
+  const m = formatCompoundAlert('Primary wallet', {
     type: 'COMPOUND_DETECTED', prevNotional: 10000, currentNotional: 12000, growth: 0.20,
   });
-  assert.match(m, /COMPOUNDING DETECTADO/);
+  assert.match(m, /COMPOUNDING DETECTED/i);
   assert.match(m, /compounding|TWAP entry/i);
-  assert.doesNotMatch(m, /Compounding detected/i);
+  assert.doesNotMatch(m, /COMPOUNDING DETECTADO/);
   assert.doesNotMatch(m, /NORBER/i);
 });
 
@@ -126,9 +126,9 @@ test('REGRESSION basket summary aggregates total PnL across coins', () => {
     { coin: 'ARB',  side: 'SHORT', pnl: 136.77, exitPrice: 0.1247 },
     { coin: 'WLD',  side: 'SHORT', pnl: -23.40, exitPrice: 1.45 },
   ];
-  const m = formatBasketSummary('Wallet primaria', closes);
-  // Spanish summary uses "PnL total"
-  assert.match(m, /PnL total/i);
+  const m = formatBasketSummary('Primary wallet', closes);
+  // English summary uses "Total PnL"
+  assert.match(m, /Total PnL/i);
   // total ≈ +$520.31
   assert.match(m, /520(\.|,)/);
 });

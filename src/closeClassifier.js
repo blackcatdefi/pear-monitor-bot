@@ -59,11 +59,11 @@ function refineTrailingVsManual(reason, positionConfig) {
 }
 
 const REASON_DISPLAY = {
-  TAKE_PROFIT: { emoji: '🎯', label: 'TAKE PROFIT alcanzado' },
-  STOP_LOSS: { emoji: '🛑', label: 'STOP LOSS activado' },
-  TRAILING_STOP: { emoji: '🔄', label: 'TRAILING STOP activado' },
-  TRAILING_OR_MANUAL: { emoji: '🔄', label: 'Cerrado (trailing/manual)' },
-  MANUAL_CLOSE: { emoji: '📋', label: 'Cierre manual' },
+  TAKE_PROFIT: { emoji: '🎯', label: 'TAKE PROFIT hit' },
+  STOP_LOSS: { emoji: '🛑', label: 'STOP LOSS triggered' },
+  TRAILING_STOP: { emoji: '🔄', label: 'TRAILING STOP triggered' },
+  TRAILING_OR_MANUAL: { emoji: '🔄', label: 'Closed (trailing/manual)' },
+  MANUAL_CLOSE: { emoji: '📋', label: 'Manual close' },
 };
 
 // Partial-close in-memory tracker. Used for aggregate PnL accounting if

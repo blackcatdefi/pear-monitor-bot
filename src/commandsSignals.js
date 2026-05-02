@@ -9,25 +9,25 @@ const SIGNALS_USERNAME = (process.env.SIGNALS_CHANNEL || '@BlackCatDeFiSignals')
 function _menuKeyboard() {
   return {
     inline_keyboard: [
-      [{ text: '📲 Suscribirme al canal', url: `https://t.me/${SIGNALS_USERNAME}` }],
-      [{ text: '🤖 Activar copy auto', callback_data: 'signals:goto_copyauto' }],
+      [{ text: '📲 Subscribe to channel', url: `https://t.me/${SIGNALS_USERNAME}` }],
+      [{ text: '🤖 Enable copy auto', callback_data: 'signals:goto_copyauto' }],
     ],
   };
 }
 
 function _bodyText() {
   const lines = [
-    '📡 *Signals oficiales*',
+    '📡 *Official signals*',
     '',
-    `Canal: @${SIGNALS_USERNAME}`,
+    `Channel: @${SIGNALS_USERNAME}`,
     '',
-    'Cuando hay signal nueva, te aviso al instante con:',
-    '  • Composición de la basket',
-    '  • Tokens y leverage',
-    '  • Botón 1-toque para copiar en Pear',
-    '  • SL 50% + Trailing 10% (activación 30%) — preset',
+    'When a new signal lands, you get an instant alert with:',
+    '  • Basket composition',
+    '  • Tokens and leverage',
+    '  • 1-tap "Copy on Pear" button',
+    '  • SL 50% + Trailing 10% (activation 30%) — preset',
     '',
-    'Ese aviso es independiente del canal — vos podés suscribirte al canal igual para ver el contexto completo.',
+    'The alert is independent from the channel — feel free to subscribe to the channel for full context.',
   ];
   return lines.join('\n');
 }
@@ -55,7 +55,7 @@ function attach(bot) {
         const commandsCopyAuto = require('./commandsCopyAuto');
         await commandsCopyAuto.showMenu(bot, chatId, cb.from && cb.from.id);
       } catch (_) {
-        await bot.sendMessage(chatId, 'Tocá /copy_auto para configurar.', { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, 'Tap /copy_auto to configure.', { parse_mode: 'Markdown' });
       }
     }
   });

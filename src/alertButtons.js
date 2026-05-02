@@ -44,7 +44,7 @@
 
 const pearUrl = require('./pearUrlBuilder');
 
-const DEFAULT_COPY_CTA = '⚡ Replicá esta operación con un toque:';
+const DEFAULT_COPY_CTA = '⚡ Mirror this trade in one tap:';
 
 // R-CTAOPTIMIZE — quick-amount multipliers. 0.5x / 1x / 2x of user capital.
 // Override via env QUICK_AMOUNT_MULTIPLIERS="0.5,1,2" (comma-separated).
@@ -144,12 +144,12 @@ function _buildHeroRows(positions, opts) {
 
   const heroLabelFor = (side) => {
     const sideTag = side === 'SHORT' ? 'SHORTs' : 'LONGs';
-    if (capLabel) return `🍐 Copiar ${sideTag} ${capLabel} en Pear`;
-    return `🍐 Copiar ${sideTag} en Pear`;
+    if (capLabel) return `🍐 Copy ${sideTag} ${capLabel} on Pear`;
+    return `🍐 Copy ${sideTag} on Pear`;
   };
   const heroLabelSingle = capLabel
-    ? `🍐 Copiar ${capLabel} en Pear`
-    : '🍐 Copiar en Pear';
+    ? `🍐 Copy ${capLabel} on Pear`
+    : '🍐 Copy on Pear';
 
   const rows = [];
   if (shortsUrl && longsUrl) {
@@ -218,7 +218,7 @@ function buildAlertKeyboard(positions, type, opts) {
   if (wallet) {
     const muteCb = `mute:${String(wallet).toLowerCase()}`;
     rows.push([
-      { text: '🔕 Silenciar wallet', callback_data: muteCb.slice(0, 64) },
+      { text: '🔕 Mute wallet', callback_data: muteCb.slice(0, 64) },
     ]);
   }
 

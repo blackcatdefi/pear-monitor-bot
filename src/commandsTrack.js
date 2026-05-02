@@ -4,60 +4,62 @@
  * R-PUBLIC — /track command + inline keyboard handlers.
  *
  * UI flow:
- *   /track                                  → menú [Agregar] [Mis wallets] [Eliminar]
- *   tap "➕ Agregar wallet"                 → set state AWAITING_WALLET_ADDRESS
+ *   /track                                  → menu [Add] [My wallets] [Remove]
+ *   tap "➕ Add wallet"                     → set state AWAITING_WALLET_ADDRESS
  *     next text msg = address               → validate → set state AWAITING_WALLET_LABEL
  *   next text msg = label or /skip          → persist, reset state, confirm
- *   tap "📋 Mis wallets"                    → list of subscriptions
- *   tap "🔕 Dejar de trackear"             → set state AWAITING_REMOVE_ADDRESS
+ *   tap "📋 My wallets"                     → list of subscriptions
+ *   tap "🔕 Stop tracking"                 → set state AWAITING_REMOVE_ADDRESS
  *
  * The state machine is keyed on chatId (private chats use chatId === userId).
+ * R-EN — All user-facing strings now go through `t()` from `./i18n`.
  */
 
 const wt = require('./walletTracker');
 const sm = require('./userStateMachine');
+const { t } = require('./i18n/index');
 
-const MENU_KEYBOARD = {
-  inline_keyboard: [
-    [{ text: '➕ Agregar wallet', callback_data: 'track:add' }],
-    [{ text: '📋 Mis wallets trackeadas', callback_data: 'track:list' }],
-    [{ text: '🔕 Dejar de trackear', callback_data: 'track:remove' }],
-  ],
-};
-
-function _shortAddr(a) {
-  if (!a) return '?';
-  const s = String(a);
-  if (s.length < 12) return s;
-  return `${s.slice(0, 6)}...${s.slice(-4)}`;
+function _menuKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: t('track.menu_kb_add'), callback_data: 'track:add' }],
+      [{ text: t('track.menu_kb_list'), callback_data: 'track:list' }],
+      [{ text: t('track.menu_kb_remove'), callback_data: 'track:remove' }],
+    ],
+  };
 }
+
+// Kept for backward-compat with tests that import MENU_KEYBOARD.
+const MENU_KEYBOARD = _menuKeyboard();
 
 async function _showMenu(bot, chatId) {
   await bot.sendMessage(
     chatId,
-    '🎯 *TRACK — Wallets externas*\n\n' +
-      'Trackeá cualquier wallet de Hyperliquid y recibí alertas cuando abre o cierra baskets, con botón para copiar el trade en Pear.',
-    { parse_mode: 'Markdown', reply_markup: MENU_KEYBOARD }
+    `${t('track.menu_title')}\n\n${t('track.menu_body')}`,
+    { parse_mode: 'Markdown', reply_markup: _menuKeyboard() }
   );
 }
 
 async function _showList(bot, chatId, userId) {
   const wallets = wt.getUserWallets(userId);
   if (wallets.length === 0) {
-    await bot.sendMessage(
-      chatId,
-      '📋 No tenés wallets trackeadas todavía.\n\nUsá `/track` y tocá *Agregar wallet*.',
-      { parse_mode: 'Markdown' }
-    );
+    await bot.sendMessage(chatId, t('track.list_empty'), {
+      parse_mode: 'Markdown',
+    });
     return;
   }
-  const lines = ['📋 *TUS WALLETS TRACKEADAS*', ''];
+  const lines = [t('track.list_header'), ''];
   for (const w of wallets) {
     const label = w.label ? ` — ${w.label}` : '';
     lines.push(`  • \`${w.address}\`${label}`);
   }
   lines.push('');
-  lines.push(`Total: ${wallets.length}/${wt.MAX_WALLETS_PER_USER}`);
+  lines.push(
+    t('track.list_total', {
+      count: wallets.length,
+      max: wt.MAX_WALLETS_PER_USER,
+    })
+  );
   await bot.sendMessage(chatId, lines.join('\n'), { parse_mode: 'Markdown' });
 }
 
@@ -80,24 +82,22 @@ function attach(bot) {
 
     if (action === 'add') {
       sm.setState(chatId, sm.STATES.AWAITING_WALLET_ADDRESS, { userId });
-      await bot.sendMessage(
-        chatId,
-        '📥 Mandame la dirección de la wallet (formato `0x...` con 40 caracteres hex):',
-        { parse_mode: 'Markdown' }
-      );
+      await bot.sendMessage(chatId, t('track.add_prompt'), {
+        parse_mode: 'Markdown',
+      });
     } else if (action === 'list') {
       await _showList(bot, chatId, userId);
     } else if (action === 'remove') {
       const wallets = wt.getUserWallets(userId);
       if (wallets.length === 0) {
-        await bot.sendMessage(chatId, 'No tenés wallets trackeadas.');
+        await bot.sendMessage(chatId, t('track.no_tracked'));
         return;
       }
       sm.setState(chatId, sm.STATES.AWAITING_REMOVE_ADDRESS, { userId });
       const lines = [
-        '🔕 *Eliminar wallet*',
+        t('track.remove_title'),
         '',
-        'Mandame la dirección (o el shortcut tipo `0x6abc...`) que querés dejar de trackear:',
+        t('track.remove_prompt'),
         '',
       ];
       for (const w of wallets) {
@@ -124,11 +124,9 @@ function attach(bot) {
 
     if (rec.state === sm.STATES.AWAITING_WALLET_ADDRESS) {
       if (!wt.isValidAddress(text)) {
-        await bot.sendMessage(
-          chatId,
-          '⚠️ Esa dirección no parece válida. Tiene que ser `0x` seguido de 40 caracteres hex (ej: `0x1234abcd...0000`).\n\nMandame de nuevo o /cancel.',
-          { parse_mode: 'Markdown' }
-        );
+        await bot.sendMessage(chatId, t('track.invalid_addr'), {
+          parse_mode: 'Markdown',
+        });
         return;
       }
       sm.setState(chatId, sm.STATES.AWAITING_WALLET_LABEL, {
@@ -137,8 +135,7 @@ function attach(bot) {
       });
       await bot.sendMessage(
         chatId,
-        `✅ Dirección \`${text}\` validada.\n\n` +
-          `¿Querés ponerle un nombre/etiqueta? (ej. *Whale 1*) o mandá \`/skip\` para guardar sin nombre.`,
+        t('track.addr_validated', { addr: text }),
         { parse_mode: 'Markdown' }
       );
       return;
@@ -153,15 +150,14 @@ function attach(bot) {
         sm.reset(chatId);
         await bot.sendMessage(
           chatId,
-          `⚠️ No pude guardar: ${e.message || 'error desconocido'}`
+          t('track.save_failed', { error: e.message || t('track.error_unknown') })
         );
         return;
       }
       sm.reset(chatId);
       await bot.sendMessage(
         chatId,
-        `✅ Wallet \`${address}\` (${label}) trackeada.\n\n` +
-          `Te voy a avisar cuando abra o cierre baskets.`,
+        t('track.saved_with_label', { addr: address, label }),
         { parse_mode: 'Markdown' }
       );
       return;
@@ -178,11 +174,9 @@ function attach(bot) {
       );
       if (!match) {
         sm.reset(chatId);
-        await bot.sendMessage(
-          chatId,
-          `⚠️ No encontré una wallet matching \`${text}\`. Usá /track para ver tu lista.`,
-          { parse_mode: 'Markdown' }
-        );
+        await bot.sendMessage(chatId, t('track.not_found', { q: text }), {
+          parse_mode: 'Markdown',
+        });
         return;
       }
       const removed = wt.removeWallet(userId, match.address);
@@ -190,8 +184,8 @@ function attach(bot) {
       await bot.sendMessage(
         chatId,
         removed > 0
-          ? `✅ Wallet \`${match.address}\` eliminada (${removed} record).`
-          : `⚠️ No pude eliminar.`,
+          ? t('track.removed_ok', { addr: match.address, n: removed })
+          : t('track.remove_failed'),
         { parse_mode: 'Markdown' }
       );
       return;
@@ -211,14 +205,14 @@ function attach(bot) {
       sm.reset(chatId);
       await bot.sendMessage(
         chatId,
-        `⚠️ No pude guardar: ${e.message || 'error desconocido'}`
+        t('track.save_failed', { error: e.message || t('track.error_unknown') })
       );
       return;
     }
     sm.reset(chatId);
     await bot.sendMessage(
       chatId,
-      `✅ Wallet \`${address}\` trackeada (sin etiqueta).`,
+      t('track.saved_no_label', { addr: address }),
       { parse_mode: 'Markdown' }
     );
   });
@@ -227,7 +221,7 @@ function attach(bot) {
   bot.onText(/^\/cancel$/i, async (msg) => {
     const chatId = msg.chat.id;
     sm.reset(chatId);
-    await bot.sendMessage(chatId, 'Cancelado. Mandá /track para empezar de nuevo.');
+    await bot.sendMessage(chatId, t('track.cancelled'));
   });
 
   console.log('[commandsTrack] attached: /track /skip /cancel + callbacks');

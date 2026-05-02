@@ -11,11 +11,11 @@ const { t } = require('./i18n');
 const { appendFooter } = require('./branding');
 
 const REASON_DISPLAY = {
-  TAKE_PROFIT: { emoji: '🎯', label: 'TAKE PROFIT alcanzado' },
-  STOP_LOSS: { emoji: '🛑', label: 'STOP LOSS activado' },
-  TRAILING_STOP: { emoji: '🔄', label: 'TRAILING STOP activado' },
-  TRAILING_OR_MANUAL: { emoji: '🔄', label: 'Posición cerrada (trailing/manual)' },
-  MANUAL_CLOSE: { emoji: '📋', label: 'Cierre manual' },
+  TAKE_PROFIT: { emoji: '🎯', label: 'TAKE PROFIT hit' },
+  STOP_LOSS: { emoji: '🛑', label: 'STOP LOSS triggered' },
+  TRAILING_STOP: { emoji: '🔄', label: 'TRAILING STOP triggered' },
+  TRAILING_OR_MANUAL: { emoji: '🔄', label: 'Position closed (trailing/manual)' },
+  MANUAL_CLOSE: { emoji: '📋', label: 'Manual close' },
 };
 
 function formatDurationMs(ms) {
@@ -71,8 +71,8 @@ function formatRichCloseAlert(label, close, reason, isPrimary = true) {
     `🪙 ${close.coin}${close.dexTag || ''} ${close.side || ''}`.trim(),
     `${pnlEmoji} PnL: ${_fmtUsd(pnl)} (${roiPct.toFixed(2)}%)`,
     `💲 Entry: $${_fmtPx(close.entryPrice)}`,
-    close.exitPrice ? `💲 Cierre: $${_fmtPx(close.exitPrice)}` : '',
-    `⏱ Duración: ${duration}`,
+    close.exitPrice ? `💲 Exit: $${_fmtPx(close.exitPrice)}` : '',
+    `⏱ Duration: ${duration}`,
   ];
   if (close.size) {
     lines.push(`📦 Size: ${Math.abs(close.size).toLocaleString()}`);
@@ -106,17 +106,17 @@ function formatRichBasketSummary(label, closes, isPrimary = true) {
   const roi = notional > 0 ? (totalPnl / notional) * 100 : 0;
 
   const lines = [
-    `🐱‍⬛ *BASKET CERRADA* — ${label}`,
+    `🐱‍⬛ *BASKET CLOSED* — ${label}`,
     '',
-    '📊 *Resumen:*',
-    `• Posiciones cerradas: *${items.length}* (${symbols})`,
-    `• ${pnlEmoji} PnL total: *${_fmtUsd(totalPnl)}* (${roi.toFixed(2)}% ROI)`,
+    '📊 *Summary:*',
+    `• Closed positions: *${items.length}* (${symbols})`,
+    `• ${pnlEmoji} Total PnL: *${_fmtUsd(totalPnl)}* (${roi.toFixed(2)}% ROI)`,
   ];
   if (totalFees) lines.push(`• Fees: $${totalFees.toFixed(2)}`);
   if (notional > 0) {
     lines.push(`• Notional: $${Math.round(notional).toLocaleString()}`);
   }
-  lines.push('', '📋 *Breakdown (mejor → peor):*');
+  lines.push('', '📋 *Breakdown (best → worst):*');
   for (const c of sorted) {
     const e = (c.pnl || 0) >= 0 ? '🟢' : '🔴';
     const side = c.side ? ` ${c.side}` : '';

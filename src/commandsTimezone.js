@@ -27,18 +27,18 @@ function _renderHelp(currentTz) {
   const lines = [
     '🌐 *TIMEZONE*',
     '',
-    `Tu TZ actual: \`${currentTz}\``,
+    `Your current TZ: \`${currentTz}\``,
     '',
-    'Para cambiar:',
-    '  `/timezone <IANA>` (ej. `/timezone America/Argentina/Buenos_Aires`)',
-    '  `/timezone auto` — detectar desde Telegram',
+    'To change:',
+    '  `/timezone <IANA>` (e.g. `/timezone America/New_York`)',
+    '  `/timezone auto` — detect from Telegram',
     '',
-    '*Populares:*',
+    '*Popular:*',
   ];
   for (const tz of POPULAR_TZS) lines.push(`  • \`${tz}\``);
   lines.push('');
   lines.push(
-    'Lista completa de IANA: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones'
+    'Full IANA list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones'
   );
   return lines.join('\n');
 }
@@ -66,15 +66,15 @@ function attach(bot) {
       } catch (e) {
         await bot.sendMessage(
           chatId,
-          `⚠️ No pude setear TZ detectada (${detected}): ${e.message}`
+          `⚠️ Could not set detected TZ (${detected}): ${e.message}`
         );
         return;
       }
       await bot.sendMessage(
         chatId,
-        `✅ TZ detectada: \`${detected}\`\n` +
-          `_(basado en language_code=${lang || 'unknown'})_\n\n` +
-          `Si está mal, usá \`/timezone <IANA>\` para corregir.`,
+        `✅ TZ detected: \`${detected}\`\n` +
+          `_(based on language_code=${lang || 'unknown'})_\n\n` +
+          `If wrong, use \`/timezone <IANA>\` to fix it.`,
         { parse_mode: 'Markdown' }
       );
       return;
@@ -85,14 +85,14 @@ function attach(bot) {
       const sample = tzMgr.formatLocalTime(userId);
       await bot.sendMessage(
         chatId,
-        `✅ TZ actualizada: \`${arg}\`\n\nEjemplo: ${sample}`,
+        `✅ TZ updated: \`${arg}\`\n\nExample: ${sample}`,
         { parse_mode: 'Markdown' }
       );
     } catch (e) {
       await bot.sendMessage(
         chatId,
-        `⚠️ ${e.message || 'Timezone inválida'}.\n\n` +
-          `Usá un IANA name como \`America/Argentina/Buenos_Aires\`.`,
+        `⚠️ ${e.message || 'Invalid timezone'}.\n\n` +
+          `Use an IANA name like \`America/New_York\`.`,
         { parse_mode: 'Markdown' }
       );
     }

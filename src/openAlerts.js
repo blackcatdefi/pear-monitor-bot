@@ -82,19 +82,19 @@ function formatBasketOpenAlert(label, positions) {
     ? `${positions[0].leverage}x`
     : '4x';
   const lines = [
-    '🚀 *NUEVA BASKET ABIERTA*',
+    '🚀 *NEW BASKET OPENED*',
     '',
     `📍 Wallet: ${label}`,
-    `📊 Composición (${positions.length} posiciones):`,
+    `📊 Composition (${positions.length} positions):`,
   ];
   for (const p of positions) {
     const side = p.side || (p.size < 0 ? 'SHORT' : 'LONG');
     lines.push(`  • ${p.coin} ${side} @ $${_fmtPx(p.entryPrice)}`);
   }
   lines.push('');
-  lines.push(`💰 Notional total: ${_fmtUsd(totalNotional)}`);
+  lines.push(`💰 Total notional: ${_fmtUsd(totalNotional)}`);
   lines.push(`⚡ Leverage: ${lev}`);
-  lines.push(`🎯 Estrategia: TWAP entry (DCA temporal)`);
+  lines.push(`🎯 Strategy: TWAP entry (time-based DCA)`);
   return lines.join('\n');
 }
 
@@ -106,7 +106,7 @@ function formatIndividualOpenAlert(label, pos) {
   );
   const lev = pos.leverage ? `${pos.leverage}x` : '4x';
   return [
-    `${emoji} *NUEVA POSICIÓN ABIERTA*`,
+    `${emoji} *NEW POSITION OPENED*`,
     '',
     `📍 Wallet: ${label}`,
     `🪙 ${pos.coin} ${side}`,

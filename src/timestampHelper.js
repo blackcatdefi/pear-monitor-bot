@@ -13,20 +13,20 @@
  * with no specific user).
  */
 
-const DAYS_ES = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
-const MONTHS_ES = [
-  'ene',
-  'feb',
-  'mar',
-  'abr',
-  'may',
-  'jun',
-  'jul',
-  'ago',
-  'sep',
-  'oct',
-  'nov',
-  'dic',
+const DAYS_EN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTHS_EN = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
 ];
 
 function isEnabled() {
@@ -45,8 +45,8 @@ function formatTimestamp(date = new Date(), userId = null) {
       // fall through to UTC if timezoneManager is unavailable
     }
   }
-  const day = DAYS_ES[d.getUTCDay()];
-  const month = MONTHS_ES[d.getUTCMonth()];
+  const day = DAYS_EN[d.getUTCDay()];
+  const month = MONTHS_EN[d.getUTCMonth()];
   const dt = d.getUTCDate();
   const yr = d.getUTCFullYear();
   const hh = String(d.getUTCHours()).padStart(2, '0');
@@ -76,6 +76,6 @@ module.exports = {
   isEnabled,
   formatTimestamp,
   withTimestamp,
-  DAYS_ES,
-  MONTHS_ES,
+  DAYS_EN,
+  MONTHS_EN,
 };

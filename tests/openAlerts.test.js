@@ -53,23 +53,23 @@ test(`classifyOpenEvent: ≥${BASKET_MIN_COUNT} → BASKET_OPEN`, () => {
   assert.equal(classifyOpenEvent(pos).type, 'BASKET_OPEN');
 });
 
-test('formatBasketOpenAlert: includes Spanish "NUEVA BASKET ABIERTA"', () => {
+test('formatBasketOpenAlert: renders English "NEW BASKET OPENED" header', () => {
   const positions = [
     { coin: 'BTC', size: -1, entryPrice: 100000, leverage: 5 },
     { coin: 'ETH', size: -10, entryPrice: 3000, leverage: 5 },
     { coin: 'SOL', size: -100, entryPrice: 200, leverage: 5 },
   ];
-  const msg = formatBasketOpenAlert('Wallet primaria', positions);
-  assert.match(msg, /NUEVA BASKET ABIERTA/);
-  assert.match(msg, /Notional total/);
+  const msg = formatBasketOpenAlert('Primary wallet', positions);
+  assert.match(msg, /NEW BASKET OPENED/);
+  assert.match(msg, /Total notional/);
   assert.match(msg, /Leverage/);
   assert.match(msg, /TWAP entry/);
 });
 
-test('formatIndividualOpenAlert: includes Spanish "NUEVA POSICIÓN ABIERTA"', () => {
+test('formatIndividualOpenAlert: renders English "NEW POSITION OPENED" header', () => {
   const pos = { coin: 'BLUR', size: -100000, entryPrice: 0.0314, leverage: 4, side: 'SHORT' };
-  const msg = formatIndividualOpenAlert('Wallet primaria', pos);
-  assert.match(msg, /NUEVA POSICIÓN ABIERTA/);
+  const msg = formatIndividualOpenAlert('Primary wallet', pos);
+  assert.match(msg, /NEW POSITION OPENED/);
   assert.match(msg, /BLUR SHORT/);
   assert.match(msg, /Entry/);
   assert.match(msg, /Leverage/);

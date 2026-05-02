@@ -60,27 +60,27 @@ test.beforeEach(() => {
   wt._resetForTests();
 });
 
-test('/start first-time muestra onboarding completo', async () => {
+test('/start first-time renders full onboarding (English)', async () => {
   const bot = mockBot();
   await commandsStart.handleStart(bot, mockMsg({ userId: 99999 }));
   assert.strictEqual(bot.sent.length, 1);
   const out = bot.sent[0];
-  assert.match(out.text, /Tu copiloto de trading on-chain/);
-  assert.match(out.text, /Trackear wallets de top traders/);
-  assert.match(out.text, /Configurá tu zona horaria con \/timezone/);
+  assert.match(out.text, /on-chain trading copilot/i);
+  assert.match(out.text, /Track top-trader wallets/i);
+  assert.match(out.text, /Set your timezone/i);
   // Inline keyboard: 4 rows (R-AUTOCOPY adds signals + copy_auto row).
   assert.ok(out.opts.reply_markup);
   assert.strictEqual(out.opts.reply_markup.inline_keyboard.length, 4);
 });
 
-test('/start recurring usuario muestra dashboard compacto', async () => {
+test('/start recurring user renders compact dashboard (English)', async () => {
   const bot = mockBot();
   await commandsStart.handleStart(bot, mockMsg({ userId: 12345 }));
   await commandsStart.handleStart(bot, mockMsg({ userId: 12345 }));
   // Second message is the recurring text.
   const out = bot.sent[bot.sent.length - 1];
-  assert.match(out.text, /Bienvenido de vuelta/);
-  assert.doesNotMatch(out.text, /Tu copiloto de trading on-chain/);
+  assert.match(out.text, /Welcome back/i);
+  assert.doesNotMatch(out.text, /on-chain trading copilot/i);
 });
 
 test('hero button URL contiene referral', () => {
@@ -137,7 +137,7 @@ test('keyboard tiene 4 filas: track, signals+copy, tz+status, hero', () => {
   assert.strictEqual(kb.inline_keyboard[3].length, 1);
 });
 
-test('callback start:track_list con cero wallets pide /track', async () => {
+test('callback start:track_list with zero wallets prompts /track', async () => {
   const bot = mockBot();
   const cb = {
     id: 'cb1',
@@ -147,10 +147,10 @@ test('callback start:track_list con cero wallets pide /track', async () => {
   };
   const handled = await commandsStart._handleCallback(bot, cb);
   assert.strictEqual(handled, true);
-  assert.match(bot.sent[0].text, /No tenés wallets trackeadas todavía/);
+  assert.match(bot.sent[0].text, /not tracking any wallet/i);
 });
 
-test('callback start:status_view renderiza dashboard sintético', async () => {
+test('callback start:status_view renders synthetic dashboard', async () => {
   const bot = mockBot();
   const cb = {
     id: 'cb2',
@@ -160,11 +160,11 @@ test('callback start:status_view renderiza dashboard sintético', async () => {
   };
   const handled = await commandsStart._handleCallback(bot, cb);
   assert.strictEqual(handled, true);
-  assert.match(bot.sent[0].text, /Alertas activas/);
-  assert.match(bot.sent[0].text, /Bot: activo/);
+  assert.match(bot.sent[0].text, /Active alerts/i);
+  assert.match(bot.sent[0].text, /Bot: active/i);
 });
 
-test('mute:<addr> callback elimina la wallet trackeada', async () => {
+test('mute:<addr> callback removes the tracked wallet', async () => {
   const userId = 7777;
   const addr = '0x' + 'a'.repeat(40);
   wt.addWallet(userId, addr, 'Test Whale');
@@ -180,7 +180,7 @@ test('mute:<addr> callback elimina la wallet trackeada', async () => {
   const handled = await commandsStart._handleCallback(bot, cb);
   assert.strictEqual(handled, true);
   assert.strictEqual(wt.getUserWallets(userId).length, 0);
-  assert.match(bot.sent[0].text, /silenciada/);
+  assert.match(bot.sent[0].text, /muted/i);
 });
 
 test('callback no-ours retorna false sin tocar nada', async () => {

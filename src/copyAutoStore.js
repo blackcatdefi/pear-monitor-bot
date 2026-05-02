@@ -128,7 +128,7 @@ function setEnabled(userId, enabled) {
 function setMode(userId, mode) {
   const m = String(mode || '').toUpperCase();
   if (m !== 'MANUAL' && m !== 'AUTO') {
-    throw new Error('Modo debe ser MANUAL o AUTO');
+    throw new Error('Mode must be MANUAL or AUTO');
   }
   return setConfig(userId, { mode: m });
 }
@@ -136,13 +136,13 @@ function setMode(userId, mode) {
 function validateCapital(amount) {
   const n = Number(amount);
   if (!Number.isFinite(n)) {
-    throw new Error('Monto inválido');
+    throw new Error('Invalid amount');
   }
   if (n < MIN_CAPITAL) {
-    throw new Error(`Monto mínimo: $${MIN_CAPITAL} USDC`);
+    throw new Error(`Minimum amount: $${MIN_CAPITAL} USDC`);
   }
   if (n > MAX_CAPITAL) {
-    throw new Error(`Monto máximo: $${MAX_CAPITAL} USDC`);
+    throw new Error(`Maximum amount: $${MAX_CAPITAL} USDC`);
   }
   return Math.round(n * 100) / 100;
 }

@@ -131,7 +131,7 @@ async function validatePnlBeforeAlert({
       pnl: calculatedPnl,
       source: 'bot',
       flagged: true,
-      note: 'Pear API no disponible — usando cálculo del bot',
+      note: 'Pear API unavailable — using bot calculation',
     };
   }
   const pearPnl = _extractPearPnl(pearPos);
@@ -141,7 +141,7 @@ async function validatePnlBeforeAlert({
       pnl: calculatedPnl,
       source: 'bot',
       flagged: true,
-      note: 'Pear API sin PnL — usando cálculo del bot',
+      note: 'Pear API has no PnL — using bot calculation',
     };
   }
   const denom =

@@ -56,10 +56,10 @@ function attachCommands(bot, opts = {}) {
       chatId: String(chatId),
     });
     if (closes.length === 0) {
-      await bot.sendMessage(chatId, 'Sin cierres registrados todavía.');
+      await bot.sendMessage(chatId, 'No closes recorded yet.');
       return;
     }
-    const lines = [`📜 *ÚLTIMOS ${closes.length} CIERRES*`, ''];
+    const lines = [`📜 *LAST ${closes.length} CLOSES*`, ''];
     for (const c of closes) {
       const e = (c.pnl || 0) >= 0 ? '🟢' : '🔴';
       const side = c.side ? ` ${c.side}` : '';
@@ -80,7 +80,7 @@ function attachCommands(bot, opts = {}) {
     if (!valid.includes(period)) {
       await bot.sendMessage(
         chatId,
-        `Período inválido. Usá: ${valid.join(' / ')}`
+        `Invalid period. Use: ${valid.join(' / ')}`
       );
       return;
     }
@@ -116,13 +116,13 @@ function attachCommands(bot, opts = {}) {
       `✅ *Bot status*`,
       '',
       `Uptime: ${_formatHours(s.uptime_ms)}h`,
-      `Último poll: ${_short(s.last_successful_poll)}`,
-      `Errores 24h: ${s.errors_24h_count}`,
+      `Last poll: ${_short(s.last_successful_poll)}`,
+      `Errors 24h: ${s.errors_24h_count}`,
     ];
     if (s.errors_24h_count > 0 && Array.isArray(s.errors_24h_recent)) {
       const last = s.errors_24h_recent[s.errors_24h_recent.length - 1];
       if (last) {
-        lines.push('', `Último error: ${(last.message || '').slice(0, 120)}`);
+        lines.push('', `Last error: ${(last.message || '').slice(0, 120)}`);
       }
     }
     await bot.sendMessage(chatId, lines.join('\n'), {
@@ -139,7 +139,7 @@ function attachCommands(bot, opts = {}) {
       if (closes.length === 0) {
         await bot.sendMessage(
           chatId,
-          `Sin eventos en período ${period}.`
+          `No events in period ${period}.`
         );
         return;
       }
@@ -186,7 +186,7 @@ function attachCommands(bot, opts = {}) {
           chatId,
           buffer,
           {
-            caption: `Export ${period}: ${closes.length} cierres`,
+            caption: `Export ${period}: ${closes.length} closes`,
           },
           {
             filename,
@@ -200,7 +200,7 @@ function attachCommands(bot, opts = {}) {
         );
         await bot.sendMessage(
           chatId,
-          `⚠️ No pude generar el CSV: ${e && e.message ? e.message : 'error'}`
+          `⚠️ Could not generate CSV: ${e && e.message ? e.message : 'error'}`
         );
       }
     });
@@ -209,12 +209,12 @@ function attachCommands(bot, opts = {}) {
   // /summary
   bot.onText(/^\/summary$/, async (msg) => {
     const chatId = msg.chat.id;
-    await bot.sendMessage(chatId, 'Forzando weekly summary...');
+    await bot.sendMessage(chatId, 'Forcing weekly summary...');
     const text = weeklySummary.buildSummaryMessage();
     if (!text) {
       await bot.sendMessage(
         chatId,
-        'Sin cierres en la semana actual. Volvé el domingo 18:00 UTC.'
+        'No closes this week. Come back Sunday 18:00 UTC.'
       );
       return;
     }
@@ -227,7 +227,7 @@ function attachCommands(bot, opts = {}) {
     const ok = healthServer.isHealthy();
     await bot.sendMessage(
       chatId,
-      ok ? '✅ healthy' : '⚠️ unhealthy — revisar /status'
+      ok ? '✅ healthy' : '⚠️ unhealthy — check /status'
     );
   });
 
@@ -247,7 +247,7 @@ function attachCommands(bot, opts = {}) {
     } catch (e) {
       await bot.sendMessage(
         chatId,
-        `⚠️ /dedup_status fallo: ${e && e.message ? e.message : 'error'}`
+        `⚠️ /dedup_status failed: ${e && e.message ? e.message : 'error'}`
       );
       return;
     }
@@ -255,8 +255,8 @@ function attachCommands(bot, opts = {}) {
       await bot.sendMessage(
         chatId,
         `📋 *Basket dedup*\n\n` +
-          `TTL: ${basketDedup.TTL_DAYS} días\n` +
-          `Entradas activas: 0`,
+          `TTL: ${basketDedup.TTL_DAYS} days\n` +
+          `Active entries: 0`,
         { parse_mode: 'Markdown' }
       );
       return;
@@ -272,8 +272,8 @@ function attachCommands(bot, opts = {}) {
     });
     const msgText =
       `📋 *Basket dedup*\n\n` +
-      `TTL: ${basketDedup.TTL_DAYS} días\n` +
-      `Entradas activas: ${entries.length}\n\n` +
+      `TTL: ${basketDedup.TTL_DAYS} days\n` +
+      `Active entries: ${entries.length}\n\n` +
       lines.join('\n');
     await bot.sendMessage(chatId, msgText, { parse_mode: 'Markdown' });
   });

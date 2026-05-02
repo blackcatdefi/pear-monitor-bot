@@ -27,18 +27,18 @@ async function _handleCallback(bot, cb) {
   if (parts[1] === 'track' && parts[2]) {
     const fullAddr = lb.resolveAddressByPrefix(parts[2]);
     if (!fullAddr) {
-      await bot.sendMessage(chatId, '⚠️ No pude resolver esa wallet del ranking.');
+      await bot.sendMessage(chatId, '⚠️ Could not resolve that wallet from the ranking.');
       return;
     }
     if (wt.hasWallet(userId, fullAddr)) {
-      await bot.sendMessage(chatId, 'ℹ️ Ya tenés esa wallet trackeada.');
+      await bot.sendMessage(chatId, 'ℹ️ You already track that wallet.');
       return;
     }
     try {
       wt.addWallet(userId, fullAddr, null);
       await bot.sendMessage(
         chatId,
-        `✅ Wallet \`${fullAddr.slice(0, 6)}...${fullAddr.slice(-4)}\` agregada a tu /track.`,
+        `✅ Wallet \`${fullAddr.slice(0, 6)}...${fullAddr.slice(-4)}\` added to your /track.`,
         { parse_mode: 'Markdown' }
       );
     } catch (e) {

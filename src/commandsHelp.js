@@ -6,23 +6,23 @@
 
 function _body() {
   return [
-    '🆘 *Comandos*',
+    '🆘 *Commands*',
     '',
-    '/start — Inicio',
-    '/track — Trackear wallets externas',
-    '/signals — Canal oficial de signals',
-    '/copy_auto — Copy automático (MANUAL/AUTO)',
-    '/capital — Capital por signal',
-    '/timezone — Zona horaria',
-    '/portfolio — Tu portfolio (read-only HL)',
-    '/leaderboard — Top wallets trackeadas',
-    '/alerts_config — Granularidad de alertas',
-    '/stats — Tus stats personales',
-    '/share — Invitar amigos (Premium tras 3 refs)',
-    '/learn — Tutoriales (5 lessons)',
-    '/feedback — Soporte / sugerencias',
+    '/start — Welcome',
+    '/track — Track external wallets',
+    '/signals — Official signals channel',
+    '/copy_auto — Auto copy (MANUAL/AUTO)',
+    '/capital — Capital per signal',
+    '/timezone — Timezone',
+    '/portfolio — Your portfolio (read-only HL)',
+    '/leaderboard — Top tracked wallets',
+    '/alerts_config — Alert granularity',
+    '/stats — Your personal stats',
+    '/share — Invite friends (Premium after 3 refs)',
+    '/learn — Tutorials (5 lessons)',
+    '/feedback — Support / suggestions',
     '',
-    '¿Algo no anda? /feedback',
+    'Something off? /feedback',
   ].join('\n');
 }
 

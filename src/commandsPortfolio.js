@@ -79,10 +79,10 @@ function clearUserAddress(userId) {
 function _menu(connected) {
   const rows = [];
   if (!connected) {
-    rows.push([{ text: '🔗 Conectar wallet read-only', callback_data: 'pf:connect' }]);
+    rows.push([{ text: '🔗 Connect read-only wallet', callback_data: 'pf:connect' }]);
   } else {
-    rows.push([{ text: '🔄 Refrescar', callback_data: 'pf:refresh' }]);
-    rows.push([{ text: '🔌 Desconectar', callback_data: 'pf:disconnect' }]);
+    rows.push([{ text: '🔄 Refresh', callback_data: 'pf:refresh' }]);
+    rows.push([{ text: '🔌 Disconnect', callback_data: 'pf:disconnect' }]);
   }
   return { inline_keyboard: rows };
 }
@@ -92,13 +92,13 @@ async function _showMenu(bot, chatId, userId) {
   if (!addr) {
     await bot.sendMessage(
       chatId,
-      '📊 *Tu portfolio*\n\nConectá una wallet (read-only) para ver tu equity y posiciones en HyperLiquid.',
+      '📊 *Your portfolio*\n\nConnect a wallet (read-only) to see your equity and positions on HyperLiquid.',
       { parse_mode: 'Markdown', reply_markup: _menu(false) }
     );
     return;
   }
   // Fetch + render
-  await bot.sendMessage(chatId, '⏳ Consultando HyperLiquid...');
+  await bot.sendMessage(chatId, '⏳ Querying HyperLiquid...');
   const p = await portfolio.fetchPortfolio(addr);
   await bot.sendMessage(chatId, portfolio.formatPortfolio(p), {
     parse_mode: 'Markdown',
@@ -117,7 +117,7 @@ async function _handleCallback(bot, cb) {
     sm.setState(chatId, STATE_PORTFOLIO_AWAITING_ADDR, { userId });
     await bot.sendMessage(
       chatId,
-      '📥 Pegame tu address (`0x` + 40 hex). Es read-only — nunca firmes nada acá.\n\n(escribí /cancel para volver)',
+      '📥 Paste your address (`0x` + 40 hex). Read-only — never sign anything here.\n\n(type /cancel to go back)',
       { parse_mode: 'Markdown' }
     );
     return;
@@ -128,7 +128,7 @@ async function _handleCallback(bot, cb) {
   }
   if (action === 'disconnect') {
     clearUserAddress(userId);
-    await bot.sendMessage(chatId, '🔌 Wallet desconectada.', { parse_mode: 'Markdown' });
+    await bot.sendMessage(chatId, '🔌 Wallet disconnected.', { parse_mode: 'Markdown' });
     await _showMenu(bot, chatId, userId);
     return;
   }
@@ -146,14 +146,14 @@ async function _handleAddressInput(bot, msg) {
   if (!portfolio.isValidAddress(text)) {
     await bot.sendMessage(
       chatId,
-      '⚠️ Dirección inválida. Tiene que ser `0x` + 40 hex.',
+      '⚠️ Invalid address. Must be `0x` + 40 hex chars.',
       { parse_mode: 'Markdown' }
     );
     return;
   }
   setUserAddress(userId, text);
   sm.reset(chatId);
-  await bot.sendMessage(chatId, '✅ Wallet conectada (read-only).');
+  await bot.sendMessage(chatId, '✅ Wallet connected (read-only).');
   await _showMenu(bot, chatId, userId);
 }
 

@@ -4,33 +4,34 @@
  * R-START — /start handler.
  *
  * Detects first-time vs recurring users (via onboarding.js JSON store):
- *   • First-time → full Spanish onboarding tutorial + 3-row inline keyboard
+ *   • First-time → full English onboarding tutorial + 3-row inline keyboard
  *                  + auto-detect TZ from Telegram's language_code (silent;
  *                  user can override later with /timezone).
- *   • Recurring  → compact dashboard ("Bienvenido de vuelta") with the same
- *                  3-row keyboard so the UX is consistent.
+ *   • Recurring  → compact dashboard ("Welcome back") with the same 3-row
+ *                  keyboard so the UX is consistent.
  *
- * Hero button label: "🍐 Abrir Pear Protocol".
+ * Hero button label: "🍐 Open Pear Protocol".
  * Hero URL: PEAR_HERO_URL env var (default https://app.pear.garden/?referral=BlackCatDeFi).
  * The label NEVER mentions "referral" or "BlackCat" — see alertButtons.js
  * for the same pattern in basket alerts.
  *
  * Inline-keyboard callbacks routed here:
- *   start:track_add    → opens the /track add-wallet flow
- *   start:track_list   → renders the user's tracked-wallet list
- *   start:tz_menu      → opens the /timezone help message
- *   start:status_view  → shows tracked-wallets count + bot status quick view
- *   mute:<addr>        → silences a tracked wallet (removes from /track list)
+ *   start:track_add        → opens the /track add-wallet flow
+ *   start:track_list       → renders the user's tracked-wallet list
+ *   start:tz_menu          → opens the /timezone help message
+ *   start:status_view      → shows tracked-wallets count + bot status
+ *   start:copytrading_menu → opens the /copy_trading top menu
+ *   start:learn_menu       → opens /learn
+ *   mute:<addr>            → silences a tracked wallet
  *
- * IMPORTANT: this handler REPLACES the legacy /start in bot.js. bot.js still
- * owns /menu (the inline-keyboard for personal wallet management on the
- * bot operator's own chat), but plain /start is exclusively R-START.
+ * R-EN — All user-facing strings now go through `t()` from `./i18n`.
  */
 
 const onboarding = require('./onboarding');
 const tzMgr = require('./timezoneManager');
 const wt = require('./walletTracker');
 const sm = require('./userStateMachine');
+const { t } = require('./i18n/index');
 // R-AUTOCOPY — referral capture + stats touch.
 const share = require('./share');
 const stats = require('./stats');
@@ -47,29 +48,27 @@ function _heroUrl() {
 /**
  * Build the inline keyboard for /start. Same 3-row layout for first-time
  * and recurring users — only the message text differs.
- *
- * Returns a Telegram inline_keyboard object suitable for reply_markup.
  */
 function buildStartKeyboard(/* isReturning unused — same layout */) {
   return {
     inline_keyboard: [
       [
-        { text: '🎯 Trackear wallet', callback_data: 'start:track_add' },
-        { text: '📋 Mis wallets', callback_data: 'start:track_list' },
+        { text: t('start.kb_track_add'), callback_data: 'start:track_add' },
+        { text: t('start.kb_track_list'), callback_data: 'start:track_list' },
       ],
       [
         // R-AUTOCOPY-MENU — unified Copy Trading entry replaces the separate
         // signals + copy_auto buttons. Inside the menu the user picks one of
         // 3 modes (BCD wallet / BCD Signals / custom wallets).
-        { text: '🤖 Copy Trading', callback_data: 'start:copytrading_menu' },
-        { text: '📊 Status', callback_data: 'start:status_view' },
+        { text: t('start.kb_copy_trading'), callback_data: 'start:copytrading_menu' },
+        { text: t('start.kb_status'), callback_data: 'start:status_view' },
       ],
       [
-        { text: '🌎 Mi TZ', callback_data: 'start:tz_menu' },
-        { text: '📚 Aprender', callback_data: 'start:learn_menu' },
+        { text: t('start.kb_tz'), callback_data: 'start:tz_menu' },
+        { text: t('start.kb_learn'), callback_data: 'start:learn_menu' },
       ],
       [
-        { text: '🍐 Abrir Pear Protocol', url: _heroUrl() },
+        { text: t('start.kb_pear'), url: _heroUrl() },
       ],
     ],
   };
@@ -77,26 +76,23 @@ function buildStartKeyboard(/* isReturning unused — same layout */) {
 
 function _formatFirstTimeText(detectedTz) {
   const lines = [
-    '🍐 *Pear Protocol Alerts*',
+    t('start.title'),
     '',
-    'Tu copiloto de trading on-chain. Te aviso cuando pasa algo importante en wallets que seguís — propias o de otros traders.',
+    t('start.first_time_intro'),
     '',
-    '*⚡ Qué podés hacer:*',
+    t('start.first_time_what'),
     '',
-    '🎯 Trackear wallets de top traders en HyperLiquid',
-    '📋 Recibir alertas en tiempo real cuando abren/cierran baskets',
-    '🔗 Copiar sus trades en 1 toque (con sus pares exactos en Pear)',
-    '🎯 Monitorear TP/SL y fondos disponibles',
-    '🏦 Alertas de borrow en HyperLend',
+    t('start.first_time_b1'),
+    t('start.first_time_b2'),
+    t('start.first_time_b3'),
+    t('start.first_time_b4'),
+    t('start.first_time_b5'),
     '',
-    '🌎 Configurá tu zona horaria con /timezone',
-    '📡 Empezá a trackear con /track',
+    t('start.first_time_tz_hint'),
+    t('start.first_time_track_hint'),
   ];
   if (detectedTz && detectedTz !== tzMgr.DEFAULT_TZ) {
-    lines.push(
-      '',
-      `🌎 Detecté tu zona horaria como \`${detectedTz}\`. Cambiala con /timezone si no es correcta.`
-    );
+    lines.push('', t('start.tz_detected', { tz: detectedTz }));
   }
   return lines.join('\n');
 }
@@ -105,14 +101,17 @@ function _formatRecurringText(userId) {
   const tz = tzMgr.getUserTz(userId);
   const wallets = wt.getUserWallets(userId);
   const lines = [
-    '🍐 *Pear Protocol Alerts*',
+    t('start.title'),
     '',
-    'Bienvenido de vuelta 👋',
+    t('start.recurring_welcome'),
     '',
-    '📊 *Tu setup actual:*',
-    `  🌎 TZ: \`${tz}\``,
-    `  📡 Wallets trackeadas: ${wallets.length}/${wt.MAX_WALLETS_PER_USER}`,
-    `  🟢 Bot status: activo`,
+    t('start.recurring_setup'),
+    t('start.recurring_tz', { tz }),
+    t('start.recurring_wallets', {
+      count: wallets.length,
+      max: wt.MAX_WALLETS_PER_USER,
+    }),
+    t('start.recurring_status'),
   ];
   return lines.join('\n');
 }
@@ -182,8 +181,7 @@ async function _handleCallback(bot, cb) {
     if (wallets.length >= wt.MAX_WALLETS_PER_USER) {
       await bot.sendMessage(
         chatId,
-        `🚫 Llegaste al máximo de ${wt.MAX_WALLETS_PER_USER} wallets.\n\n` +
-          'Remové alguna primero con /track → 📋 Mis wallets.',
+        t('start.track_max_reached', { max: wt.MAX_WALLETS_PER_USER }),
         { parse_mode: 'Markdown' }
       );
       return true;
@@ -191,12 +189,7 @@ async function _handleCallback(bot, cb) {
     sm.setState(chatId, sm.STATES.AWAITING_WALLET_ADDRESS, { userId });
     await bot.sendMessage(
       chatId,
-      '📡 *Trackear nueva wallet*\n\n' +
-        'Pegame la dirección (`0x...`) que querés seguir.\n\n' +
-        `💡 _Tip: podés trackear hasta ${wt.MAX_WALLETS_PER_USER} wallets de traders top._\n` +
-        '_Cuando abran una basket, te aviso al instante con\n' +
-        'un botón para copiar su trade._\n\n' +
-        '(escribí /cancel para volver)',
+      t('start.track_add_prompt', { max: wt.MAX_WALLETS_PER_USER }),
       { parse_mode: 'Markdown' }
     );
     return true;
@@ -205,19 +198,23 @@ async function _handleCallback(bot, cb) {
   if (action === 'track_list') {
     const wallets = wt.getUserWallets(userId);
     if (wallets.length === 0) {
-      await bot.sendMessage(
-        chatId,
-        '📋 No tenés wallets trackeadas todavía.\n\nUsá /track y tocá *🎯 Trackear wallet*.',
-        { parse_mode: 'Markdown' }
-      );
+      await bot.sendMessage(chatId, t('start.list_empty'), {
+        parse_mode: 'Markdown',
+      });
       return true;
     }
-    const lines = ['📋 *TUS WALLETS TRACKEADAS*', ''];
+    const lines = [t('start.list_header'), ''];
     for (const w of wallets) {
       const label = w.label ? ` — ${w.label}` : '';
       lines.push(`  • \`${w.address}\`${label}`);
     }
-    lines.push('', `Total: ${wallets.length}/${wt.MAX_WALLETS_PER_USER}`);
+    lines.push(
+      '',
+      t('start.list_total', {
+        count: wallets.length,
+        max: wt.MAX_WALLETS_PER_USER,
+      })
+    );
     await bot.sendMessage(chatId, lines.join('\n'), {
       parse_mode: 'Markdown',
     });
@@ -228,11 +225,13 @@ async function _handleCallback(bot, cb) {
     const current = tzMgr.getUserTz(userId);
     await bot.sendMessage(
       chatId,
-      '🌎 *Tu zona horaria*\n\n' +
-        `Actual: \`${current}\`\n\n` +
-        'Para cambiarla:\n' +
-        '  • `/timezone <IANA>` (ej. `/timezone America/Argentina/Buenos_Aires`)\n' +
-        '  • `/timezone auto` para detectarla',
+      [
+        t('start.tz_menu_title'),
+        '',
+        t('start.tz_menu_current', { tz: current }),
+        '',
+        t('start.tz_menu_howto'),
+      ].join('\n'),
       { parse_mode: 'Markdown' }
     );
     return true;
@@ -247,7 +246,7 @@ async function _handleCallback(bot, cb) {
         disable_web_page_preview: true,
       });
     } catch (_) {
-      await bot.sendMessage(chatId, 'Tocá /signals.', { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, t('start.tap_signals'), { parse_mode: 'Markdown' });
     }
     return true;
   }
@@ -257,7 +256,7 @@ async function _handleCallback(bot, cb) {
       const cmdCA = require('./commandsCopyAuto');
       await cmdCA.showMenu(bot, chatId, userId);
     } catch (_) {
-      await bot.sendMessage(chatId, 'Tocá /copy_auto.', { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, t('start.tap_copyauto'), { parse_mode: 'Markdown' });
     }
     return true;
   }
@@ -267,7 +266,7 @@ async function _handleCallback(bot, cb) {
       const cmdCT = require('./commandsCopyTrading');
       await cmdCT.showTopMenu(bot, chatId, userId);
     } catch (_) {
-      await bot.sendMessage(chatId, 'Tocá /copy_trading.', { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, t('start.tap_copytrading'), { parse_mode: 'Markdown' });
     }
     return true;
   }
@@ -281,10 +280,10 @@ async function _handleCallback(bot, cb) {
       if (typeof cmdLearn.showMenu === 'function') {
         await cmdLearn.showMenu(bot, chatId, userId);
       } else {
-        await bot.sendMessage(chatId, 'Tocá /learn para ver los tutoriales.', { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, t('start.tap_learn_full'), { parse_mode: 'Markdown' });
       }
     } catch (_) {
-      await bot.sendMessage(chatId, 'Tocá /learn.', { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, t('start.tap_learn'), { parse_mode: 'Markdown' });
     }
     return true;
   }
@@ -293,16 +292,19 @@ async function _handleCallback(bot, cb) {
     const wallets = wt.getUserWallets(userId);
     const tz = tzMgr.getUserTz(userId);
     const lines = [
-      '📊 *Alertas activas*',
+      t('start.status_title'),
       '',
-      `🟢 Bot: activo`,
-      `🌎 TZ: \`${tz}\``,
-      `📡 Wallets trackeadas: ${wallets.length}/${wt.MAX_WALLETS_PER_USER}`,
+      t('start.status_bot'),
+      t('start.status_tz', { tz }),
+      t('start.status_wallets', {
+        count: wallets.length,
+        max: wt.MAX_WALLETS_PER_USER,
+      }),
     ];
     if (wallets.length > 0) {
-      lines.push('', '_Recibís alerta cuando estas wallets abren o cierran baskets._');
+      lines.push('', t('start.status_recv'));
     } else {
-      lines.push('', 'Tocá *🎯 Trackear wallet* para empezar.');
+      lines.push('', t('start.status_empty_cta'));
     }
     await bot.sendMessage(chatId, lines.join('\n'), {
       parse_mode: 'Markdown',
@@ -324,7 +326,7 @@ async function _handleMuteCallback(bot, cb) {
   const userId = cb.from && cb.from.id ? cb.from.id : chatId;
   if (!chatId) return false;
   try {
-    await bot.answerCallbackQuery(cb.id, { text: 'Wallet silenciada.' });
+    await bot.answerCallbackQuery(cb.id, { text: t('start.muted_callback') });
   } catch (_) {}
   const addr = cb.data.slice(5).toLowerCase();
   let removed = 0;
@@ -334,14 +336,13 @@ async function _handleMuteCallback(bot, cb) {
   if (removed > 0) {
     await bot.sendMessage(
       chatId,
-      `🔕 Wallet \`${addr}\` silenciada. No vas a recibir más alertas de esta wallet.\n\n` +
-        '_Podés re-trackearla con /track cuando quieras._',
+      t('start.muted_wallet', { addr }),
       { parse_mode: 'Markdown' }
     );
   } else {
     await bot.sendMessage(
       chatId,
-      `ℹ️ Esa wallet ya no está en tu lista de trackeo.`,
+      t('start.not_in_list'),
       { parse_mode: 'Markdown' }
     );
   }

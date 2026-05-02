@@ -25,7 +25,7 @@ test('setUserTz persists and getUserTz returns it', () => {
 });
 
 test('setUserTz rejects invalid tz', () => {
-  assert.throws(() => tz.setUserTz(1, 'Mars/Olympus_Mons'), /inválida/);
+  assert.throws(() => tz.setUserTz(1, 'Mars/Olympus_Mons'), /Invalid timezone/i);
 });
 
 test('isValidTimezone gates correctly', () => {
@@ -66,11 +66,11 @@ test('formatLocalTime converts UTC to ART/AR offset (UTC-3)', () => {
   assert.match(out, /may|May/);
 });
 
-test('formatLocalTime renders Spanish weekday + month abbrev', () => {
+test('formatLocalTime renders English weekday + month abbrev', () => {
   // 2026-05-01 is a Friday
   const out = tz.formatLocalTime(1, '2026-05-01T12:00:00Z', 'UTC');
-  assert.match(out, /vie/i);
-  assert.match(out, /may/i);
+  assert.match(out, /Fri/);
+  assert.match(out, /May/);
   assert.match(out, /UTC/);
 });
 

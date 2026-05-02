@@ -127,3 +127,77 @@ test('findForbiddenInString catches violations', () => {
     []
   );
 });
+
+// ──────────────────────── R-EN extension ───────────────────────────────────
+test('R-EN: no Spanish characters in any user-facing string', () => {
+  const all = sanitizer.collectAllUserFacingStrings();
+  // Pure char-class regex: skip "configurable" word false-positive.
+  const re = /[áéíóúñ¿¡]/;
+  const violators = all.filter((s) => re.test(s));
+  if (violators.length > 0) {
+    console.error('Spanish-character leaks (sample):', violators.slice(0, 25));
+  }
+  assert.strictEqual(violators.length, 0);
+});
+
+test('R-EN: no idiomatic Spanish phrases in any user-facing string', () => {
+  const all = sanitizer.collectAllUserFacingStrings();
+  const phrases = [
+    /\bConectá\b/i,
+    /\bDesconectá\b/i,
+    /\bPegame\b/i,
+    /\bConfigurá\b/i,
+    /\bBienvenid[oa]\b/i,
+    /\btrackead\w*\b/i,
+    /\bquerés\b/i,
+    /\bpodés\b/i,
+    /\btenés\b/i,
+    /\busá\b/i,
+    /\btocá\b/i,
+    /\belegí\b/i,
+    /\bescribí\b/i,
+    /\bsetear\b/i,
+    /\bPosición\b/,
+    /\bcerrad[oa]\b/i,
+  ];
+  const violations = [];
+  for (const re of phrases) {
+    const hits = all.filter((s) => re.test(s));
+    if (hits.length > 0) violations.push({ re: re.toString(), hits: hits.slice(0, 3) });
+  }
+  if (violations.length > 0) {
+    console.error('Spanish phrase leaks:', violations);
+  }
+  assert.strictEqual(violations.length, 0);
+});
+
+test('R-EN: critical English CTAs render correctly in formatters', () => {
+  // Smoke a couple of formatters end-to-end and look for their English markers
+  const open = require('../src/openAlerts');
+  const ext = require('../src/externalWalletTracker');
+
+  const positions = [
+    { coin: 'BTC', side: 'SHORT', size: -1, entryPrice: 50000, leverage: 4 },
+    { coin: 'ETH', side: 'SHORT', size: -10, entryPrice: 3000, leverage: 4 },
+  ];
+  const openMsg = open.formatBasketOpenAlert('Whale 1', positions);
+  assert.match(openMsg, /NEW BASKET OPENED/);
+  assert.match(openMsg, /Composition/i);
+
+  const cfg = { address: '0x' + 'b'.repeat(40), label: 'Whale 1' };
+  const pos = {
+    coin: 'BTC',
+    side: 'LONG',
+    size: 1,
+    entryPx: 50000,
+    notional: 50000,
+    unrealizedPnl: 100,
+  };
+  const extOpen = ext.formatExternalOpenAlert(cfg, pos);
+  const extClose = ext.formatExternalCloseAlert(cfg, pos);
+  // Should be English ("opened"/"closed"/"intel"/etc), no Spanish words
+  for (const m of [extOpen, extClose]) {
+    assert.doesNotMatch(m, /[áéíóúñ]/);
+    assert.doesNotMatch(m, /\bPosición\b/);
+  }
+});

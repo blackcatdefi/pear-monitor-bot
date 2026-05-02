@@ -135,15 +135,15 @@ function formatStats(userId) {
   const maxSlots = share.getMaxSlots(userId);
   const refStats = share.getStats(userId);
   const lines = [
-    '📊 *Tus stats*',
+    '📊 *Your stats*',
     '',
-    `📅 Bot uso: ${s.daysActive} día${s.daysActive === 1 ? '' : 's'}`,
-    `📡 Wallets trackeadas: ${wallets.length}/${maxSlots}`,
-    `📨 Signals recibidas: ${s.signalsReceived}`,
-    `🍐 Trades copiados (clicks): ${s.copyClicks}`,
+    `📅 Bot usage: ${s.daysActive} day${s.daysActive === 1 ? '' : 's'}`,
+    `📡 Tracked wallets: ${wallets.length}/${maxSlots}`,
+    `📨 Signals received: ${s.signalsReceived}`,
+    `🍐 Trades copied (clicks): ${s.copyClicks}`,
     `🌎 TZ: \`${tz}\``,
-    `💬 Feedback enviado: ${s.feedbackCount}`,
-    `🎁 Referidos: ${refStats.count}${refStats.premium ? ' ✨ (Premium)' : ''}`,
+    `💬 Feedback sent: ${s.feedbackCount}`,
+    `🎁 Referrals: ${refStats.count}${refStats.premium ? ' ✨ (Premium)' : ''}`,
   ];
   return lines.join('\n');
 }

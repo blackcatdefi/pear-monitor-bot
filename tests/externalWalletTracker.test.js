@@ -82,7 +82,7 @@ test('formatExternalOpenAlert renders all fields', () => {
   const pos = { coin: 'BTC', side: 'LONG', entryPx: 65432.1, size: 0.5, notional: 32716, unrealizedPnl: 0 };
   const msg = tracker.formatExternalOpenAlert(cfg, pos);
   assert.match(msg, /EXTERNAL WALLET/);
-  assert.match(msg, /NUEVA POSICIÓN ABIERTA/);
+  assert.match(msg, /NEW POSITION OPENED/);
   assert.match(msg, /Whale 1/);
   assert.match(msg, /BTC LONG/);
   assert.match(msg, /\$65432\.10/);

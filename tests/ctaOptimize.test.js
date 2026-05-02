@@ -168,14 +168,14 @@ test('formatAmount: invalid input → null', () => {
 test('buildAlertKeyboard backward-compat: no opts emits hero without amount', () => {
   const kb = buttons.buildAlertKeyboard(shortBasket(), 'open');
   assert.ok(kb && Array.isArray(kb.inline_keyboard));
-  assert.equal(kb.inline_keyboard[0][0].text, '🍐 Copiar en Pear');
+  assert.equal(kb.inline_keyboard[0][0].text, '🍐 Copy on Pear');
   // URL should be legacy (no pre-fill)
   assert.ok(!kb.inline_keyboard[0][0].url.includes('amount='));
 });
 
 test('buildAlertKeyboard with capital: hero label includes amount', () => {
   const kb = buttons.buildAlertKeyboard(shortBasket(), 'open', { capital: 500 });
-  assert.equal(kb.inline_keyboard[0][0].text, '🍐 Copiar $500 en Pear');
+  assert.equal(kb.inline_keyboard[0][0].text, '🍐 Copy $500 on Pear');
   assert.ok(kb.inline_keyboard[0][0].url.includes('amount=500'));
 });
 
@@ -215,8 +215,8 @@ test('buildAlertKeyboard skips quick-amount row when capital is 0', () => {
 test('buildAlertKeyboard mixed-side basket: 2 hero rows, no quick amounts', () => {
   const kb = buttons.buildAlertKeyboard(mixedBasket(), 'open', { capital: 500 });
   // Mixed-side → hero row per side, no quick row
-  assert.equal(kb.inline_keyboard[0][0].text, '🍐 Copiar SHORTs $500 en Pear');
-  assert.equal(kb.inline_keyboard[1][0].text, '🍐 Copiar LONGs $500 en Pear');
+  assert.equal(kb.inline_keyboard[0][0].text, '🍐 Copy SHORTs $500 on Pear');
+  assert.equal(kb.inline_keyboard[1][0].text, '🍐 Copy LONGs $500 on Pear');
 });
 
 test('buildAlertKeyboard close events: no hero, no quick amounts', () => {
@@ -228,7 +228,7 @@ test('buildAlertKeyboard close events: no hero, no quick amounts', () => {
   assert.ok(kb && Array.isArray(kb.inline_keyboard));
   for (const row of kb.inline_keyboard) {
     for (const btn of row) {
-      assert.ok(!/Copiar/.test(btn.text || ''), `unexpected hero on close: ${btn.text}`);
+      assert.ok(!/Copy/.test(btn.text || ''), `unexpected hero on close: ${btn.text}`);
     }
   }
 });
@@ -272,7 +272,7 @@ test('copyAlertBuilder OPEN with capital → hero shows amount + quick row', () 
     event: 'OPEN',
   });
   const kb = result.keyboard.inline_keyboard;
-  assert.equal(kb[0][0].text, '🍐 Copiar $500 en Pear');
+  assert.equal(kb[0][0].text, '🍐 Copy $500 on Pear');
   assert.ok(kb[0][0].url.includes('amount=500'));
   // Quick-amount row is row[1] (or row[2] if hero is split)
   const quickRow = kb[1];
@@ -325,7 +325,7 @@ test('copyAlertBuilder CLOSE event: no hero, no quick amounts', () => {
   const kb = result.keyboard.inline_keyboard;
   for (const row of kb) {
     for (const btn of row) {
-      assert.ok(!/Copiar/.test(btn.text || ''), 'no Copiar button on CLOSE');
+      assert.ok(!/Copy/.test(btn.text || ''), 'no Copy button on CLOSE');
       assert.ok(!/^[0-9.]+x \(/.test(btn.text || ''), 'no quick-amount on CLOSE');
     }
   }

@@ -131,7 +131,7 @@ function buildDigest(userId) {
     '',
     `🌎 ${tzMgr.formatLocalTime(userId)}`,
     '',
-    `📡 Wallets trackeadas: ${wallets.length}`,
+    `📡 Tracked wallets: ${wallets.length}`,
   ];
   if (wallets.length > 0) {
     lines.push('');
@@ -140,13 +140,13 @@ function buildDigest(userId) {
       const a = String(w.address);
       lines.push(`  • \`${a.slice(0, 6)}...${a.slice(-4)}\`${lbl}`);
     }
-    if (wallets.length > 5) lines.push(`  _... y ${wallets.length - 5} más_`);
+    if (wallets.length > 5) lines.push(`  _... and ${wallets.length - 5} more_`);
   }
   lines.push('');
   lines.push(
-    '_Para configurar qué alertas recibir: /alerts_config_'
+    '_To pick which alerts to receive: /alerts_config_'
   );
-  lines.push('_Para cambiar la hora del digest: /timezone_');
+  lines.push('_To change the digest time: /timezone_');
   return lines.join('\n');
 }
 

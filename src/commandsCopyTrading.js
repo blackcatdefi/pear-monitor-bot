@@ -58,7 +58,7 @@ function _renderTopMenu(userId) {
   const lines = [
     '🤖 *Copy Trading*',
     '',
-    'Elegí qué copiar:',
+    'Pick what to copy:',
     '',
     `🐈‍⬛ *BCD Wallet*  ${bcd && bcd.enabled ? HF_HEADER_OK : HF_HEADER_OFF}`,
     `   Capital: ${_fmtMoney(bcd ? bcd.capital_usdc : 0)} · Wallet: \`${_shortAddr(store.BCD_WALLET)}\``,
@@ -67,17 +67,17 @@ function _renderTopMenu(userId) {
     `   Capital: ${_fmtMoney(sig ? sig.capital_usdc : 0)} · @${store.BCD_SIGNALS_CHANNEL}`,
     '',
     `👥 *Custom Wallets*  ${customsActive > 0 ? HF_HEADER_OK : HF_HEADER_OFF}`,
-    `   ${customsActive}/${customs.length} activas · Total: ${_fmtMoney(customsTotalCap)}`,
+    `   ${customsActive}/${customs.length} active · Total: ${_fmtMoney(customsTotalCap)}`,
     '',
     '─────────────',
-    '*Risk preset global:* SL 50% / Trailing 10% activación 30%',
+    '*Global risk preset:* SL 50% / Trailing 10% activation 30%',
   ];
   const keyboard = {
     inline_keyboard: [
       [{ text: '🐈‍⬛ BCD Wallet', callback_data: 'copytrade:bcd' }],
       [{ text: '📡 BCD Signals Channel', callback_data: 'copytrade:sig' }],
       [{ text: '👥 Custom Wallets', callback_data: 'copytrade:custom' }],
-      [{ text: 'ℹ️ Cómo funciona', callback_data: 'copytrade:howto' }],
+      [{ text: 'ℹ️ How it works', callback_data: 'copytrade:howto' }],
     ],
   };
   return { text: lines.join('\n'), keyboard };
@@ -93,29 +93,29 @@ function _renderBcdMenu(userId) {
   const lines = [
     '🐈‍⬛ *Copy BCD Wallet*',
     '',
-    `Tracking automático de la wallet \`${_shortAddr(store.BCD_WALLET)}\`.`,
-    'Cuando abre/cierra basket, recibís alert con link Pear preconfigurado.',
+    `Auto-tracking wallet \`${_shortAddr(store.BCD_WALLET)}\`.`,
+    'When it opens/closes a basket, you get an alert with a pre-configured Pear link.',
     '',
-    `Tu capital: ${_fmtMoney(cap)}`,
-    `Estado: ${enabled ? '🟢 ENABLED' : '⚪ DISABLED'}`,
+    `Your capital: ${_fmtMoney(cap)}`,
+    `Status: ${enabled ? '🟢 ENABLED' : '⚪ DISABLED'}`,
     `Mode: ${mode}`,
   ];
   const keyboard = {
     inline_keyboard: [
-      [{ text: '💰 Cambiar capital', callback_data: 'copytrade:bcd:cap_help' }],
+      [{ text: '💰 Change capital', callback_data: 'copytrade:bcd:cap_help' }],
       [
         {
-          text: mode === 'AUTO' ? '🔄 Modo: AUTO (cambiar a MANUAL)' : '🔄 Modo: MANUAL (cambiar a AUTO)',
+          text: mode === 'AUTO' ? '🔄 Mode: AUTO (switch to MANUAL)' : '🔄 Mode: MANUAL (switch to AUTO)',
           callback_data: 'copytrade:bcd:toggle_mode',
         },
       ],
       [
         {
-          text: enabled ? '🚦 Desactivar' : '🚦 Activar',
+          text: enabled ? '🚦 Disable' : '🚦 Enable',
           callback_data: 'copytrade:bcd:toggle_enabled',
         },
       ],
-      [{ text: '← Volver', callback_data: 'copytrade:menu' }],
+      [{ text: '← Back', callback_data: 'copytrade:menu' }],
     ],
   };
   return { text: lines.join('\n'), keyboard };
@@ -129,36 +129,36 @@ function _renderSigMenu(userId) {
   const lines = [
     '📡 *Copy BCD Signals Channel*',
     '',
-    `Lectura automática de @${store.BCD_SIGNALS_CHANNEL}.`,
-    'Cuando se publica una signal con link Pear,',
-    'te llega alert inmediato con link copiado y tu capital.',
+    `Auto-reading @${store.BCD_SIGNALS_CHANNEL}.`,
+    'When a signal with a Pear link is posted,',
+    'you get an instant alert with the copied link and your capital.',
     '',
-    `Tu capital: ${_fmtMoney(cap)}`,
-    `Estado: ${enabled ? '🟢 ENABLED' : '⚪ DISABLED'}`,
+    `Your capital: ${_fmtMoney(cap)}`,
+    `Status: ${enabled ? '🟢 ENABLED' : '⚪ DISABLED'}`,
     `Mode: ${mode}`,
   ];
   const keyboard = {
     inline_keyboard: [
       [
         {
-          text: '📲 Abrir canal',
+          text: '📲 Open channel',
           url: `https://t.me/${store.BCD_SIGNALS_CHANNEL}`,
         },
       ],
-      [{ text: '💰 Cambiar capital', callback_data: 'copytrade:sig:cap_help' }],
+      [{ text: '💰 Change capital', callback_data: 'copytrade:sig:cap_help' }],
       [
         {
-          text: mode === 'AUTO' ? '🔄 Modo: AUTO (cambiar a MANUAL)' : '🔄 Modo: MANUAL (cambiar a AUTO)',
+          text: mode === 'AUTO' ? '🔄 Mode: AUTO (switch to MANUAL)' : '🔄 Mode: MANUAL (switch to AUTO)',
           callback_data: 'copytrade:sig:toggle_mode',
         },
       ],
       [
         {
-          text: enabled ? '🚦 Desactivar' : '🚦 Activar',
+          text: enabled ? '🚦 Disable' : '🚦 Enable',
           callback_data: 'copytrade:sig:toggle_enabled',
         },
       ],
-      [{ text: '← Volver', callback_data: 'copytrade:menu' }],
+      [{ text: '← Back', callback_data: 'copytrade:menu' }],
     ],
   };
   return { text: lines.join('\n'), keyboard };
@@ -170,22 +170,22 @@ function _renderCustomMenu(userId) {
   const lines = [
     '👥 *Copy Custom Wallets*',
     '',
-    `Wallets que estás copiando: ${customs.length}/${store.MAX_CUSTOM_PER_USER}`,
+    `Wallets you're copying: ${customs.length}/${store.MAX_CUSTOM_PER_USER}`,
     '',
   ];
   if (customs.length === 0) {
-    lines.push('_Aún no agregaste ninguna._');
+    lines.push('_You haven\'t added any yet._');
   } else {
     customs.forEach((entry, idx) => {
       const tag = entry.enabled ? '🟢 ON' : '⚪ OFF';
       lines.push(
-        `${idx + 1}. \`${_shortAddr(entry.ref)}\` (${entry.label || 'sin label'}) · ${_fmtMoney(entry.capital_usdc)} · ${tag}`
+        `${idx + 1}. \`${_shortAddr(entry.ref)}\` (${entry.label || 'no label'}) · ${_fmtMoney(entry.capital_usdc)} · ${tag}`
       );
     });
   }
   const rows = [];
   if (customs.length < store.MAX_CUSTOM_PER_USER) {
-    rows.push([{ text: '➕ Agregar wallet', callback_data: 'copytrade:custom:add' }]);
+    rows.push([{ text: '➕ Add wallet', callback_data: 'copytrade:custom:add' }]);
   }
   for (const entry of customs) {
     const short = _shortAddr(entry.ref);
@@ -200,34 +200,34 @@ function _renderCustomMenu(userId) {
       },
     ]);
   }
-  rows.push([{ text: '← Volver', callback_data: 'copytrade:menu' }]);
+  rows.push([{ text: '← Back', callback_data: 'copytrade:menu' }]);
   return { text: lines.join('\n'), keyboard: { inline_keyboard: rows } };
 }
 
 function _renderHowto() {
   const lines = [
-    'ℹ️ *Cómo funciona Copy Trading*',
+    'ℹ️ *How Copy Trading works*',
     '',
     '*3 modes:*',
     '',
-    '🐈‍⬛ *BCD Wallet* — el bot mira la wallet de BCD on-chain (HyperLiquid) cada 60s. Cuando abre/cierra basket, te llega alert.',
+    '🐈‍⬛ *BCD Wallet* — the bot watches BCD\'s on-chain wallet (HyperLiquid) every 60s. When it opens/closes a basket, you get an alert.',
     '',
-    '📡 *BCD Signals* — el bot lee el canal público @BlackCatDeFiSignals cada 30s. Cuando hay signal con link Pear, te llega.',
+    '📡 *BCD Signals* — the bot reads the public channel @BlackCatDeFiSignals every 30s. When there\'s a signal with a Pear link, you get it.',
     '',
-    '👥 *Custom Wallets* — agregás cualquier wallet 0x... y el bot la trackea cada 60s con tu capital configurado.',
+    '👥 *Custom Wallets* — add any 0x... wallet and the bot tracks it every 60s with your configured capital.',
     '',
     '*Modes (MANUAL vs AUTO):*',
-    '  • MANUAL — botón "Copiar en Pear" estándar.',
-    '  • AUTO — alert pre-armado con wording de "lo tengo todo listo, vos firmá".',
+    '  • MANUAL — standard "Copy on Pear" button.',
+    '  • AUTO — pre-armed alert with "everything\'s ready, you sign" wording.',
     '',
-    '*Risk preset global:* SL 50% basket / Trailing 10% activación 30%.',
+    '*Global risk preset:* SL 50% basket / Trailing 10% activation 30%.',
     '',
-    '⚠️ Pear no expone API pública de execution → vos firmás siempre desde tu wallet.',
+    '⚠️ Pear has no public execution API → you always sign from your wallet.',
   ];
   return {
     text: lines.join('\n'),
     keyboard: {
-      inline_keyboard: [[{ text: '← Volver', callback_data: 'copytrade:menu' }]],
+      inline_keyboard: [[{ text: '← Back', callback_data: 'copytrade:menu' }]],
     },
   };
 }
@@ -292,7 +292,7 @@ async function _handleCallback(bot, cb) {
     if (sub === 'cap_help') {
       await bot.sendMessage(
         chatId,
-        `💰 Setear capital:\n\nUsá: \`/capital_bcd <monto>\`  (ej. \`/capital_bcd 250\`)\n\nMin: $${store.MIN_CAPITAL} · Max: $${store.MAX_CAPITAL.toLocaleString()}`,
+        `💰 Set capital:\n\nUsage: \`/capital_bcd <amount>\`  (e.g. \`/capital_bcd 250\`)\n\nMin: $${store.MIN_CAPITAL} · Max: $${store.MAX_CAPITAL.toLocaleString()}`,
         { parse_mode: 'Markdown' }
       );
       return;
@@ -317,7 +317,7 @@ async function _handleCallback(bot, cb) {
     if (sub === 'cap_help') {
       await bot.sendMessage(
         chatId,
-        `💰 Setear capital:\n\nUsá: \`/capital_signals <monto>\`  (ej. \`/capital_signals 250\`)\n\nMin: $${store.MIN_CAPITAL} · Max: $${store.MAX_CAPITAL.toLocaleString()}`,
+        `💰 Set capital:\n\nUsage: \`/capital_signals <amount>\`  (e.g. \`/capital_signals 250\`)\n\nMin: $${store.MIN_CAPITAL} · Max: $${store.MAX_CAPITAL.toLocaleString()}`,
         { parse_mode: 'Markdown' }
       );
       return;
@@ -343,7 +343,7 @@ async function _handleCallback(bot, cb) {
       sm.setState(userId, sm.STATES.COPY_TRADE_AWAIT_ADDRESS, { msgId });
       await bot.sendMessage(
         chatId,
-        '👥 Pegame la address de la wallet a copiar (debe empezar con `0x` y tener 40 hex):',
+        '👥 Send the wallet address to copy (must start with `0x` and be 40 hex chars):',
         { parse_mode: 'Markdown' }
       );
       return;
@@ -382,7 +382,7 @@ async function _handleTextInput(bot, msg) {
     if (!/^0x[a-fA-F0-9]{40}$/.test(text)) {
       await bot.sendMessage(
         chatId,
-        '⚠️ Address inválida. Debe ser `0x` + 40 hex.',
+        '⚠️ Invalid address. Must be `0x` + 40 hex chars.',
         { parse_mode: 'Markdown' }
       );
       return true;
@@ -390,7 +390,7 @@ async function _handleTextInput(bot, msg) {
     sm.setState(userId, sm.STATES.COPY_TRADE_AWAIT_LABEL, { address: text.toLowerCase() });
     await bot.sendMessage(
       chatId,
-      'Label opcional para esa wallet (ej. "Whale 1"). O respondé `skip`.',
+      'Optional label for this wallet (e.g. "Whale 1"). Or reply `skip`.',
       { parse_mode: 'Markdown' }
     );
     return true;
@@ -405,7 +405,7 @@ async function _handleTextInput(bot, msg) {
     sm.setState(userId, sm.STATES.COPY_TRADE_AWAIT_CAPITAL, { address, label });
     await bot.sendMessage(
       chatId,
-      `Capital a usar para esta wallet (USDC). Min ${store.MIN_CAPITAL}, Max ${store.MAX_CAPITAL.toLocaleString()}. Default: ${store.DEFAULT_CAPITAL}.\n\nRespondé un número o "default".`,
+      `Capital to use for this wallet (USDC). Min ${store.MIN_CAPITAL}, Max ${store.MAX_CAPITAL.toLocaleString()}. Default: ${store.DEFAULT_CAPITAL}.\n\nReply with a number or "default".`,
       { parse_mode: 'Markdown' }
     );
     return true;
@@ -418,7 +418,7 @@ async function _handleTextInput(bot, msg) {
       const cleaned = text.replace(/[\$,\s]/g, '');
       const n = parseFloat(cleaned);
       if (!Number.isFinite(n)) {
-        await bot.sendMessage(chatId, '⚠️ Monto inválido. Probá de nuevo o "default".');
+        await bot.sendMessage(chatId, '⚠️ Invalid amount. Try again or "default".');
         return true;
       }
       capital = n;
@@ -432,7 +432,7 @@ async function _handleTextInput(bot, msg) {
       sm.reset(userId);
       await bot.sendMessage(
         chatId,
-        `✅ Wallet \`${data.address.slice(0, 6)}...${data.address.slice(-4)}\` agregada con capital $${Math.round(capital).toLocaleString()} y ENABLED.`,
+        `✅ Wallet \`${data.address.slice(0, 6)}...${data.address.slice(-4)}\` added with capital $${Math.round(capital).toLocaleString()} and ENABLED.`,
         { parse_mode: 'Markdown' }
       );
       const menu = _renderCustomMenu(userId);
@@ -442,7 +442,7 @@ async function _handleTextInput(bot, msg) {
       });
     } catch (e) {
       sm.reset(userId);
-      await bot.sendMessage(chatId, `⚠️ ${e.message || 'No pude guardar la wallet.'}`);
+      await bot.sendMessage(chatId, `⚠️ ${e.message || 'Failed to save wallet.'}`);
     }
     return true;
   }
@@ -461,7 +461,7 @@ function _handleCapitalCmd(type, bot, msg) {
     const cur = store.getTarget(userId, type) || { capital_usdc: store.DEFAULT_CAPITAL };
     bot.sendMessage(
       chatId,
-      `Capital actual: ${_fmtMoney(cur.capital_usdc)}\n\nRango: $${store.MIN_CAPITAL} – $${store.MAX_CAPITAL.toLocaleString()}\n\nUsá: \`<comando> <monto>\``,
+      `Current capital: ${_fmtMoney(cur.capital_usdc)}\n\nRange: $${store.MIN_CAPITAL} – $${store.MAX_CAPITAL.toLocaleString()}\n\nUsage: \`<command> <amount>\``,
       { parse_mode: 'Markdown' }
     );
     return;
@@ -471,11 +471,11 @@ function _handleCapitalCmd(type, bot, msg) {
     const next = store.setTarget(userId, type, null, { capital_usdc: cleaned });
     bot.sendMessage(
       chatId,
-      `✅ Capital actualizado: ${_fmtMoney(next.capital_usdc)}.`,
+      `✅ Capital updated: ${_fmtMoney(next.capital_usdc)}.`,
       { parse_mode: 'Markdown' }
     );
   } catch (e) {
-    bot.sendMessage(chatId, `⚠️ ${e.message || 'Monto inválido.'}`);
+    bot.sendMessage(chatId, `⚠️ ${e.message || 'Invalid amount.'}`);
   }
 }
 

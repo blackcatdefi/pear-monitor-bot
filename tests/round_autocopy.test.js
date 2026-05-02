@@ -167,16 +167,16 @@ test('copyAutoStore: setEnabled / setMode persists config', () => {
 
 test('copyAutoStore: setMode rejects invalid mode', () => {
   _resetAll();
-  assert.throws(() => copyAutoStore.setMode(1, 'CRAZY'), /MANUAL o AUTO/);
+  assert.throws(() => copyAutoStore.setMode(1, 'CRAZY'), /MANUAL or AUTO/);
 });
 
 test('copyAutoStore: validateCapital boundaries', () => {
   assert.strictEqual(copyAutoStore.validateCapital(100), 100);
   assert.strictEqual(copyAutoStore.validateCapital(10), 10);
   assert.strictEqual(copyAutoStore.validateCapital(50000), 50000);
-  assert.throws(() => copyAutoStore.validateCapital(5), /mínimo/i);
-  assert.throws(() => copyAutoStore.validateCapital(60000), /máximo/i);
-  assert.throws(() => copyAutoStore.validateCapital('abc'), /inválido/i);
+  assert.throws(() => copyAutoStore.validateCapital(5), /Minimum amount/i);
+  assert.throws(() => copyAutoStore.validateCapital(60000), /Maximum amount/i);
+  assert.throws(() => copyAutoStore.validateCapital('abc'), /Invalid amount/i);
 });
 
 test('copyAutoStore: setCapital strips/validates', () => {
@@ -210,7 +210,7 @@ test('copyAuto: buildManualMessage renders capital + SL', () => {
   };
   const cfg = { capital_usdc: 250, sl_pct: 50, trailing_pct: 10, trailing_activation_pct: 30 };
   const msg = copyAuto.buildManualMessage(sig, cfg, 1);
-  assert.match(msg, /NUEVA SIGNAL OFICIAL #7/);
+  assert.match(msg, /NEW OFFICIAL SIGNAL #7/);
   assert.match(msg, /\$250 USDC/);
   assert.match(msg, /BTC SHORT/);
   assert.match(msg, /ETH SHORT/);
@@ -317,7 +317,7 @@ test('portfolioFetcher: formatPortfolio renders empty positions', () => {
     positions: [],
   };
   const out = portfolioFetcher.formatPortfolio(p);
-  assert.match(out, /Sin posiciones abiertas/);
+  assert.match(out, /No open positions/i);
   assert.match(out, /\$1,000/);
 });
 
@@ -343,7 +343,7 @@ test('portfolioFetcher: formatPortfolio renders positions with PnL', () => {
 test('portfolioFetcher: fetchPortfolio rejects invalid address', async () => {
   const r = await portfolioFetcher.fetchPortfolio('0xbad');
   assert.strictEqual(r.ok, false);
-  assert.match(r.error, /inválida/i);
+  assert.match(r.error, /Invalid address/i);
 });
 
 // ---------- leaderboard ----------
@@ -353,7 +353,7 @@ test('leaderboard: empty when no wallets', () => {
   const lb = leaderboard.getLeaderboard();
   assert.deepStrictEqual(lb, []);
   const fmt = leaderboard.formatLeaderboard(lb);
-  assert.match(fmt, /Aún no hay suficientes datos/);
+  assert.match(fmt, /Not enough data/i);
 });
 
 test('leaderboard: ranks by tracker count descending', () => {
@@ -442,7 +442,7 @@ test('alertsConfig: toggle flips current state', () => {
 
 test('alertsConfig: setCategory rejects unknown category', () => {
   _resetAll();
-  assert.throws(() => alertsConfig.setCategory(1, 'bogus', true), /Categoría desconocida/);
+  assert.throws(() => alertsConfig.setCategory(1, 'bogus', true), /Unknown category/i);
 });
 
 // ---------- share / referrals ----------
@@ -492,7 +492,7 @@ test('learn: 5 lessons exist', () => {
 test('learn: getLesson by index', () => {
   const l = learn.getLesson(0);
   assert.ok(l);
-  assert.match(l.title, /trackear/i);
+  assert.match(l.title, /track a wallet/i);
 });
 
 test('learn: getLesson out-of-bounds returns null', () => {
@@ -500,23 +500,23 @@ test('learn: getLesson out-of-bounds returns null', () => {
   assert.strictEqual(learn.getLesson(-1), null);
 });
 
-test('learn: formatLesson includes "Lección N de M"', () => {
+test('learn: formatLesson includes "Lesson N of M"', () => {
   const out = learn.formatLesson(0);
-  assert.match(out, /Lección 1 de 5/);
+  assert.match(out, /Lesson 1 of 5/);
 });
 
-test('learn: buildKeyboard pagination — first lesson has no Anterior', () => {
+test('learn: buildKeyboard pagination — first lesson has no Previous', () => {
   const kb = learn.buildKeyboard(0);
   const allBtns = kb.inline_keyboard.flat().map((b) => b.text);
-  assert.ok(!allBtns.some((t) => t.includes('Anterior')));
-  assert.ok(allBtns.some((t) => t.includes('Siguiente')));
+  assert.ok(!allBtns.some((t) => t.includes('Previous')));
+  assert.ok(allBtns.some((t) => t.includes('Next')));
 });
 
-test('learn: buildKeyboard pagination — last lesson has no Siguiente', () => {
+test('learn: buildKeyboard pagination — last lesson has no Next', () => {
   const kb = learn.buildKeyboard(4);
   const allBtns = kb.inline_keyboard.flat().map((b) => b.text);
-  assert.ok(allBtns.some((t) => t.includes('Anterior')));
-  assert.ok(!allBtns.some((t) => t.includes('Siguiente')));
+  assert.ok(allBtns.some((t) => t.includes('Previous')));
+  assert.ok(!allBtns.some((t) => t.includes('Next')));
 });
 
 test('learn: buildIndexKeyboard renders 5 rows', () => {
@@ -557,7 +557,7 @@ test('feedback: forwardFeedback delivers via notify', async () => {
   });
   assert.strictEqual(r.ok, true);
   assert.strictEqual(calls[0].uid, 12345);
-  assert.match(calls[0].body, /FEEDBACK USUARIO/);
+  assert.match(calls[0].body, /USER FEEDBACK/);
   assert.match(calls[0].body, /great bot/);
   assert.match(calls[0].body, /@alice/);
   delete process.env.OWNER_USER_ID;
@@ -567,7 +567,7 @@ test('feedback: truncate caps at MAX_FEEDBACK_LEN', () => {
   const big = 'x'.repeat(3000);
   const out = feedback.truncate(big);
   assert.ok(out.length <= feedback.MAX_FEEDBACK_LEN + 50);
-  assert.match(out, /truncado/);
+  assert.match(out, /truncated/);
 });
 
 test('feedback: forwardFeedback returns error when notify missing', async () => {
@@ -602,10 +602,10 @@ test('stats: formatStats includes user-facing labels', () => {
   _resetAll();
   stats.touch(8);
   const out = stats.formatStats(8);
-  assert.match(out, /Bot uso/);
-  assert.match(out, /Wallets trackeadas/);
-  assert.match(out, /Signals recibidas/);
-  assert.match(out, /Trades copiados/);
+  assert.match(out, /Bot usage/);
+  assert.match(out, /Tracked wallets/i);
+  assert.match(out, /Signals received/i);
+  assert.match(out, /Trades copied/i);
 });
 
 // ---------- dailyDigest ----------
@@ -637,7 +637,7 @@ test('dailyDigest: buildDigest renders wallets count', () => {
   wt.addWallet(13, '0x' + 'f'.repeat(40), 'foo');
   const body = dailyDigest.buildDigest(13);
   assert.match(body, /Daily digest/);
-  assert.match(body, /Wallets trackeadas: 1/);
+  assert.match(body, /Tracked wallets: 1/);
 });
 
 test('dailyDigest: pollOnce sends to opted-in users', async () => {
@@ -671,7 +671,7 @@ test('sanitizer: R-AUTOCOPY new modules pass forbidden-term scan', () => {
 test('sanitizer: @BlackCatDeFiSignals handle is allowed', () => {
   const sanitizer = require('../src/sanitizer');
   assert.deepStrictEqual(
-    sanitizer.findForbiddenInString('Suscribite a @BlackCatDeFiSignals'),
+    sanitizer.findForbiddenInString('Subscribe to @BlackCatDeFiSignals'),
     []
   );
 });

@@ -102,7 +102,7 @@ function getUserTz(userId) {
  */
 function setUserTz(userId, tz) {
   if (userId == null) throw new Error('userId required');
-  if (!isValidTimezone(tz)) throw new Error(`Timezone inválida: ${tz}`);
+  if (!isValidTimezone(tz)) throw new Error(`Invalid timezone: ${tz}`);
   const s = _load();
   s[String(userId)] = { tz, set_at: Date.now() };
   _save();
@@ -157,11 +157,11 @@ function detectFromLangCode(langCode) {
   return DEFAULT_TZ;
 }
 
-const _MONTH_ES = [
-  'ene', 'feb', 'mar', 'abr', 'may', 'jun',
-  'jul', 'ago', 'sep', 'oct', 'nov', 'dic',
+const _MONTH_EN = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
 ];
-const _DAY_ES = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
+const _DAY_EN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 /**
  * Pick a short timezone abbreviation (e.g. 'ART', 'BRT', 'EST').
@@ -215,15 +215,11 @@ function formatLocalTime(userId, utcIso, overrideTz) {
     let hour = get('hour').padStart(2, '0');
     const min = get('minute').padStart(2, '0');
     if (hour === '24') hour = '00'; // Intl edge-case fix
-    // Map English weekday short → Spanish short (matches existing UTC footer style)
-    const wkMap = {
-      Mon: 'lun', Tue: 'mar', Wed: 'mié', Thu: 'jue',
-      Fri: 'vie', Sat: 'sáb', Sun: 'dom',
-    };
-    const dayEs = wkMap[weekday] || weekday;
-    const monEs = _MONTH_ES[mIdx] || '?';
+    // English short weekday is already returned by Intl en-GB above.
+    const dayEn = weekday || _DAY_EN[date.getUTCDay()] || '?';
+    const monEn = _MONTH_EN[mIdx] || '?';
     const tzAbbrev = _shortTzAbbrev(tz, date);
-    parts = `${dayEs} ${day} ${monEs} ${year} - ${hour}:${min} ${tzAbbrev}`;
+    parts = `${dayEn} ${day} ${monEn} ${year} - ${hour}:${min} ${tzAbbrev}`;
   } catch (_) {
     parts = date.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
   }

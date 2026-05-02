@@ -10,32 +10,32 @@ function createBot(token, hlApi, monitor, hlendApi = null) {
 
   // Register bot commands menu (R-AUTOCOPY: 14 user cmds + 11 operator cmds)
   bot.setMyCommands([
-    { command: 'start',         description: '🍐 Inicio' },
-    { command: 'track',         description: '🎯 Trackear wallets externas' },
-    { command: 'signals',       description: '📡 Canal oficial de signals' },
-    { command: 'copy_auto',     description: '🤖 Copy automático (MANUAL/AUTO)' },
-    { command: 'capital',       description: '💰 Capital por signal' },
-    { command: 'timezone',      description: '🌐 Zona horaria' },
-    { command: 'portfolio',     description: '📊 Tu portfolio (read-only)' },
-    { command: 'leaderboard',   description: '🏆 Top wallets trackeadas' },
-    { command: 'alerts_config', description: '🔔 Granularidad de alertas' },
-    { command: 'stats',         description: '📈 Tus stats personales' },
-    { command: 'share',         description: '🎁 Invitar amigos' },
-    { command: 'learn',         description: '📚 Tutoriales' },
-    { command: 'feedback',      description: '💬 Soporte / sugerencias' },
-    { command: 'help',          description: '🆘 Ayuda' },
+    { command: 'start',         description: '🍐 Start' },
+    { command: 'track',         description: '🎯 Track external wallets' },
+    { command: 'signals',       description: '📡 Official signals channel' },
+    { command: 'copy_auto',     description: '🤖 Copy auto (MANUAL/AUTO)' },
+    { command: 'capital',       description: '💰 Capital per signal' },
+    { command: 'timezone',      description: '🌐 Timezone' },
+    { command: 'portfolio',     description: '📊 Your portfolio (read-only)' },
+    { command: 'leaderboard',   description: '🏆 Top tracked wallets' },
+    { command: 'alerts_config', description: '🔔 Alert granularity' },
+    { command: 'stats',         description: '📈 Your personal stats' },
+    { command: 'share',         description: '🎁 Invite friends' },
+    { command: 'learn',         description: '📚 Tutorials' },
+    { command: 'feedback',      description: '💬 Support / suggestions' },
+    { command: 'help',          description: '🆘 Help' },
     // Operator commands (BCD personal)
     { command: 'menu',          description: '⚙️ Operator menu' },
-    { command: 'positions',     description: '📊 Posiciones abiertas' },
-    { command: 'balance',       description: '💰 Fondos disponibles' },
-    { command: 'wallets',       description: '📋 Wallets monitoreadas' },
-    { command: 'check',         description: '🔍 Chequear ahora' },
+    { command: 'positions',     description: '📊 Open positions' },
+    { command: 'balance',       description: '💰 Available funds' },
+    { command: 'wallets',       description: '📋 Monitored wallets' },
+    { command: 'check',         description: '🔍 Check now' },
     { command: 'borrow',        description: '🏦 HyperLend Borrow' },
-    { command: 'history',       description: '📜 Últimos cierres' },
-    { command: 'pnl',           description: '💰 PnL por período' },
-    { command: 'status',        description: '✅ Health del bot' },
-    { command: 'export',        description: '📤 Exportar CSV' },
-    { command: 'summary',       description: '📊 Resumen semanal' },
+    { command: 'history',       description: '📜 Recent closes' },
+    { command: 'pnl',           description: '💰 PnL by period' },
+    { command: 'status',        description: '✅ Bot health' },
+    { command: 'export',        description: '📤 Export CSV' },
+    { command: 'summary',       description: '📊 Weekly summary' },
     { command: 'healthcheck',   description: '✅ Health check' },
   ]);
 
@@ -78,18 +78,18 @@ function createBot(token, hlApi, monitor, hlendApi = null) {
     const lines = [
       '🍐 *Pear Protocol Monitor — Menu*',
       '',
-      'Te aviso cuando pasa algo importante en tus wallets:',
+      'I alert you when something important happens on your wallets:',
       '',
-      '🎯 *Take Profit* alcanzado',
-      '🛑 *Stop Loss* activado',
-      '💰 *Fondos disponibles* para tradear',
-      '🏦 *Borrow disponible* en HyperLend',
+      '🎯 *Take Profit* hit',
+      '🛑 *Stop Loss* triggered',
+      '💰 *Available funds* to trade',
+      '🏦 *Borrow available* on HyperLend',
     ];
 
     if (wallets.length > 0) {
-      lines.push('', `✅ Tenés *${wallets.length} wallet(s)* monitoreada(s).`);
+      lines.push('', `✅ You have *${wallets.length} wallet(s)* monitored.`);
     } else {
-      lines.push('', 'Tocá ➕ *Add Wallet* para empezar.');
+      lines.push('', 'Tap ➕ *Add Wallet* to get started.');
     }
 
     bot.sendMessage(chatId, lines.join('\n'), mainMenu());

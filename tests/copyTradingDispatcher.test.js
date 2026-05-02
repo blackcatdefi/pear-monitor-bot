@@ -70,7 +70,7 @@ test('BCD wallet poller emits OPEN alert on second cycle when basket appears', a
   const r = await copyTrading.pollBcdWalletOnce();
   assert.equal(r.opens, 1);
   assert.equal(notify.sent.length, 1);
-  assert.match(notify.sent[0].text, /NUEVA BASKET — BCD Wallet/);
+  assert.match(notify.sent[0].text, /NEW BASKET — BCD Wallet/);
   assert.match(notify.sent[0].text, /WLD SHORT/);
 });
 
@@ -83,7 +83,7 @@ test('BCD wallet poller emits CLOSE when position disappears', async () => {
   _mockBcdState = [];
   const r = await copyTrading.pollBcdWalletOnce();
   assert.equal(r.closes, 1);
-  assert.match(notify.sent[notify.sent.length - 1].text, /BASKET CERRADA/);
+  assert.match(notify.sent[notify.sent.length - 1].text, /BASKET CLOSED/);
 });
 
 test('BCD wallet poller fans out to multiple subscribers', async () => {

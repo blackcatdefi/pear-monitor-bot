@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * R-AUTOCOPY — /copy_auto command + callback router.
+ * R-AUTOCOPY — /copy_auto command + callback router. (R-EN: English)
  */
 
 const store = require('./copyAutoStore');
@@ -10,12 +10,12 @@ function _formatStatus(cfg) {
   const lines = [
     '🤖 *Copy Auto*',
     '',
-    `Estado: ${cfg.enabled ? '🟢 ACTIVADO' : '🔴 DESACTIVADO'}`,
-    `Capital por signal: $${Math.round(cfg.capital_usdc).toLocaleString()} USDC`,
-    `Modo: ${cfg.mode}`,
-    `Risk preset: SL ${cfg.sl_pct}% / Trailing ${cfg.trailing_pct}% activación ${cfg.trailing_activation_pct}%`,
+    `Status: ${cfg.enabled ? '🟢 ENABLED' : '🔴 DISABLED'}`,
+    `Capital per signal: $${Math.round(cfg.capital_usdc).toLocaleString()} USDC`,
+    `Mode: ${cfg.mode}`,
+    `Risk preset: SL ${cfg.sl_pct}% / Trailing ${cfg.trailing_pct}% activation ${cfg.trailing_activation_pct}%`,
     '',
-    '_Cuando hay signal en @BlackCatDeFiSignals, te llega el alert pre-armado._',
+    '_When a signal hits @BlackCatDeFiSignals, the pre-armed alert reaches you._',
   ];
   return lines.join('\n');
 }
@@ -24,22 +24,22 @@ function _buildKeyboard(cfg) {
   return {
     inline_keyboard: [
       [
-        { text: '💰 Setear capital', callback_data: 'copyauto:capital_help' },
+        { text: '💰 Set capital', callback_data: 'copyauto:capital_help' },
       ],
       [
         {
-          text: cfg.mode === 'AUTO' ? '🔄 Cambiar a MANUAL' : '🔄 Cambiar a AUTO',
+          text: cfg.mode === 'AUTO' ? '🔄 Switch to MANUAL' : '🔄 Switch to AUTO',
           callback_data: 'copyauto:toggle_mode',
         },
       ],
       [
         {
-          text: cfg.enabled ? '🚦 Desactivar' : '🚦 Activar',
+          text: cfg.enabled ? '🚦 Disable' : '🚦 Enable',
           callback_data: 'copyauto:toggle_enabled',
         },
       ],
       [
-        { text: 'ℹ️ Cómo funciona', callback_data: 'copyauto:howto' },
+        { text: 'ℹ️ How it works', callback_data: 'copyauto:howto' },
       ],
     ],
   };
@@ -64,7 +64,7 @@ async function _handleCallback(bot, cb) {
   if (action === 'capital_help') {
     await bot.sendMessage(
       chatId,
-      `💰 *Setear capital*\n\nUsá:\n  \`/capital 500\` — para fijar $500 USDC\n\nMin: $${store.MIN_CAPITAL} · Max: $${store.MAX_CAPITAL.toLocaleString()}`,
+      `💰 *Set capital*\n\nUsage:\n  \`/capital 500\` — to set $500 USDC\n\nMin: $${store.MIN_CAPITAL} · Max: $${store.MAX_CAPITAL.toLocaleString()}`,
       { parse_mode: 'Markdown' }
     );
     return;
@@ -73,32 +73,32 @@ async function _handleCallback(bot, cb) {
     const cur = store.getConfig(userId);
     const next = cur.mode === 'AUTO' ? 'MANUAL' : 'AUTO';
     store.setMode(userId, next);
-    await bot.sendMessage(chatId, `✅ Modo cambiado a *${next}*.`, { parse_mode: 'Markdown' });
+    await bot.sendMessage(chatId, `✅ Mode switched to *${next}*.`, { parse_mode: 'Markdown' });
     await showMenu(bot, chatId, userId);
     return;
   }
   if (action === 'toggle_enabled') {
     const cur = store.getConfig(userId);
     store.setEnabled(userId, !cur.enabled);
-    const ny = cur.enabled ? 'desactivado' : 'activado';
+    const ny = cur.enabled ? 'disabled' : 'enabled';
     await bot.sendMessage(chatId, `✅ Copy auto ${ny}.`, { parse_mode: 'Markdown' });
     await showMenu(bot, chatId, userId);
     return;
   }
   if (action === 'howto') {
     const lines = [
-      'ℹ️ *Cómo funciona*',
+      'ℹ️ *How it works*',
       '',
-      '1️⃣ Activás copy auto (toggle).',
-      '2️⃣ Setea tu capital con `/capital <amount>`.',
-      '3️⃣ Cuando hay signal en @BlackCatDeFiSignals, recibís un alert con un botón directo a Pear con tu capital pre-cargado.',
-      '4️⃣ Click + firmás en tu wallet → ejecutado.',
+      '1️⃣ Toggle copy auto on.',
+      '2️⃣ Set your capital with `/capital <amount>`.',
+      '3️⃣ When a signal hits @BlackCatDeFiSignals, you get an alert with a one-tap Pear button and your capital pre-loaded.',
+      '4️⃣ Click + sign in your wallet → executed.',
       '',
-      '*Modos:*',
-      '  • *MANUAL* — alert con botón "Copiar en Pear"',
-      '  • *AUTO* — alert pre-armado, wording de "lo tengo todo listo, vos firmá"',
+      '*Modes:*',
+      '  • *MANUAL* — alert with "Copy on Pear" button',
+      '  • *AUTO* — pre-armed alert, wording: "everything\'s ready, you sign"',
       '',
-      '⚠️ Pear no expone API pública de execution → vos firmás siempre desde tu wallet (única forma legítima).',
+      '⚠️ Pear has no public execution API → you always sign from your wallet (only legit way).',
     ];
     await bot.sendMessage(chatId, lines.join('\n'), { parse_mode: 'Markdown' });
     return;

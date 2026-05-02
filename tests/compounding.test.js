@@ -70,14 +70,14 @@ test('checkForCompounding: post-fire snapshot updates, no double fire', () => {
   assert.equal(checkForCompounding('cid', '0xa', t2).type, 'NONE');
 });
 
-test('formatCompoundAlert: Spanish output with growth %', () => {
-  const msg = formatCompoundAlert('Wallet primaria', {
+test('formatCompoundAlert: English output with growth %', () => {
+  const msg = formatCompoundAlert('Primary wallet', {
     type: 'COMPOUND_DETECTED',
     prevNotional: 10000,
     currentNotional: 11500,
     growth: 0.15,
   });
-  assert.match(msg, /COMPOUNDING DETECTADO/);
+  assert.match(msg, /COMPOUNDING DETECTED/i);
   assert.match(msg, /\+15\.0%/);
   assert.match(msg, /compounding|TWAP entry/i);
 });

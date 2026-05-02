@@ -137,7 +137,7 @@ function _formatPx(n) {
 
 function formatExternalOpenAlert(config, position) {
   return [
-    `🐋 *EXTERNAL WALLET — NUEVA POSICIÓN ABIERTA*`,
+    `🐋 *EXTERNAL WALLET — NEW POSITION OPENED*`,
     ``,
     `📍 ${config.label || 'External'} (${_shortAddr(config.address)})`,
     ``,
@@ -146,7 +146,7 @@ function formatExternalOpenAlert(config, position) {
     `📦 Size: ${_formatNumber(position.size)}`,
     `💰 Notional: $${_formatNumber(position.notional)}`,
     ``,
-    `💡 Intel: posible señal de mercado.`,
+    `💡 Intel: possible market signal.`,
   ].join('\n');
 }
 
@@ -156,16 +156,16 @@ function formatExternalCloseAlert(config, position) {
   const pnlStr =
     position.unrealizedPnl >= 0 ? `+$${pnlAbs}` : `-$${pnlAbs}`;
   return [
-    `🐋 *EXTERNAL WALLET — POSICIÓN CERRADA*`,
+    `🐋 *EXTERNAL WALLET — POSITION CLOSED*`,
     ``,
     `📍 ${config.label || 'External'} (${_shortAddr(config.address)})`,
     ``,
     `🪙 ${position.coin} ${position.side}`,
     `${pnlEmoji} Last PnL snapshot: ${pnlStr}`,
-    `💲 Entry había sido: $${_formatPx(position.entryPx)}`,
-    `📦 Size cerrado: ${_formatNumber(position.size)}`,
+    `💲 Entry was: $${_formatPx(position.entryPx)}`,
+    `📦 Size closed: ${_formatNumber(position.size)}`,
     ``,
-    `💡 Intel: posible señal de cierre — revisá tu posición.`,
+    `💡 Intel: possible exit signal — review your position.`,
   ].join('\n');
 }
 
