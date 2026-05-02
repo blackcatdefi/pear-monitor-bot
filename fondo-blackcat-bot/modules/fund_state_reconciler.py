@@ -222,28 +222,28 @@ def format_reconcile_report(discrepancies: list[Discrepancy]) -> str:
 def render_discrepancies(discrepancies: list[Discrepancy]) -> str:
     if not discrepancies:
         return (
-            "✅ /reconcile — fund_state.py coherente con realidad on-chain.\n"
-            "Nada que actualizar."
+            "✅ /reconcile — fund_state.py consistent with on-chain reality.\n"
+            "Nothing to update."
         )
 
     lines = [
-        "🔄 RECONCILE — discrepancias detectadas",
+        "🔄 RECONCILE — discrepancies detected",
         "─" * 40,
     ]
     for i, d in enumerate(discrepancies, 1):
         lines.append(f"\n[{i}] {d.type}")
         lines.append(f"    Detail: {d.detail}")
-        lines.append(f"    Sugerencia:")
+        lines.append(f"    Suggestion:")
         for ln in d.suggested_action.splitlines():
             lines.append(f"      {ln}")
         lines.append(f"    Detected at: {d.detected_at}")
 
     lines.append("")
     lines.append(
-        "Para aplicar automáticamente:\n"
+        "To apply automatically:\n"
         "  /reconcile apply"
     )
-    lines.append("(Ejecuta git commit + push de fund_state.py)")
+    lines.append("(Runs git commit + push of fund_state.py)")
     return "\n".join(lines)
 
 

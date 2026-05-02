@@ -214,9 +214,9 @@ def _fmt_row(label: str, prev: float, curr: float, note: str | None = None) -> s
     sign = "+" if diff >= 0 else ""
     tag = ""
     if prev == 0.0 and curr > 0:
-        tag = " (depósito o apertura)"
+        tag = " (deposit or open)"
     elif prev > 0 and curr == 0.0:
-        tag = " (transferencia o cierre)"
+        tag = " (transfer or close)"
     elif note:
         tag = f" ({note})"
     if abs(prev) < 1e-6:
@@ -235,22 +235,22 @@ def _age_hours(iso_ts: str) -> float:
 
 
 def format_delta_block(current: dict[str, Any], previous: dict[str, Any] | None) -> str:
-    """Render the 'CAMBIOS DESDE ÚLTIMO REPORTE' section.
+    """Render the 'CHANGES SINCE LAST REPORT' section.
 
     If `previous` is None: render a 'first run' notice.
     """
     lines: list[str] = []
     lines.append("")
-    lines.append("📈 CAMBIOS DESDE ÚLTIMO REPORTE")
+    lines.append("📈 CHANGES SINCE LAST REPORT")
     lines.append("─" * 35)
     if not previous:
-        lines.append("(primera corrida — sin histórico)")
+        lines.append("(first run — no history)")
         return "\n".join(lines)
 
     prev_ts = previous.get("ts") or "?"
     age = _age_hours(prev_ts)
     short_prev = prev_ts[:16].replace("T", " ")
-    lines.append(f"Baseline: {short_prev} UTC (hace {age}h)")
+    lines.append(f"Baseline: {short_prev} UTC ({age}h ago)")
     lines.append("")
 
     # Perps per wallet
@@ -270,7 +270,7 @@ def format_delta_block(current: dict[str, Any], previous: dict[str, Any] | None)
     all_hl_keys = set(current.get("hyperlend", {}).keys()) | set(previous.get("hyperlend", {}).keys())
     if all_hl_keys:
         lines.append("")
-        lines.append("HYPERLEND (net equity = colateral - deuda):")
+        lines.append("HYPERLEND (net equity = collateral - debt):")
         for key in sorted(all_hl_keys):
             c = current.get("hyperlend", {}).get(key, {})
             p = previous.get("hyperlend", {}).get(key, {})
@@ -279,7 +279,7 @@ def format_delta_block(current: dict[str, Any], previous: dict[str, Any] | None)
             lines.append(_fmt_row(row_label + " net", float(p.get("net_usd") or 0), float(c.get("net_usd") or 0)))
             lines.append(
                 _fmt_row(
-                    "    colateral",
+                    "    collateral",
                     float(p.get("coll_usd") or 0),
                     float(c.get("coll_usd") or 0),
                 )
@@ -296,7 +296,7 @@ def format_delta_block(current: dict[str, Any], previous: dict[str, Any] | None)
                 emoji = "🔴" if diff > 0 else "🟢"
             sign = "+" if diff >= 0 else ""
             lines.append(
-                f"    deuda: ${prev_debt:,.0f} → ${curr_debt:,.0f} ({emoji} {sign}${diff:,.0f}, {sign}{pct:.2f}%) {'(contra)' if diff > 0 else ('(a favor)' if diff < 0 else '')}"
+                f"    debt: ${prev_debt:,.0f} → ${curr_debt:,.0f} ({emoji} {sign}${diff:,.0f}, {sign}{pct:.2f}%) {'(against)' if diff > 0 else ('(favorable)' if diff < 0 else '')}"
             )
 
     # Bounce Tech
@@ -305,7 +305,7 @@ def format_delta_block(current: dict[str, Any], previous: dict[str, Any] | None)
     if abs(prev_bt) > 0.5 or abs(curr_bt) > 0.5:
         lines.append("")
         lines.append("BOUNCE TECH:")
-        note = "posición cerrada" if prev_bt > 0 and curr_bt == 0 else None
+        note = "position closed" if prev_bt > 0 and curr_bt == 0 else None
         lines.append(_fmt_row("Total BT", prev_bt, curr_bt, note=note))
 
     # Trade del Ciclo

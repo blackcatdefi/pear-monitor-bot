@@ -151,8 +151,8 @@ def build_period_summary(period: str) -> str:
     if not closes:
         lines.append("")
         lines.append(
-            "Sin eventos en este período. Los cierres se registran auto cuando "
-            "alerts.py detecta closes; manual: /pnl add closed <asset> <amount>."
+            "No events in this period. Closes are recorded automatically when "
+            "alerts.py detects closes; manual: /pnl add closed <asset> <amount>."
         )
 
     return "\n".join(lines)

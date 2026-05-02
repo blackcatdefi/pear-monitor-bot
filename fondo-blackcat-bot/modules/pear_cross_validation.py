@@ -125,7 +125,7 @@ async def cross_validate_pnl(
                     "wallet": wallet,
                     "asset": sym,
                     "level": "info",
-                    "warning": f"{sym}: posición no encontrada en Pear API",
+                    "warning": f"{sym}: position not found in Pear API",
                 }
             )
             continue

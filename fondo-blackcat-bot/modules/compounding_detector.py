@@ -271,9 +271,9 @@ def format_event(event: dict[str, Any]) -> str:
         f"${event['curr_notional']:,.0f} ({event['notional_growth_pct']:+.1f}%)\n"
         f"Equity:   ${event['prev_equity']:,.0f} → "
         f"${event['curr_equity']:,.0f} ({event['equity_growth_pct']:+.1f}%)\n"
-        f"Posiciones: {event['positions_count']} sin cambios\n"
-        f"Leverage efectivo actual: {event['leverage_now']:.2f}x\n"
-        "BCD agregó capital a la basket activa."
+        f"Positions: {event['positions_count']} unchanged\n"
+        f"Current effective leverage: {event['leverage_now']:.2f}x\n"
+        "BCD added capital to the active basket."
     )
 
 
@@ -311,12 +311,12 @@ def format_history(limit: int = 20) -> str:
         return (
             "\U0001f504 COMPOUNDING HISTORY\n"
             + ("\u2500" * 30) + "\n"
-            "Sin eventos registrados aún.\n"
-            "El detector corre cada 30 min vía scheduler.\n"
+            "No events recorded yet.\n"
+            "Detector runs every 30 min via scheduler.\n"
             "Toggle: COMPOUNDING_DETECTOR_ENABLED env var."
         )
     lines: list[str] = [
-        "\U0001f504 COMPOUNDING HISTORY (últimos {})".format(min(limit, len(events))),
+        "\U0001f504 COMPOUNDING HISTORY (last {})".format(min(limit, len(events))),
         "\u2500" * 30,
     ]
     for e in events:

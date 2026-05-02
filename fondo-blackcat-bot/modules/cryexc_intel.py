@@ -532,13 +532,13 @@ def format_for_telegram(snap: CryexcSnapshot) -> str:
             lines.append(f"  • {ev}")
     else:
         lines.append("")
-        lines.append("🔔 Notable events: (ninguno)")
+        lines.append("🔔 Notable events: (none)")
 
     lines.append("")
     lines.append(f"🔗 Source: cryexc.josedonato.com/app (cache age: {age_label})")
     lines.append(
-        "ℹ️ Datos numéricos via APIs públicas mismas que cryexc usa (Binance Futures, "
-        "Hyperliquid). La página cryexc renderiza canvas WebAssembly y no expone API."
+        "ℹ️ Numeric data via the same public APIs that cryexc uses (Binance Futures, "
+        "Hyperliquid). The cryexc page renders WebAssembly canvas and does not expose an API."
     )
     return "\n".join(lines)
 

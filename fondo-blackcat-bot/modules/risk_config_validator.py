@@ -137,10 +137,10 @@ def format_report(results: list[CheckResult]) -> str:
     lines = [head]
     for r in results:
         mark = "\u2705" if r.ok else "\u274c"
-        lines.append(f"{mark} {r.name}: {r.detail}  (esperado: {r.expected})")
+        lines.append(f"{mark} {r.name}: {r.detail}  (expected: {r.expected})")
     if bad:
         lines.append("")
-        lines.append("\u26a0\ufe0f Acción: ajustar env vars desviadas en Railway.")
+        lines.append("\u26a0\ufe0f Action: adjust deviating env vars in Railway.")
     return "\n".join(lines)
 
 

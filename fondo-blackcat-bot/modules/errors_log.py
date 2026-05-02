@@ -141,8 +141,8 @@ def with_error_logging(func: HandlerFn) -> HandlerFn:
 def format_recent(limit: int = 20) -> str:
     rows = fetch_recent(limit=limit)
     if not rows:
-        return "📋 Errors log vacío (sin errores capturados aún)."
-    lines = ["📋 ÚLTIMOS ERRORES", "─" * 30]
+        return "📋 Errors log empty (no errors captured yet)."
+    lines = ["📋 RECENT ERRORS", "─" * 30]
     for r in rows:
         ts = (r.get("timestamp_utc") or "")[:19].replace("T", " ")
         h = (r.get("handler") or "?").replace("cmd_", "/")

@@ -142,8 +142,8 @@ def _format_summary(wallet: str, closes: list[dict[str, Any]]) -> str:
         emoji = "\U0001f7e2" if c["pnl"] >= 0 else "\U0001f534"
         lines.append(f"  {emoji} {c['asset']}: ${c['pnl']:+,.2f}")
     lines.append("")
-    lines.append(f"\U0001f4b0 Capital ahora libre en {short}: ${total_exit:,.2f}")
-    lines.append("\U0001f3af Listo para próxima basket o compound.")
+    lines.append(f"\U0001f4b0 Capital now free in {short}: ${total_exit:,.2f}")
+    lines.append("\U0001f3af Ready for next basket or compound.")
     return "\n".join(lines)
 
 

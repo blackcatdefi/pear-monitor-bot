@@ -287,13 +287,13 @@ async def analyze_trends(bot=None) -> list[dict[str, Any]]:
 def format_alert(t: dict[str, Any]) -> str:
     fmt = METRIC_CONFIGS[t["metric"]]["fmt"]
     return (
-        f"\U0001f4c9 TENDENCIA {t['direction']} \u2014 {t['label']}\n"
-        f"Actual: {fmt.format(t['current'])}\n"
+        f"\U0001f4c9 TREND {t['direction']} \u2014 {t['label']}\n"
+        f"Current: {fmt.format(t['current'])}\n"
         f"Slope: {t['slope_per_hour']:+.4f}/hr\n"
-        f"Proyección {HORIZON_HOURS:.0f}h: {fmt.format(t['projected_24h'])}\n"
-        f"Cruce zona crítica ({fmt.format(t['critical'])}): "
-        f"en {t['hours_to_critical']:.1f}h\n\n"
-        "\u26a0\ufe0f Acción preventiva sugerida — ver /reporte para contexto."
+        f"Projection {HORIZON_HOURS:.0f}h: {fmt.format(t['projected_24h'])}\n"
+        f"Critical zone crossing ({fmt.format(t['critical'])}): "
+        f"in {t['hours_to_critical']:.1f}h\n\n"
+        "\u26a0\ufe0f Preventive action suggested — see /reporte for context."
     )
 
 

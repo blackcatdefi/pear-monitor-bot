@@ -115,34 +115,34 @@ def get_api_stats() -> dict[str, Any]:
 
 
 # ─── Primary fetch: X API v2 List endpoint ─────────────────────────────────
-_DIAG_NO_LIST_ID = "X_LIST_ID env var no configurada en Railway"
-_DIAG_NO_BEARER = "X_API_BEARER_TOKEN env var no configurada en Railway"
+_DIAG_NO_LIST_ID = "X_LIST_ID env var not configured in Railway"
+_DIAG_NO_BEARER = "X_API_BEARER_TOKEN env var not configured in Railway"
 _DIAG_401 = (
-    "HTTP 401 — Bearer token inválido o revocado. "
-    "Regenerar en developer.x.com y updatear X_API_BEARER_TOKEN en Railway."
+    "HTTP 401 — Bearer token invalid or revoked. "
+    "Regenerate at developer.x.com and update X_API_BEARER_TOKEN in Railway."
 )
 _DIAG_402 = (
-    "HTTP 402 — Créditos X API agotados. "
-    "Top-up en console.x.com y cambiar auto-recharge a VISA 4463."
+    "HTTP 402 — X API credits depleted. "
+    "Top-up at console.x.com and set auto-recharge to VISA 4463."
 )
 _DIAG_403 = (
-    "HTTP 403 — Bearer sin permisos para la list. "
-    "Verificá que la app pertenezca a @BlackCatDeFi y que la list sea accesible."
+    "HTTP 403 — Bearer lacks permissions for the list. "
+    "Verify that the app belongs to @BlackCatDeFi and that the list is accessible."
 )
 _DIAG_403_SPEND_CAP = (
-    "HTTP 403 SpendCapReached — tu cuenta tiene créditos ($4.51 visibles) "
-    "PERO alcanzó el SPEND CAP del ciclo de billing. "
-    "Fix: developer.x.com → Products → Usage → AUMENTAR Spend Cap "
-    "(NO es top-up, NO es payment method — es una cap separada). "
-    "Reset automático: consultar 'reset_date' en response."
+    "HTTP 403 SpendCapReached — your account has credits ($4.51 visible) "
+    "BUT hit the SPEND CAP for the billing cycle. "
+    "Fix: developer.x.com → Products → Usage → INCREASE Spend Cap "
+    "(NOT a top-up, NOT a payment method — it's a separate cap). "
+    "Auto-reset: check 'reset_date' in response."
 )
 _DIAG_404 = (
-    "HTTP 404 — List ID no encontrada. "
-    "Verificá X_LIST_ID en Railway (actual ID: Fondo Black Cat Intel = 2046698139873378486)."
+    "HTTP 404 — List ID not found. "
+    "Verify X_LIST_ID in Railway (current ID: Fondo Black Cat Intel = 2046698139873378486)."
 )
-_DIAG_429 = "HTTP 429 — Rate limit hit. Retry en unos minutos (scheduler cachea cada 2h)."
-_DIAG_TIMEOUT = "Timeout de red contra api.x.com — probablemente transitorio."
-_DIAG_UNKNOWN = "Error no clasificado — revisar logs Railway para detalle."
+_DIAG_429 = "HTTP 429 — Rate limit hit. Retry in a few minutes (scheduler caches every 2h)."
+_DIAG_TIMEOUT = "Network timeout against api.x.com — likely transient."
+_DIAG_UNKNOWN = "Unclassified error — check Railway logs for detail."
 
 
 def _diag_for_status(status: int) -> str:
@@ -158,7 +158,7 @@ def _diag_for_status(status: int) -> str:
 
 _DIAG_INTERNAL_COOLDOWN = (
     "Internal cooldown active (1 live fetch per {cool}h). "
-    "Usando cache — próxima fetch permitida: {next_allowed}."
+    "Using cache — next fetch allowed: {next_allowed}."
 )
 _DIAG_INTERNAL_DAILY_CAP = (
     "Internal daily cap hit ({used}/{cap} calls hoy UTC). "
@@ -386,7 +386,7 @@ async def fetch_timeline_via_list(
         )
 
     log.info(
-        "X timeline fetch: %d tweets de %d cuentas únicas (ventana %dh)",
+        "X timeline fetch: %d tweets from %d unique accounts (window %dh)",
         len(all_tweets),
         unique_accounts,
         hours,
@@ -410,11 +410,11 @@ async def maybe_send_cost_alert(app=None) -> None:
         return
     msg = (
         f"⚠️ X API cost alert\n\n"
-        f"Proyección mensual: ${proj['monthly_projection_usd']:.2f} "
+        f"Monthly projection: ${proj['monthly_projection_usd']:.2f} "
         f"(threshold ${COST_ALERT_THRESHOLD_USD:.2f})\n"
-        f"Últimos 7d: ${proj['cost_7d']:.2f} en {proj['calls_7d']} calls, "
+        f"Last 7d: ${proj['cost_7d']:.2f} in {proj['calls_7d']} calls, "
         f"{proj['tweets_7d']} tweets.\n\n"
-        f"Considerá X_LIVE_ENABLED=false en Railway para forzar cache-only."
+        f"Consider X_LIVE_ENABLED=false in Railway to force cache-only."
     )
     log.warning("[X_API_COST] ALERT fired: %s", msg.replace("\n", " | "))
     if app is not None:
@@ -438,9 +438,9 @@ async def maybe_send_75pct_alert(app=None) -> None:
         return
     msg = (
         f"⚠️ X API daily cap 75%\n\n"
-        f"Llevamos {used}/{DAILY_CALL_CAP} fetches hoy (UTC). "
-        f"Una vez que llegue al cap, /reporte usará cache hasta UTC midnight.\n\n"
-        f"Para forzar cache-only ya: Railway Variables → X_LIVE_ENABLED=false."
+        f"We have {used}/{DAILY_CALL_CAP} fetches today (UTC). "
+        f"Once the cap is reached, /reporte will use cache until UTC midnight.\n\n"
+        f"To force cache-only now: Railway Variables → X_LIVE_ENABLED=false."
     )
     log.warning("[X_API_COST] 75pct ALERT: %s", msg.replace("\n", " | "))
     if app is not None:
@@ -557,7 +557,7 @@ async def debug_x_status() -> str:
     lines.append("")
 
     # Config check
-    lines.append("📋 Configuración:")
+    lines.append("📋 Configuration:")
     lines.append(f"  X_LIST_ID: {'✅ set' if X_LIST_ID else '❌ NOT SET'}")
     lines.append(
         f"  X_API_BEARER_TOKEN: {'✅ set (' + X_API_BEARER_TOKEN[:8] + '...)' if X_API_BEARER_TOKEN else '❌ NOT SET'}"
@@ -566,26 +566,26 @@ async def debug_x_status() -> str:
 
     # API stats (Round 12 — realistic cost model, SQLite-persisted)
     stats = get_api_stats()
-    lines.append("📊 Costo X API (persistido en SQLite):")
-    lines.append(f"  7d: {stats['cost_7d_str']} en {stats['calls_7d']} calls, {stats['tweets_7d']} tweets")
-    lines.append(f"  Proyección mensual: {stats['monthly_projection_str']}")
-    lines.append(f"  24h calls: {stats['calls_24h']}/{stats['daily_cap']} (cap interno)")
-    lines.append(f"  Cooldown: {stats['cooldown_hours']}h entre fetches")
-    last_ok = stats["last_success_ts"] or "— nunca"
-    lines.append(f"  Último fetch OK: {last_ok}")
+    lines.append("📊 X API Cost (persisted in SQLite):")
+    lines.append(f"  7d: {stats['cost_7d_str']} in {stats['calls_7d']} calls, {stats['tweets_7d']} tweets")
+    lines.append(f"  Monthly projection: {stats['monthly_projection_str']}")
+    lines.append(f"  24h calls: {stats['calls_24h']}/{stats['daily_cap']} (internal cap)")
+    lines.append(f"  Cooldown: {stats['cooldown_hours']}h between fetches")
+    last_ok = stats["last_success_ts"] or "— never"
+    lines.append(f"  Last successful fetch: {last_ok}")
     lines.append("")
 
     # Cache state (scheduler)
     cs = get_cache_state()
     lines.append(f"💾 Cache scheduler (every {int(FETCH_COOLDOWN_HOURS)}h):")
-    lines.append(f"  Last success: {cs.get('last_success_at') or '— nunca'}")
-    lines.append(f"  Last attempt: {cs.get('last_attempt_at') or '— nunca'}")
+    lines.append(f"  Last success: {cs.get('last_success_at') or '— never'}")
+    lines.append(f"  Last attempt: {cs.get('last_attempt_at') or '— never'}")
     tc = cs.get("last_tweet_count", 0)
     ac = cs.get("last_account_count", 0)
-    lines.append(f"  Last cache content: {tc} tweets de {ac} cuentas")
+    lines.append(f"  Last cache content: {tc} tweets from {ac} accounts")
     succ_fail = cs.get("successive_failures", 0)
     if succ_fail > 0:
-        lines.append(f"  ⚠️ {succ_fail} failures consecutivos")
+        lines.append(f"  ⚠️ {succ_fail} consecutive failures")
     if cs.get("last_error"):
         lines.append(f"  Last error: {cs['last_error'][:300]}")
     lines.append("")
@@ -593,22 +593,22 @@ async def debug_x_status() -> str:
     # Live test — bypass cooldown so /debug_x always probes real state
     # (max_tweets=5 keeps cost floor at ≈$0.00125 per probe)
     if X_LIST_ID and X_API_BEARER_TOKEN:
-        lines.append("🧪 Test en vivo (bypass cooldown, 5 tweets max)...")
+        lines.append("🧪 Live test (bypass cooldown, 5 tweets max)...")
         tweets, diag = await fetch_timeline_via_list(
             hours=1, max_tweets=5, caller="debug_x", bypass_cooldown=True
         )
         if tweets is not None:
-            lines.append(f"  ✅ Conectado — {len(tweets)} tweets última hora")
+            lines.append(f"  ✅ Connected — {len(tweets)} tweets last hour")
             if tweets:
                 usernames = set(t["username"] for t in tweets)
-                lines.append(f"  Cuentas activas: {', '.join(sorted(usernames)[:5])}...")
+                lines.append(f"  Active accounts: {', '.join(sorted(usernames)[:5])}...")
         else:
             lines.append(f"  ❌ Fetch failed: {diag}")
     else:
-        lines.append("⚠️ No se puede testear — faltan env vars")
+        lines.append("⚠️ Cannot test — missing env vars")
 
     lines.append("")
-    lines.append("💡 Para agregar/sacar cuentas, editá la list desde la app de X.")
+    lines.append("💡 To add/remove accounts, edit the list from the X app.")
 
     return "\n".join(lines)
 
@@ -620,18 +620,18 @@ async def format_intel_sources(hours: int = 24, max_tweets: int = 500) -> str:
     )
 
     if not tweets:
-        return f"❌ No se pudo leer la list.\nDiag: {diag or 'sin diagnóstico'}"
+        return f"❌ Could not read the list.\nDiag: {diag or 'no diagnostic'}"
 
     by_user = Counter(t["username"] for t in tweets)
     top = by_user.most_common(20)
     total_accounts = len(by_user)
 
-    msg = f"📡 Fuentes activas últimas {hours}h ({total_accounts} cuentas tweetearon)\n\n"
-    msg += "Top 20 por volumen:\n"
+    msg = f"📡 Active sources last {hours}h ({total_accounts} accounts tweeted)\n\n"
+    msg += "Top 20 by volume:\n"
     for username, count in top:
         msg += f"  @{username}: {count}\n"
-    msg += f"\nTotal tweets capturados: {len(tweets)}"
-    msg += "\n\n💡 Para agregar/sacar cuentas, editá la list 'Fondo Black Cat Intel' desde la app de X."
+    msg += f"\nTotal tweets captured: {len(tweets)}"
+    msg += "\n\n💡 To add/remove accounts, edit the 'Fondo Black Cat Intel' list from the X app."
 
     return msg
 
@@ -761,10 +761,10 @@ def cache_banner_for_report() -> str:
     iso = cs.get("last_success_at")
     age = cache_age_text()
     if not iso:
-        return "📡 X Timeline: sin cache aún — primer fetch en este /reporte"
+        return "📡 X Timeline: no cache yet — first fetch in this /reporte"
     return (
-        f"📡 X Timeline: cache de hace {age} "
-        f"— última actualización: {iso}"
+        f"📡 X Timeline: cached {age} ago "
+        f"— last updated: {iso}"
     )
 
 
@@ -783,34 +783,34 @@ async def format_x_status() -> str:
     lines.append("🛰  X API STATUS — Round 15 on-demand mode")
     lines.append("─" * 32)
     lines.append("")
-    lines.append("⚙️ Configuración:")
+    lines.append("⚙️ Configuration:")
     lines.append(f"  X_LIVE_ENABLED: {'✅ true' if X_LIVE_ENABLED else '🛑 false (cache-only)'}")
     lines.append(f"  X_RATE_LIMIT_HOURS: {FETCH_COOLDOWN_HOURS:.1f}h")
-    lines.append(f"  X_DAILY_CAP: {DAILY_CALL_CAP}/día (UTC)")
+    lines.append(f"  X_DAILY_CAP: {DAILY_CALL_CAP}/day (UTC)")
     lines.append(f"  X_SCHEDULER_ENABLED: {'✅ on' if X_SCHEDULER_ENABLED else '🛑 off (Round 15 default)'}")
     lines.append("")
-    lines.append("📊 Uso hoy (UTC calendar day):")
-    lines.append(f"  Fetches usados: {used_today}/{DAILY_CALL_CAP}")
+    lines.append("📊 Usage today (UTC calendar day):")
+    lines.append(f"  Fetches used: {used_today}/{DAILY_CALL_CAP}")
     lines.append(f"  Successful (200): {successful_today}")
-    lines.append(f"  Last fetch OK: {last_ok.isoformat() if last_ok else '— nunca'}")
+    lines.append(f"  Last fetch OK: {last_ok.isoformat() if last_ok else '— never'}")
     if next_allowed:
-        lines.append(f"  Próximo fetch permitido: {next_allowed.isoformat()}")
+        lines.append(f"  Next fetch allowed: {next_allowed.isoformat()}")
     else:
-        lines.append("  Próximo fetch permitido: — sin cooldown activo")
+        lines.append("  Next fetch allowed: — no active cooldown")
     lines.append("")
-    lines.append("💰 Costo (persistido SQLite):")
-    lines.append(f"  Últimos 7d: ${proj['cost_7d']:.2f} ({proj['calls_7d']} calls, {proj['tweets_7d']} tweets)")
-    lines.append(f"  Proyección mensual: ${proj['monthly_projection_usd']:.2f}")
+    lines.append("💰 Cost (persisted SQLite):")
+    lines.append(f"  Last 7d: ${proj['cost_7d']:.2f} ({proj['calls_7d']} calls, {proj['tweets_7d']} tweets)")
+    lines.append(f"  Monthly projection: ${proj['monthly_projection_usd']:.2f}")
     lines.append("")
     lines.append("💾 Cache state:")
-    lines.append(f"  Last cache: {cs.get('last_success_at') or '— vacío'}")
-    lines.append(f"  Last cache content: {cs.get('last_tweet_count', 0)} tweets de {cs.get('last_account_count', 0)} cuentas")
+    lines.append(f"  Last cache: {cs.get('last_success_at') or '— empty'}")
+    lines.append(f"  Last cache content: {cs.get('last_tweet_count', 0)} tweets from {cs.get('last_account_count', 0)} accounts")
     lines.append(f"  Cache age: {cache_age_text()}")
     if cs.get("last_error"):
         lines.append(f"  Last error: {str(cs.get('last_error'))[:200]}")
     lines.append("")
-    lines.append("ℹ️ Round 15: live fetches sólo on-demand vía /reporte/timeline. "
-                 "Scheduler automático apagado por defecto.")
+    lines.append("ℹ️ Round 15: live fetches only on-demand via /reporte/timeline. "
+                 "Automatic scheduler off by default.")
     return "\n".join(lines)
 
 
@@ -823,24 +823,24 @@ async def format_x_costos() -> str:
     used_today = count_x_calls_today_calendar()
 
     lines: list[str] = []
-    lines.append("💰 X API COSTOS — auditoría Round 15")
+    lines.append("💰 X API COSTS — Round 15 audit")
     lines.append("─" * 32)
     lines.append("")
-    lines.append("📅 Resumen últimos 7d:")
+    lines.append("📅 Last 7d summary:")
     lines.append(f"  Total calls: {proj['calls_7d']}")
     lines.append(f"  Total tweets: {proj['tweets_7d']}")
-    lines.append(f"  Costo estimado: ${proj['cost_7d']:.2f}")
+    lines.append(f"  Estimated cost: ${proj['cost_7d']:.2f}")
     lines.append(f"  Daily avg: ${proj['daily_avg_usd']:.4f}")
-    lines.append(f"  Proyección mensual: ${proj['monthly_projection_usd']:.2f}")
+    lines.append(f"  Monthly projection: ${proj['monthly_projection_usd']:.2f}")
     lines.append("")
-    lines.append("📅 Últimos 30d:")
+    lines.append("📅 Last 30d:")
     lines.append(f"  Total calls: {proj30.get('total_calls', 0)} ({proj30.get('successful', 0)} successful)")
-    lines.append(f"  Calls/día promedio: {proj30.get('calls_per_day', 0):.2f}")
+    lines.append(f"  Avg calls/day: {proj30.get('calls_per_day', 0):.2f}")
     lines.append("")
-    lines.append(f"🌐 Fetches hoy (UTC): {used_today}/{DAILY_CALL_CAP}")
+    lines.append(f"🌐 Fetches today (UTC): {used_today}/{DAILY_CALL_CAP}")
     lines.append("")
     if breakdown_7d:
-        lines.append("👤 Breakdown por caller (7d):")
+        lines.append("👤 Breakdown by caller (7d):")
         for row in breakdown_7d[:10]:
             lines.append(
                 f"  {row['caller']:<22} ${row['cost']:.4f}  "
@@ -849,7 +849,7 @@ async def format_x_costos() -> str:
             )
         lines.append("")
     if breakdown_30d:
-        lines.append("👤 Breakdown por caller (30d):")
+        lines.append("👤 Breakdown by caller (30d):")
         for row in breakdown_30d[:10]:
             lines.append(
                 f"  {row['caller']:<22} ${row['cost']:.4f}  "
@@ -857,6 +857,6 @@ async def format_x_costos() -> str:
             )
         lines.append("")
     lines.append("ℹ️ Cost model X API: $0.25 / 1,000 tweets returned")
-    lines.append(f"ℹ️ Cooldown {FETCH_COOLDOWN_HOURS:.1f}h, cap {DAILY_CALL_CAP}/día")
-    lines.append("ℹ️ Para forzar cache-only: Railway → X_LIVE_ENABLED=false")
+    lines.append(f"ℹ️ Cooldown {FETCH_COOLDOWN_HOURS:.1f}h, cap {DAILY_CALL_CAP}/day")
+    lines.append("ℹ️ To force cache-only: Railway → X_LIVE_ENABLED=false")
     return "\n".join(lines)

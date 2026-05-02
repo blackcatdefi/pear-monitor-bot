@@ -104,14 +104,14 @@ def format_metrics() -> str:
     x_summary = x_api_cost_summary()
 
     lines = [
-        "📊 BOT METRICS — últimas 24h",
+        "📊 BOT METRICS — last 24h",
         "─" * 30,
-        f"❌ Errores: {err24}",
+        f"❌ Errors: {err24}",
         "",
         "🤖 LLM cost (24h):",
     ]
     if not llm:
-        lines.append("  (sin datos en llm_usage)")
+        lines.append("  (no data in llm_usage)")
     else:
         # Aggregate per model
         models = sorted({k for k in llm.keys() if "__" not in k})

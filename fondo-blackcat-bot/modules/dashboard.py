@@ -132,9 +132,9 @@ def _render_loading_placeholder(error: str | None = None) -> str:
 </head>
 <body>
     <h1>🐱‍⬛ Fondo Black Cat — Dashboard</h1>
-    <p style="color:#ffaa00; font-size:18px;"><span class="spin">⏳</span> Inicializando dashboard…</p>
-    <p style="color:#888; font-size:14px;">Cargando datos desde HyperEVM RPC. Esto puede tomar 10-25s en cold start.</p>
-    <p style="color:#888; font-size:12px;">La página se refresca automáticamente cada 10s.</p>
+    <p style="color:#ffaa00; font-size:18px;"><span class="spin">⏳</span> Initializing dashboard…</p>
+    <p style="color:#888; font-size:14px;">Loading data from HyperEVM RPC. This may take 10-25s on cold start.</p>
+    <p style="color:#888; font-size:12px;">Page auto-refreshes every 10s.</p>
     {err_html}
 </body>
 </html>"""
@@ -185,13 +185,13 @@ def _render_html(state: dict[str, Any]) -> str:
         flywheel_html = (
             f"<p>Wallet: <span class='dim'>{_esc(main.get('short'))}</span></p>"
             f"<p>HF: <strong>{_esc(hf_str)}</strong></p>"
-            f"<p>Colateral: {_esc(coll_amt)} {_esc(coll_sym)}"
+            f"<p>Collateral: {_esc(coll_amt)} {_esc(coll_sym)}"
             f" <span class='dim'>({_esc(_fmt_compact_usd(main.get('collateral_usd')))})</span></p>"
-            f"<p>Deuda: {_esc(debt_amt)} {_esc(debt_sym)}"
+            f"<p>Debt: {_esc(debt_amt)} {_esc(debt_sym)}"
             f" <span class='dim'>({_esc(_fmt_compact_usd(main.get('debt_usd')))})</span></p>"
         )
     else:
-        flywheel_html = "<p class='dim'>Sin flywheel HyperLend activo (sin deuda).</p>"
+        flywheel_html = "<p class='dim'>No active HyperLend flywheel (no debt).</p>"
 
     # Secondary flywheel (chico) — solo si existe
     sec = state.get("secondary_flywheel")
@@ -203,13 +203,13 @@ def _render_html(state: dict[str, Any]) -> str:
             hf_str2 = "—"
         secondary_html = (
             "<div class='card'>"
-            "<h2>Flywheel secundario</h2>"
+            "<h2>Secondary flywheel</h2>"
             f"<p>Wallet: <span class='dim'>{_esc(sec.get('short'))}</span></p>"
             f"<p>HF: <strong>{_esc(hf_str2)}</strong></p>"
-            f"<p>Colateral: {_esc(_fmt_token_amount(sec.get('collateral_balance'), dec=4))}"
+            f"<p>Collateral: {_esc(_fmt_token_amount(sec.get('collateral_balance'), dec=4))}"
             f" {_esc(sec.get('collateral_symbol') or '?')}"
             f" <span class='dim'>({_esc(_fmt_compact_usd(sec.get('collateral_usd')))})</span></p>"
-            f"<p>Deuda: {_esc(_fmt_token_amount(sec.get('debt_balance'), dec=4))}"
+            f"<p>Debt: {_esc(_fmt_token_amount(sec.get('debt_balance'), dec=4))}"
             f" {_esc(sec.get('debt_symbol') or '?')}"
             f" <span class='dim'>({_esc(_fmt_compact_usd(sec.get('debt_usd')))})</span></p>"
             "</div>"
@@ -269,7 +269,7 @@ def _render_html(state: dict[str, Any]) -> str:
         )
     else:
         basket_rows.append(
-            "<p class='dim'>Sin posiciones abiertas en wallets del fondo.</p>"
+            "<p class='dim'>No open positions in fund wallets.</p>"
         )
 
     # ─── Próximos catalysts (macro calendar) ──────────────────────────────
@@ -281,7 +281,7 @@ def _render_html(state: dict[str, Any]) -> str:
             f" <span class='dim'>[{_esc(ev.impact_level)}/{_esc(ev.category)}]</span></p>"
         )
     if not upcoming_rows:
-        upcoming_rows.append("<p class='dim'>Sin eventos próximos en calendar.</p>")
+        upcoming_rows.append("<p class='dim'>No upcoming events in calendar.</p>")
 
     # ─── Wallets breakdown ───────────────────────────────────────────────
     wallet_rows: list[str] = []
@@ -304,7 +304,7 @@ def _render_html(state: dict[str, Any]) -> str:
             f"<br><span class='dim'>{' · '.join(parts) if parts else '—'}</span></p>"
         )
     if not wallet_rows:
-        wallet_rows.append("<p class='dim'>Sin wallets reportadas.</p>")
+        wallet_rows.append("<p class='dim'>No wallets reported.</p>")
 
     btc = state.get("btc")
     eth = state.get("eth")
@@ -334,12 +334,12 @@ def _render_html(state: dict[str, Any]) -> str:
         if (cached_btc is not None or cached_eth is not None or cached_hype is not None):
             age_min = (cache_age or 0) // 60
             market_html = (
-                f"<p class='dim'>⚠️ API down — usando cache (hace {age_min}min)</p>"
+                f"<p class='dim'>⚠️ API down — using cache ({age_min}min ago)</p>"
                 + market_html
             )
         else:
             market_html = (
-                "<p class='dim'>(API down — sin cache disponible)</p>" + market_html
+                "<p class='dim'>(API down — no cache available)</p>" + market_html
             )
 
     html_doc = f"""<!DOCTYPE html>
@@ -391,19 +391,19 @@ def _render_html(state: dict[str, Any]) -> str:
         </div>
 
         <div class="card">
-            <h2>Flywheel principal</h2>
+            <h2>Main flywheel</h2>
             {flywheel_html}
         </div>
 
         {secondary_html}
 
         <div class="card">
-            <h2>Basket activa (autodetect)</h2>
+            <h2>Active basket (autodetect)</h2>
             {''.join(basket_rows)}
         </div>
 
         <div class="card">
-            <h2>Mercado</h2>
+            <h2>Market</h2>
             {market_html}
         </div>
 
@@ -413,12 +413,12 @@ def _render_html(state: dict[str, Any]) -> str:
         </div>
 
         <div class="card" style="grid-column: 1/-1;">
-            <h2>Próximos catalysts (5)</h2>
+            <h2>Upcoming catalysts (5)</h2>
             {''.join(upcoming_rows)}
         </div>
     </div>
 
-    <footer>Read-only · single-source-of-truth con /reporte · datos en vivo on-chain + cache</footer>
+    <footer>Read-only · single source of truth with /reporte · live on-chain data + cache</footer>
 </body>
 </html>"""
     return html_doc

@@ -209,23 +209,23 @@ def build_summary() -> str:
     range_label = f"{week_ago.strftime('%Y-%m-%d')} → {now.strftime('%Y-%m-%d')}"
 
     lines: list[str] = [
-        f"📅 RESUMEN SEMANAL — {week_label}",
+        f"📅 WEEKLY SUMMARY — {week_label}",
         f"({range_label})",
         "─" * 42,
         "",
         "📊 PERFORMANCE",
     ]
     if cap["start"] is None or cap["end"] is None:
-        lines.append("  • Capital: snapshots insuficientes (necesita ≥2 /reporte en la semana)")
+        lines.append("  • Capital: insufficient snapshots (needs ≥2 /reporte in the week)")
     else:
-        lines.append(f"  • Capital inicial: {_fmt_usd(cap['start'])}")
-        lines.append(f"  • Capital final: {_fmt_usd(cap['end'])}")
+        lines.append(f"  • Starting capital: {_fmt_usd(cap['start'])}")
+        lines.append(f"  • Ending capital: {_fmt_usd(cap['end'])}")
         delta = _fmt_signed(cap["delta"])
         pct = _fmt_pct(cap["delta_pct"])
-        lines.append(f"  • Δ semana: {delta} ({pct})")
+        lines.append(f"  • Week Δ: {delta} ({pct})")
 
     lines.append("")
-    lines.append("🎯 EVENTOS DESTACADOS")
+    lines.append("🎯 NOTABLE EVENTS")
     if fills:
         for f in fills:
             ts = (f.get("ts") or "")[:10]
@@ -234,10 +234,10 @@ def build_summary() -> str:
             usd = _fmt_signed(f.get("usd"))
             lines.append(f"  • {ts} {kind} {asset} {usd}")
     else:
-        lines.append("  • Sin fills registrados (position_log vacío o no instrumentado)")
+        lines.append("  • No fills recorded (position_log empty or not instrumented)")
 
     if errs:
-        lines.append(f"  ⚠️ Errores 7d: {errs} (ver /errors)")
+        lines.append(f"  ⚠️ Errors 7d: {errs} (see /errors)")
 
     lines.append("")
     lines.append("📡 INTEL TOP 5")
@@ -248,10 +248,10 @@ def build_summary() -> str:
             txt = (it.get("text") or "").replace("\n", " ").strip()[:140]
             lines.append(f"  • {ts} [{src}] {txt}")
     else:
-        lines.append("  • Sin entradas en intel_memory esta semana")
+        lines.append("  • No intel_memory entries this week")
 
     lines.append("")
-    lines.append("🔮 PRÓXIMA SEMANA")
+    lines.append("🔮 NEXT WEEK")
     if upcoming:
         for ev in upcoming:
             try:
@@ -262,10 +262,10 @@ def build_summary() -> str:
             except Exception:
                 continue
     else:
-        lines.append("  • Sin catalysts próximos (revisar /calendar)")
+        lines.append("  • No upcoming catalysts (check /calendar)")
 
     lines.append("")
-    lines.append("💡 Recordá: target ≤5 /reporte en 2 semanas. R17 trabaja por vos.")
+    lines.append("💡 Remember: target ≤5 /reporte in 2 weeks. R17 works for you.")
     return "\n".join(lines)
 
 

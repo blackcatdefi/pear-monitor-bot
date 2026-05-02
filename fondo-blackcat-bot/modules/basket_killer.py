@@ -126,23 +126,23 @@ async def _evaluate_btc_above_82k() -> TriggerResult:
     px = await get_spot_price("BTC")
     fired = False
     detail = ""
-    distance = "lejos"
+    distance = "far"
     if px:
         _record_btc(px)
         if _btc_above_for_hours(82000, 4):
             fired = True
-            distance = "ACTIVO"
-            detail = f"BTC ${px:,.0f}, sostenido > $82K últimas 4h"
+            distance = "ACTIVE"
+            detail = f"BTC ${px:,.0f}, sustained > $82K last 4h"
         elif px > 80000:
-            distance = "cerca"
-            detail = f"BTC ${px:,.0f} (${82000 - px:,.0f} de $82K)"
+            distance = "near"
+            detail = f"BTC ${px:,.0f} (${82000 - px:,.0f} from $82K)"
         else:
             detail = f"BTC ${px:,.0f}"
     else:
         detail = "BTC price unavailable"
     return TriggerResult(
         trigger_id="btc_above_82k_4h",
-        name="BTC > $82K sostenido 4h (invalida bear trap)",
+        name="BTC > $82K sustained 4h (invalidates bear trap)",
         fired=fired,
         distance_text=distance,
         detail=detail,
@@ -154,16 +154,16 @@ async def _evaluate_btc_dca_zone() -> TriggerResult:
     from modules.portfolio import get_spot_price
     px = await get_spot_price("BTC")
     fired = False
-    distance = "lejos"
+    distance = "far"
     detail = ""
     if px:
         if 63000 <= px <= 65000:
             fired = True
-            distance = "ACTIVO"
-            detail = f"BTC ${px:,.0f} en zona DCA $63-65K (zona verde multipropósito)"
+            distance = "ACTIVE"
+            detail = f"BTC ${px:,.0f} in DCA zone $63-65K (multi-purpose green zone)"
         elif 62000 <= px < 63000 or 65000 < px <= 66000:
-            distance = "cerca"
-            detail = f"BTC ${px:,.0f} cerca de zona $63-65K"
+            distance = "near"
+            detail = f"BTC ${px:,.0f} near zone $63-65K"
         else:
             detail = f"BTC ${px:,.0f}"
     else:
@@ -190,23 +190,23 @@ async def _evaluate_hf_flywheel() -> TriggerResult:
             if hf is not None and (hf_min is None or hf < hf_min):
                 hf_min = float(hf)
     fired = False
-    distance = "lejos"
+    distance = "far"
     detail = ""
     if hf_min is not None:
         if hf_min < 1.10:
             fired = True
-            distance = "ACTIVO"
-            detail = f"HF flywheel = {hf_min:.3f} < 1.10 — ZONA CRÍTICA"
+            distance = "ACTIVE"
+            detail = f"HF flywheel = {hf_min:.3f} < 1.10 — CRITICAL ZONE"
         elif hf_min < 1.20:
-            distance = "cerca"
-            detail = f"HF flywheel = {hf_min:.3f} (zona monitoreo)"
+            distance = "near"
+            detail = f"HF flywheel = {hf_min:.3f} (monitor zone)"
         else:
-            detail = f"HF flywheel = {hf_min:.3f} (saludable)"
+            detail = f"HF flywheel = {hf_min:.3f} (healthy)"
     else:
         detail = "HF data unavailable"
     return TriggerResult(
         trigger_id="hf_flywheel_below_110",
-        name="HF flywheel < 1.10 (zona crítica)",
+        name="HF flywheel < 1.10 (critical zone)",
         fired=fired,
         distance_text=distance,
         detail=detail,
@@ -238,22 +238,22 @@ async def _evaluate_basket_drawdown() -> TriggerResult:
                 basket_upnl += upnl
                 has_basket = True
     fired = False
-    distance = "lejos"
+    distance = "far"
     if not has_basket:
-        detail = "Basket sin posiciones activas"
+        detail = "Basket has no active positions"
     elif basket_upnl < -2000:
         fired = True
-        distance = "ACTIVO"
-        detail = f"Basket UPnL = -${abs(basket_upnl):,.2f} < -$2,000 (drawdown extremo)"
+        distance = "ACTIVE"
+        detail = f"Basket UPnL = -${abs(basket_upnl):,.2f} < -$2,000 (extreme drawdown)"
     elif basket_upnl < -1000:
-        distance = "cerca"
+        distance = "near"
         detail = f"Basket UPnL = -${abs(basket_upnl):,.2f}"
     else:
         sign = "+" if basket_upnl >= 0 else "-"
         detail = f"Basket UPnL = {sign}${abs(basket_upnl):,.2f}"
     return TriggerResult(
         trigger_id="basket_drawdown_2k",
-        name="Basket UPnL < -$2,000 (drawdown extremo)",
+        name="Basket UPnL < -$2,000 (extreme drawdown)",
         fired=fired,
         distance_text=distance,
         detail=detail,
@@ -274,21 +274,21 @@ async def _evaluate_ueth_borrow_apy() -> TriggerResult:
                 apy = float(v.get("apy_borrow") or 0.0) * 100
                 break
     fired = False
-    distance = "lejos"
+    distance = "far"
     if apy is None:
         detail = "UETH APY data unavailable"
     elif apy > 10:
         fired = True
-        distance = "ACTIVO"
-        detail = f"UETH borrow APY = {apy:.2f}% > 10% (insostenible para flywheel)"
+        distance = "ACTIVE"
+        detail = f"UETH borrow APY = {apy:.2f}% > 10% (unsustainable for flywheel)"
     elif apy > 6:
-        distance = "cerca"
-        detail = f"UETH borrow APY = {apy:.2f}% > 6% (zona warning)"
+        distance = "near"
+        detail = f"UETH borrow APY = {apy:.2f}% > 6% (warning zone)"
     else:
         detail = f"UETH borrow APY = {apy:.2f}%"
     return TriggerResult(
         trigger_id="ueth_apy_above_10",
-        name="UETH borrow APY > 10% (flywheel insostenible)",
+        name="UETH borrow APY > 10% (flywheel unsustainable)",
         fired=fired,
         distance_text=distance,
         detail=detail,
@@ -323,17 +323,17 @@ def format_kill_status(results: list[TriggerResult]) -> str:
     lines = ["🎯 KILL TRIGGERS — basket v5 + flywheel", "─" * 40]
     for r in results:
         if r.fired:
-            tag = "🚨 ACTIVO"
-        elif r.distance_text == "cerca":
-            tag = "⚠️ CERCA"
+            tag = "🚨 ACTIVE"
+        elif r.distance_text in ("near", "cerca"):
+            tag = "⚠️ NEAR"
         else:
-            tag = "✅ lejos"
+            tag = "✅ far"
         lines.append(f"{tag} {r.name}")
         lines.append(f"   {r.detail}")
-        lines.append(f"   Acción: {r.action}")
+        lines.append(f"   Action: {r.action}")
         lines.append("")
-    lines.append("ℹ️ Si /kill_status muestra ACTIVO, ejecutar /kill para detalle.")
-    lines.append("Auto-close DESACTIVADO siempre — la decisión final es humana.")
+    lines.append("ℹ️ If /kill_status shows ACTIVE, run /kill for close details.")
+    lines.append("Auto-close DISABLED always — final decision is always human.")
     return "\n".join(lines)
 
 
@@ -358,12 +358,12 @@ async def scheduled_check(bot) -> int:
         if r.trigger_id in fired_today:
             continue
         msg = (
-            f"🚨 KILL TRIGGER ACTIVO\n"
+            f"🚨 KILL TRIGGER ACTIVE\n"
             f"{r.name}\n\n"
             f"{r.detail}\n\n"
-            f"Acción sugerida: {r.action}\n"
-            f"Ejecutar /kill_status para todos los triggers,\n"
-            f"o /kill para detalle de cierre."
+            f"Suggested action: {r.action}\n"
+            f"Run /kill_status for all triggers,\n"
+            f"or /kill for close details."
         )
         try:
             await send_bot_message(bot, TELEGRAM_CHAT_ID, msg)

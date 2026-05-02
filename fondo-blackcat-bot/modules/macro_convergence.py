@@ -328,7 +328,7 @@ def format_convergence_alert(calls: dict[str, dict[str, Any]], direction: str, a
             if quote:
                 lines.append(f"    '{quote[:200]}'")
     lines.append("")
-    lines.append("\U0001f4a1 Convergencia = alta convicción. Considerá ajustar exposure.")
+    lines.append("\U0001f4a1 Convergence = high conviction. Consider adjusting exposure.")
     return "\n".join(lines)
 
 

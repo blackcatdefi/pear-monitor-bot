@@ -59,9 +59,9 @@ async def build_heartbeat() -> str:
             lines.append(f"BTC: ${snap.market.btc:,.0f}")
     except Exception:  # noqa: BLE001
         log.exception("heartbeat: snapshot failed")
-        lines.append("⚠️ Snapshot no disponible (heartbeat aún OK).")
+        lines.append("⚠️ Snapshot unavailable (heartbeat still OK).")
     lines.append("")
-    lines.append("ℹ️ /reporte para análisis completo. /errors si hubo fallos.")
+    lines.append("ℹ️ /reporte for full analysis. /errors if there were failures.")
     return "\n".join(lines)
 
 

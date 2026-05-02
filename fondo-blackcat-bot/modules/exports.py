@@ -264,11 +264,11 @@ def export_dispatch(tipo: str, periodo: str) -> tuple[str, int]:
     """Run the right exporter. Returns (file_path, row_count)."""
     if tipo not in VALID_TYPES:
         raise ValueError(
-            f"Tipo inválido '{tipo}'. Válidos: {', '.join(sorted(VALID_TYPES))}"
+            f"Invalid type '{tipo}'. Valid: {', '.join(sorted(VALID_TYPES))}"
         )
     if periodo not in VALID_PERIODS:
         raise ValueError(
-            f"Periodo inválido '{periodo}'. Válidos: {', '.join(sorted(VALID_PERIODS))}"
+            f"Invalid period '{periodo}'. Valid: {', '.join(sorted(VALID_PERIODS))}"
         )
 
     fn = {

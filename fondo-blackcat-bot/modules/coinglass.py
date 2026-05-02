@@ -148,11 +148,11 @@ def format_basket_section(data: dict[str, Any]) -> str:
     """Render the basket summary for /reporte."""
     if not data or not data.get("available"):
         reason = (data or {}).get("reason", "unknown")
-        return f"\n📊 OI / FUNDING (Coinglass): no disponible ({reason})\n"
+        return f"\n📊 OI / FUNDING (Coinglass): unavailable ({reason})\n"
 
     basket = data.get("basket") or []
     if not basket:
-        return "\n📊 OI / FUNDING (Coinglass): sin datos\n"
+        return "\n📊 OI / FUNDING (Coinglass): no data\n"
 
     lines = ["", "📊 OI / FUNDING (Coinglass)"]
     for r in basket:
@@ -169,11 +169,11 @@ def format_basket_section(data: dict[str, Any]) -> str:
     crowded = data.get("crowded_shorts") or []
     if crowded:
         lines.append("")
-        lines.append("⚠️ CROWDED SHORTS (funding muy negativo = risk squeeze):")
+        lines.append("⚠️ CROWDED SHORTS (very negative funding = squeeze risk):")
         for r in crowded:
             lines.append(
                 f"  {r['symbol']:<5} funding {r['funding']*100:+.4f}% — "
-                "SHORTS pagando LONGS, vigilar"
+                "SHORTS paying LONGS, watch out"
             )
 
     return "\n".join(lines) + "\n"

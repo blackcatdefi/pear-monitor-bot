@@ -233,10 +233,10 @@ async def build_pretrade_checklist(symbol: str) -> str:
 
     # 1. News
     sentiment = _quick_sentiment(intel_items)
-    lines.append(f"\n📰 News (5d): {len(intel_items)} entries en intel_memory")
-    lines.append(f"   Sentiment heurístico: {sentiment}")
+    lines.append(f"\n📰 News (5d): {len(intel_items)} entries in intel_memory")
+    lines.append(f"   Heuristic sentiment: {sentiment}")
     if intel_items:
-        lines.append("   Últimas 3 menciones:")
+        lines.append("   Last 3 mentions:")
         for it in intel_items[:3]:
             txt = (it.get("text") or "").replace("\n", " ").strip()[:120]
             ts = (it.get("ts") or "")[:10]
@@ -249,13 +249,13 @@ async def build_pretrade_checklist(symbol: str) -> str:
     lines.append("")
     lines.append("💰 Funding HL")
     if f_hr is None:
-        lines.append("   No disponible (perp inexistente o RPC offline)")
+        lines.append("   Unavailable (perp does not exist or RPC offline)")
     else:
         lines.append(f"   Hourly: {f_hr:.4f}% | Daily: {f_d:.4f}%")
         if f_d < -0.03:
-            lines.append("   ⚠️ Overcrowded SHORT — riesgo squeeze")
+            lines.append("   ⚠️ Overcrowded SHORT — squeeze risk")
         elif f_d > 0.10:
-            lines.append("   ⚠️ Overcrowded LONG — riesgo flush")
+            lines.append("   ⚠️ Overcrowded LONG — flush risk")
 
     # 3. OI/Volume
     oi = hl_data.get("oi")
@@ -266,9 +266,9 @@ async def build_pretrade_checklist(symbol: str) -> str:
         lines.append(f"📊 OI=${oi:,.0f} | Vol24h=${vol:,.0f}")
         lines.append(f"   OI/Vol ratio: {ratio:.2f}")
         if ratio > 5:
-            lines.append("   ⚠️ Apalancamiento extremo (OI >> volume)")
+            lines.append("   ⚠️ Extreme leverage (OI >> volume)")
     else:
-        lines.append("📊 OI/Volume: data parcial")
+        lines.append("📊 OI/Volume: partial data")
         if oi is not None:
             lines.append(f"   OI=${oi:,.0f}")
         if vol is not None:
@@ -279,7 +279,7 @@ async def build_pretrade_checklist(symbol: str) -> str:
     if price.get("current") is not None:
         lines.append(f"📈 Price: {_format_usd(price['current'])}")
     else:
-        lines.append("📈 Price: no disponible")
+        lines.append("📈 Price: unavailable")
 
     # 5. Unlocks
     lines.append("")
@@ -291,9 +291,9 @@ async def build_pretrade_checklist(symbol: str) -> str:
             pct_s = f"{pct:.2f}% supply" if isinstance(pct, (int, float)) else str(pct or "?")
             lines.append(f"   • {date}: {pct_s}")
     else:
-        lines.append("🔓 Unlocks 30d: ninguno (o data unavailable)")
+        lines.append("🔓 Unlocks 30d: none (or data unavailable)")
 
     lines.append("")
-    lines.append("💡 Documentá esta info antes de ejecutar el trade.")
+    lines.append("💡 Document this info before executing the trade.")
     lines.append("   Persistir en /log add para tracking ex-post.")
     return "\n".join(lines)

@@ -163,7 +163,7 @@ async def _fetch_fund_snapshot() -> dict[str, Any]:
 
 def _format_events(events: list[dict[str, Any]]) -> str:
     if not events:
-        return "  (sin catalysts próximos en 24h)"
+        return "  (no upcoming catalysts in 24h)"
     out: list[str] = []
     for e in events[:8]:
         name = e.get("name") or e.get("event_id") or "?"
@@ -175,7 +175,7 @@ def _format_events(events: list[dict[str, Any]]) -> str:
 
 def _format_overnight(market: dict[str, Any]) -> str:
     if not market or not market.get("prices"):
-        return "  (no hay datos de mercado)"
+        return "  (no market data available)"
     lines: list[str] = []
     for sym in ("BTC", "ETH", "HYPE"):
         b = (market.get("prices") or {}).get(sym) or {}
@@ -214,10 +214,10 @@ async def build_morning_brief() -> str:
         "\U0001f408\u200d\u2b1b MORNING BRIEF \u2014 " + now.strftime("%a %d %b %H:%M UTC"),
         "\u2500" * 30,
         "",
-        "\U0001f4ca ESTADO DEL FONDO",
-        f"Capital total: ${cap:,.0f}",
+        "\U0001f4ca FUND STATUS",
+        f"Total capital: ${cap:,.0f}",
         f"HF flywheel: {hf_str}",
-        f"Basket activa: {'sí (' + basket_status + ')' if basket_active else 'no'}",
+        f"Active basket: {'yes (' + basket_status + ')' if basket_active else 'no'}",
     ]
     if basket_active:
         lines.append(f"Basket UPnL: ${basket_upnl:+,.2f}")
@@ -227,15 +227,15 @@ async def build_morning_brief() -> str:
         "\U0001f4c8 OVERNIGHT (12h)",
         _format_overnight(market),
         "",
-        f"\U0001f3af AGENDA DEL DÍA ({len(events)} eventos)",
+        f"\U0001f3af TODAY'S AGENDA ({len(events)} events)",
         _format_events(events),
         "",
         "\U0001f4e1 MACRO STACK (24h)",
-        macro_updates.strip()[:1500] if macro_updates else "  (sin updates capturadas)",
+        macro_updates.strip()[:1500] if macro_updates else "  (no updates captured)",
         "",
-        f"\u26a0\ufe0f Errores 24h: {alerts}",
+        f"\u26a0\ufe0f Errors 24h: {alerts}",
         "",
-        "Tipea /reporte para análisis completo o /status para vista rápida.",
+        "Type /reporte for full analysis or /status for quick view.",
     ])
     return "\n".join(lines)
 

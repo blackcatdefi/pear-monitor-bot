@@ -52,7 +52,7 @@ def _humanize_until(event_time: datetime) -> str:
     delta = event_time - datetime.now(timezone.utc)
     total = int(delta.total_seconds())
     if total <= 0:
-        return "ya pasó"
+        return "already passed"
     days = total // 86400
     hours = (total % 86400) // 3600
     mins = (total % 3600) // 60
@@ -130,8 +130,8 @@ async def format_calendar_with_scoring(limit: int = 12) -> str:
     events = cal.upcoming_events(limit=limit)
     if not events:
         return (
-            "\U0001f5d3 CATALYSTS PRÓXIMOS\n"
-            "(calendar vacío — usá /add_event)"
+            "\U0001f5d3 UPCOMING CATALYSTS\n"
+            "(calendar empty — use /add_event)"
         )
     keys = await _active_position_keys()
     rows: list[tuple[int, str]] = []
@@ -145,16 +145,16 @@ async def format_calendar_with_scoring(limit: int = 12) -> str:
         until = _humanize_until(ts)
         line = (
             f"{emoji} [{score}/10] {ev.name}\n"
-            f"   {when} · en {until} · {ev.category} ({ev.impact_level})"
+            f"   {when} · in {until} · {ev.category} ({ev.impact_level})"
         )
         if ev.affects_positions:
             relevant = [a for a in ev.affects_positions if a in keys]
             if relevant:
-                line += f"\n   \u26a0\ufe0f Afecta: {', '.join(relevant)}"
+                line += f"\n   \u26a0\ufe0f Affects: {', '.join(relevant)}"
         rows.append((score, line))
 
     rows.sort(key=lambda r: (-r[0],))
-    out: list[str] = ["\U0001f5d3 CATALYSTS PRÓXIMOS (con scoring)", "\u2500" * 30]
+    out: list[str] = ["\U0001f5d3 UPCOMING CATALYSTS (with scoring)", "\u2500" * 30]
     for _score, line in rows:
         out.append(line)
         out.append("")

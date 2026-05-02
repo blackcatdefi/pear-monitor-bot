@@ -149,22 +149,22 @@ async def build_status_block() -> str:
         lines.append(f"🔁 Flywheel HF: {hf_str}")
         if flywheel_collateral_bal is not None and flywheel_collateral_sym:
             lines.append(
-                f"   Colateral: {flywheel_collateral_bal:.2f} {flywheel_collateral_sym}"
+                f"   Collateral: {flywheel_collateral_bal:.2f} {flywheel_collateral_sym}"
             )
         if flywheel_debt_bal is not None and flywheel_debt_sym:
             lines.append(
-                f"   Deuda: {flywheel_debt_bal:.4f} {flywheel_debt_sym}"
+                f"   Debt: {flywheel_debt_bal:.4f} {flywheel_debt_sym}"
             )
     else:
-        lines.append("🔁 Flywheel: sin colateral activo o RPC offline")
+        lines.append("🔁 Flywheel: no active collateral or RPC offline")
     lines.append("")
     lines.append(f"🎯 Basket v5: {BASKET_V5_STATUS}")
     if basket_active:
-        lines.append(f"   ↳ Posiciones SHORT activas: {basket_positions_count}")
+        lines.append(f"   ↳ Active SHORT positions: {basket_positions_count}")
     lines.append(f"💎 Trade del Ciclo (Blofin): {TRADE_DEL_CICLO_STATUS}")
     if TRADE_DEL_CICLO_STATUS == "CLOSED":
         lines.append(
-            f"   PnL realized último ciclo: "
+            f"   Realized PnL last cycle: "
             f"{_fmt_signed_usd(float(TRADE_DEL_CICLO_PNL_REALIZED or 0))}"
         )
     lines.append("")
@@ -175,10 +175,10 @@ async def build_status_block() -> str:
     if fg_value is not None:
         lines.append(f"😨 F&G: {fg_value} ({fg_label or '—'})")
     lines.append("")
-    lines.append(f"⚠️ Errores última hora: {active_alerts}")
-    lines.append(f"🔮 Próximo catalyst: {next_event_text}")
+    lines.append(f"⚠️ Errors last hour: {active_alerts}")
+    lines.append(f"🔮 Next catalyst: {next_event_text}")
     if next_event_in != "—":
         lines.append(f"   ETA: {next_event_in}")
     lines.append("")
-    lines.append("ℹ️ /reporte para análisis LLM completo (30-90s)")
+    lines.append("ℹ️ /reporte for full LLM analysis (30-90s)")
     return "\n".join(lines)

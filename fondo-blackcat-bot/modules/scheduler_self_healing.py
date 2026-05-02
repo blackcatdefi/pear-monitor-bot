@@ -132,10 +132,10 @@ async def _maybe_escalate(bot, state: dict[str, Any]) -> None:
         from utils.telegram import send_bot_message
         msg = (
             f"🚨 SCHEDULER UNHEALTHY — {state['job_name']}\n"
-            f"Fallos consecutivos: {state['consecutive_failures']}\n"
-            f"Último error: {(state.get('last_error_msg') or '')[:300]}\n"
+            f"Consecutive failures: {state['consecutive_failures']}\n"
+            f"Last error: {(state.get('last_error_msg') or '')[:300]}\n"
             f"Total runs: {state['total_runs']} (fails: {state['total_failures']})\n\n"
-            "Acción: revisar /errors y logs Railway. /scheduler_health para tabla completa."
+            "Action: check /errors and Railway logs. /scheduler_health for full table."
         )
         await send_bot_message(bot, TELEGRAM_CHAT_ID, msg)
         state["last_escalation_ts"] = now.isoformat()
@@ -211,7 +211,7 @@ def format_health() -> str:
     if not states:
         return (
             "🩺 SCHEDULER HEALTH\n" + "─" * 30 + "\n"
-            "Sin runs aún registrados. Esperá un ciclo de scheduler."
+            "No runs recorded yet. Wait for a scheduler cycle."
         )
     lines = ["🩺 SCHEDULER HEALTH", "─" * 36]
     for s in states:
@@ -233,6 +233,6 @@ def format_health() -> str:
         if cf > 0 and s.get("last_error_msg"):
             lines.append(f"   Error: {s['last_error_msg'][:160]}")
         lines.append("")
-    lines.append(f"Threshold escalación: {_max_fails()} fallos consecutivos · "
-                 f"Cooldown alert: {ESCALATION_COOLDOWN_HOURS}h")
+    lines.append(f"Escalation threshold: {_max_fails()} consecutive failures · "
+                 f"Alert cooldown: {ESCALATION_COOLDOWN_HOURS}h")
     return "\n".join(lines).rstrip()

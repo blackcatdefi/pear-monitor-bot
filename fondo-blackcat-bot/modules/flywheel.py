@@ -71,7 +71,7 @@ async def compute_flywheel() -> str:
     elif hype_price:
         lines.append(f"HYPE = ${hype_price:,.2f}")
     else:
-        lines.append("⚠ sin precio HYPE/ETH (CoinGecko offline)")
+        lines.append("⚠ no HYPE/ETH price (CoinGecko offline)")
     lines.append("")
 
     total_long_hype_usd = 0.0
@@ -243,7 +243,7 @@ async def compute_flywheel() -> str:
                     icon = "✅"
                 # Suffix = descriptor
                 if i == 0:
-                    suffix = "  (🟢 más barato)"
+                    suffix = "  (🟢 cheapest)"
                 elif apy >= 0.10:
                     suffix = "  (>10%)"
                 elif apy >= 0.06:
@@ -255,12 +255,12 @@ async def compute_flywheel() -> str:
                     f"  {icon} {name:<7}{apr_pct:5.2f}% APR / {apy_pct:5.2f}% APY{suffix}"
                 )
         else:
-            lines.append("  — ninguno de los target stables presente en el pool")
+            lines.append("  — none of the target stables present in the pool")
 
         for m in missing:
-            lines.append(f"  ⚪ {m}: no disponible en pool")
+            lines.append(f"  ⚪ {m}: unavailable in pool")
 
-        # Non-stable reference block (solo si alguno tiene APR>0).
+        # Non-stable reference block (only if any APR>0).
         ref_rows: list[dict[str, Any]] = []
         for tgt in NON_STABLE_REFS:
             entry = _entry_for(tgt)
@@ -274,7 +274,7 @@ async def compute_flywheel() -> str:
         if ref_rows:
             ref_rows.sort(key=lambda x: x["apy"])
             lines.append("")
-            lines.append("  ⚙️ Non-stable (solo referencia)")
+            lines.append("  ⚙️ Non-stable (reference only)")
             for row in ref_rows:
                 apr_pct = row["apr"] * 100
                 apy_pct = row["apy"] * 100
@@ -284,7 +284,7 @@ async def compute_flywheel() -> str:
                 )
 
         ts = rates.get("fetched_at_iso") or "—"
-        lines.append(f"  (última lectura RPC: {ts}, cache 15min)")
+        lines.append(f"  (last RPC read: {ts}, cache 15min)")
         lines.append("")
 
         # ── Rotation suggestion ─────────────────────────────────────────
@@ -308,26 +308,26 @@ async def compute_flywheel() -> str:
                                             ueth_debt_usd += (d.get("balance") or 0.0) * eth_price
                         monthly_savings = ueth_debt_usd * spread / 12 if ueth_debt_usd else 0.0
                         save_str = (
-                            f"~${monthly_savings:,.0f}/mes"
+                            f"~${monthly_savings:,.0f}/month"
                             if monthly_savings >= 1
-                            else "ahorro marginal"
+                            else "marginal savings"
                         )
                         lines.append(
-                            f"💡 Sugerencia: {best_alt['target']} es "
-                            f"{spread*100:.2f}% más barato que UETH. Si la tesis "
-                            f"direccional ETH-short no aplica o HF está alto, "
-                            f"considerar flip parcial UETH→{best_alt['target']} "
-                            f"para reducir carry cost {save_str}."
+                            f"💡 Suggestion: {best_alt['target']} is "
+                            f"{spread*100:.2f}% cheaper than UETH. If the "
+                            f"ETH-short directional thesis does not apply or HF is high, "
+                            f"consider partial flip UETH→{best_alt['target']} "
+                            f"to reduce carry cost {save_str}."
                         )
                         lines.append("")
     else:
         err = rates.get("error") if isinstance(rates, dict) else "n/a"
-        lines.append(f"  ⚠️ Lectura RPC falló: {err}")
+        lines.append(f"  ⚠️ RPC read failed: {err}")
         lines.append("")
 
     lines.append(
-        "Notas: el flywheel HL gana si HYPE outperforma al asset borrowed. "
-        "Si la deuda es ETH-denominada, es un pair trade implícito LONG HYPE / SHORT ETH. "
-        "Alerta automática dispara si UETH borrow APY > 10%."
+        "Notes: the HL flywheel wins if HYPE outperforms the borrowed asset. "
+        "If the debt is ETH-denominated, it is an implicit pair trade LONG HYPE / SHORT ETH. "
+        "Automatic alert fires if UETH borrow APY > 10%."
     )
     return "\n".join(lines)

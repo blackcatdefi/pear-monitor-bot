@@ -185,7 +185,7 @@ def build_matrix_text(
     )
     if not is_stable:
         lines.append(
-            f"    • O esperar a que {debt_ticker} baje ≥ {price_drop_needed_pct * 100:.1f}%"
+            f"    • Or wait for {debt_ticker} to drop ≥ {price_drop_needed_pct * 100:.1f}%"
         )
 
     return "\n".join(lines)
@@ -263,7 +263,7 @@ def _compute_cycle_section(wallets: list[dict[str, Any]]) -> str:
         if liq and mark:
             liq_pct = ((mark - liq) / mark) * 100
             lines.append(
-                f"    BTC -{liq_pct:.0f}% (${liq:,.0f}) → LIQUIDACIÓN 💀"
+                f"    BTC -{liq_pct:.0f}% (${liq:,.0f}) → LIQUIDATION 💀"
             )
 
         # DCA plan
@@ -303,10 +303,10 @@ async def compute_liq_matrix() -> str:
     prices = await coingecko_prices()
 
     blocks: list[str] = []
-    blocks.append("💀 LIQ CALC — MATRIZ HYPE × DEUDA")
+    blocks.append("💀 LIQ CALC — HYPE × DEBT MATRIX")
     blocks.append("─" * 40)
     blocks.append(
-        "HF proyectado bajo escenarios de precio. 💀 = liquidación, ⚠ = zona crítica."
+        "Projected HF under price scenarios. 💀 = liquidation, ⚠ = critical zone."
     )
     blocks.append("")
 
@@ -353,7 +353,7 @@ async def compute_liq_matrix() -> str:
         blocks.append("")
 
     if not any_debt:
-        blocks.append("— Sin deuda activa en ningún wallet.")
+        blocks.append("— No active debt in any wallet.")
 
     # Append Trade del Ciclo section
     cycle_section = _compute_cycle_section(wallets)

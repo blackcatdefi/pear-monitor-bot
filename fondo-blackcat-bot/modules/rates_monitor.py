@@ -40,7 +40,7 @@ def _save_state(state: dict) -> None:
 
 
 async def scheduled_check(bot) -> int:
-    """Devuelve nº de alertas enviadas en este ciclo."""
+    """Returns number of alerts sent in this cycle."""
     if os.getenv("RATES_MONITOR_ENABLED", "true").strip().lower() == "false":
         return 0
     if not TELEGRAM_CHAT_ID:
@@ -69,8 +69,8 @@ async def scheduled_check(bot) -> int:
                 if apy > 10 and key_crit not in fired_today:
                     msg = (
                         f"🚨 UETH borrow APY = {apy:.2f}% > 10%\n"
-                        "Threshold crítico — flywheel costo insostenible.\n"
-                        "Considerar repago / debt flip a stable."
+                        "Critical threshold — flywheel cost unsustainable.\n"
+                        "Consider repay / debt flip to stable."
                     )
                     await send_bot_message(bot, TELEGRAM_CHAT_ID, msg)
                     fired_today.add(key_crit)
@@ -78,7 +78,7 @@ async def scheduled_check(bot) -> int:
                 elif apy > 6 and key_warn not in fired_today and key_crit not in fired_today:
                     msg = (
                         f"⚠️ UETH borrow APY = {apy:.2f}% > 6%\n"
-                        "Threshold de tesis — monitorear próximas horas."
+                        "Thesis threshold — monitor next few hours."
                     )
                     await send_bot_message(bot, TELEGRAM_CHAT_ID, msg)
                     fired_today.add(key_warn)
@@ -106,25 +106,25 @@ async def scheduled_check(bot) -> int:
             key_warn = "hf_warn_120"
             if hf_min < 1.05 and key_emerg not in fired_today:
                 msg = (
-                    f"🚨🚨 HF EMERGENCIA: {hf_min:.3f} < 1.05\n"
-                    "LIQUIDACIÓN INMINENTE.\n"
-                    "Repagar deuda YA o agregar colateral."
+                    f"🚨🚨 HF EMERGENCY: {hf_min:.3f} < 1.05\n"
+                    "LIQUIDATION IMMINENT.\n"
+                    "Repay debt NOW or add collateral."
                 )
                 await send_bot_message(bot, TELEGRAM_CHAT_ID, msg)
                 fired_today.add(key_emerg)
                 sent += 1
             elif hf_min < 1.10 and key_crit not in fired_today:
                 msg = (
-                    f"🚨 HF CRÍTICO: {hf_min:.3f} < 1.10\n"
-                    "Acción operativa requerida."
+                    f"🚨 HF CRITICAL: {hf_min:.3f} < 1.10\n"
+                    "Operational action required."
                 )
                 await send_bot_message(bot, TELEGRAM_CHAT_ID, msg)
                 fired_today.add(key_crit)
                 sent += 1
             elif hf_min < 1.20 and key_warn not in fired_today:
                 msg = (
-                    f"⚠️ HF en zona monitoreo: {hf_min:.3f} < 1.20\n"
-                    "Vigilar evolución."
+                    f"⚠️ HF in monitor zone: {hf_min:.3f} < 1.20\n"
+                    "Watch evolution."
                 )
                 await send_bot_message(bot, TELEGRAM_CHAT_ID, msg)
                 fired_today.add(key_warn)

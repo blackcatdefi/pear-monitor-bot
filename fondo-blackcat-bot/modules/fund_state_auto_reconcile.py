@@ -212,10 +212,10 @@ def format_with_keyboard_message(d: Any) -> tuple[str, InlineKeyboardMarkup | No
     pending_id = persist_pending(d)
     text = (
         "\U0001f504 DISCREPANCIA DETECTADA en fund_state.py\n"
-        f"Tipo: {getattr(d, 'type', '?')}\n"
+        f"Type: {getattr(d, 'type', '?')}\n"
         f"Wallet: {getattr(d, 'wallet', '?')}\n"
-        f"Detalle: {getattr(d, 'detail', '')[:300]}\n"
-        f"Sugerido: BASKET_V5_STATUS \u2192 {suggested}\n\n"
-        "Aplicar automáticamente? (commit + push)"
+        f"Detail: {getattr(d, 'detail', '')[:300]}\n"
+        f"Suggested: BASKET_V5_STATUS \u2192 {suggested}\n\n"
+        "Apply automatically? (commit + push)"
     )
     return (text, build_keyboard_for(pending_id))

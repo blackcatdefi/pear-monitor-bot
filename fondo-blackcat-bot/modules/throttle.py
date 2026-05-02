@@ -76,8 +76,8 @@ def throttle(min_interval_s: int = 60, key_prefix: str | None = None) -> Callabl
                 if update.message is not None:
                     cmd_name = func.__name__.replace("cmd_", "")
                     await update.message.reply_text(
-                        f"⏱ /{cmd_name} ya ejecutado hace <{min_interval_s}s. "
-                        f"Esperá {wait_s}s.",
+                        f"⏱ /{cmd_name} already executed less than {min_interval_s}s ago. "
+                        f"Wait {wait_s}s.",
                     )
                 return
             return await func(update, context)

@@ -53,9 +53,9 @@ async def _capital_summary() -> dict[str, Any]:
         if snap.market.fear_greed_value is not None:
             fg = snap.market.fear_greed_value
             if fg >= 70:
-                out["regime_hint"] = "greed (cuidado FOMO)"
+                out["regime_hint"] = "greed (watch FOMO)"
             elif fg <= 30:
-                out["regime_hint"] = "fear (oportunidad acumulación)"
+                out["regime_hint"] = "fear (accumulation opportunity)"
             else:
                 out["regime_hint"] = "neutral"
     except Exception:  # noqa: BLE001
@@ -112,37 +112,37 @@ async def generate_aipear_prompt_post_basket(basket_close: dict[str, Any] | None
     lines = [
         f"🤖 AIPEAR PROMPT — {next_label.upper()}",
         "─" * 36,
-        f"Basket previo: {label} (PnL realizado: {fmt_pnl})",
-        f"Capital disponible: {fmt_cap}",
-        f"Mercado: BTC {fmt_btc} · ETH {fmt_eth} · HYPE {fmt_hype} · FG {fmt_fg} ({cap['regime_hint']})",
+        f"Previous basket: {label} (Realized PnL: {fmt_pnl})",
+        f"Available capital: {fmt_cap}",
+        f"Market: BTC {fmt_btc} · ETH {fmt_eth} · HYPE {fmt_hype} · FG {fmt_fg} ({cap['regime_hint']})",
         "",
-        "Ganadores en {label}:".format(label=label),
+        "Winners in {label}:".format(label=label),
     ]
     lines.append("  • " + (", ".join(winners) if winners else "—"))
-    lines.append("Perdedores:")
+    lines.append("Losers:")
     lines.append("  • " + (", ".join(losers) if losers else "—"))
     lines.append("")
-    lines.append("Intel reciente (últimas 48h):")
+    lines.append("Recent intel (last 48h):")
     if intel:
         for it in intel[:6]:
             lines.append(f"  • {it}")
     else:
-        lines.append("  • (sin intel cacheada)")
+        lines.append("  • (no cached intel)")
     lines.append("")
     lines.append("─" * 36)
-    lines.append("PROMPT PARA AIPEAR (copy-paste):")
+    lines.append("PROMPT FOR AIPEAR (copy-paste):")
     lines.append("─" * 36)
     lines.append(
-        f"Diseñá {next_label}: short basket de 4-6 alts vs USDC en HyperLiquid. "
-        f"Capital: {fmt_cap}. Régimen: {cap['regime_hint']}. "
-        f"Aprendido del basket previo: rotar fuera de los perdedores ({', '.join(losers) or 'n/a'}), "
-        f"ponderar exposure hacia bias confirmado por intel reciente. "
-        "Output: lista (asset, side, weight%, leverage, entry zone, SL pct, trailing pct activation pct), "
-        "thesis 2-3 líneas por nombre, kill triggers macro y micro, "
-        "conditions to add/scale-down. Apuntar a beta -0.8 a -1.2 vs BTC."
+        f"Design {next_label}: short basket of 4-6 alts vs USDC on HyperLiquid. "
+        f"Capital: {fmt_cap}. Regime: {cap['regime_hint']}. "
+        f"Learned from previous basket: rotate out of losers ({', '.join(losers) or 'n/a'}), "
+        f"weight exposure toward bias confirmed by recent intel. "
+        "Output: list (asset, side, weight%, leverage, entry zone, SL pct, trailing pct activation pct), "
+        "2-3 line thesis per name, macro and micro kill triggers, "
+        "conditions to add/scale-down. Target beta -0.8 to -1.2 vs BTC."
     )
     lines.append("")
-    lines.append("ℹ️ Pegalo en Aipear/Claude/SuperGrok. Subila como BASKET_V5_PLAN cuando esté lista.")
+    lines.append("ℹ️ Paste into Aipear/Claude/SuperGrok. Upload as BASKET_V5_PLAN when ready.")
     return "\n".join(lines)
 
 

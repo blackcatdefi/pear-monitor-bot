@@ -108,7 +108,7 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
             if hf_r < HF_CRITICAL:
                 await _emit(
                     bot, f"hf_critical_{wallet_key}", state,
-                    f"\U0001f6a8 HYPERLEND HF CR\u00cdTICO: {hf_r:.4f} \u2014 {ident} \u2014 acci\u00f3n inmediata!"
+                    f"\U0001f6a8 HYPERLEND HF CRITICAL: {hf_r:.4f} \u2014 {ident} \u2014 immediate action required!"
                 )
             else:
                 _clear(state, f"hf_critical_{wallet_key}")
@@ -133,18 +133,18 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
 
         if decision.severity == "preliq":
             msg = (
-                f"\U0001f6a8\U0001f6a8 HYPERLEND PRE-LIQUIDACI\u00d3N: HF {hf_r:.4f} \u2014 {ident} \u2014 "
-                f"acci\u00f3n inmediata, repay urgente. (Repite c/{hfg.PRELIQ_REPEAT_MIN}min hasta recuperar)"
+                f"\U0001f6a8\U0001f6a8 HYPERLEND PRE-LIQUIDATION: HF {hf_r:.4f} \u2014 {ident} \u2014 "
+                f"immediate action, urgent repay. (Repeats every {hfg.PRELIQ_REPEAT_MIN}min until recovery)"
             )
         elif decision.severity == "critical":
             msg = (
-                f"\U0001f6a8 HYPERLEND HF CR\u00cdTICO: {hf_r:.4f} \u2014 {ident} \u2014 "
-                f"por debajo de {hfg.CRITICAL:.2f}, evaluar repay/colateral"
+                f"\U0001f6a8 HYPERLEND HF CRITICAL: {hf_r:.4f} \u2014 {ident} \u2014 "
+                f"below {hfg.CRITICAL:.2f}, evaluate repay/collateral"
             )
         else:  # warn
             msg = (
                 f"\u26a0\ufe0f HYPERLEND HF: {hf_r:.4f} \u2014 {ident} \u2014 "
-                f"por debajo de {hfg.THRESHOLD:.2f} (zona warn)"
+                f"below {hfg.THRESHOLD:.2f} (warn zone)"
             )
         try:
             if TELEGRAM_CHAT_ID:
@@ -159,13 +159,13 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
     if hype_px is not None:
         if hype_px < HYPE_CRITICAL:
             await _emit(bot, "hype_critical", state,
-                        f"\U0001f534 HYPE @ ${hype_px:.2f} \u2014 VERIFICAR HF INMEDIATAMENTE!")
+                        f"\U0001f534 HYPE @ ${hype_px:.2f} \u2014 CHECK HF IMMEDIATELY!")
         else:
             _clear(state, "hype_critical")
 
         if hype_px < HYPE_WARN:
             await _emit(bot, "hype_warn", state,
-                        f"\U0001f6a8 HYPE @ ${hype_px:.2f} \u2014 impacto directo en colateral HyperLend")
+                        f"\U0001f6a8 HYPE @ ${hype_px:.2f} \u2014 direct impact on HyperLend collateral")
         else:
             _clear(state, "hype_warn")
             _clear(state, "hype_critical")
@@ -175,7 +175,7 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
     if btc_px is not None:
         if btc_px < BTC_WARN:
             await _emit(bot, "btc_warn", state,
-                        f"\U0001f6a8 BTC @ ${btc_px:,.0f} \u2014 debajo de ${BTC_WARN:,.0f}")
+                        f"\U0001f6a8 BTC @ ${btc_px:,.0f} \u2014 below ${BTC_WARN:,.0f}")
         else:
             _clear(state, "btc_warn")
 
@@ -186,8 +186,8 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
             if btc_px <= level["price"]:
                 await _emit(
                     bot, key, state,
-                    f"\U0001f4c9 Dip Alert Trade del Ciclo: BTC @ ${btc_px:,.0f} \u2014 "
-                    f"activar {level['label']} ({level['margin']} margin)"
+                    f"\U0001f4c9 Cycle Trade Dip Alert: BTC @ ${btc_px:,.0f} \u2014 "
+                    f"activate {level['label']} ({level['margin']} margin)"
                 )
             else:
                 _clear(state, key)
@@ -196,8 +196,8 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
         if btc_px <= CYCLE_CRITICAL:
             await _emit(
                 bot, "cycle_critical", state,
-                f"\u26a0\ufe0f ZONA CR\u00cdTICA Trade del Ciclo: BTC @ ${btc_px:,.0f} \u2014 "
-                f"HF del trade cerca de liquidaci\u00f3n!"
+                f"\u26a0\ufe0f CRITICAL ZONE Cycle Trade: BTC @ ${btc_px:,.0f} \u2014 "
+                f"trade HF near liquidation!"
             )
         else:
             _clear(state, "cycle_critical")
@@ -206,8 +206,8 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
         if btc_px >= CYCLE_TP_ZONE:
             await _emit(
                 bot, "cycle_tp", state,
-                f"\U0001f3af TP Zone Trade del Ciclo: BTC @ ${btc_px:,.0f} \u2014 "
-                f"evaluar cierre parcial"
+                f"\U0001f3af TP Zone Cycle Trade: BTC @ ${btc_px:,.0f} \u2014 "
+                f"evaluate partial close"
             )
         else:
             _clear(state, "cycle_tp")
@@ -230,8 +230,8 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
                     await _emit(
                         bot, "ueth_borrow_critical", state,
                         f"\U0001f6a8 [FLYWHEEL] UETH borrow APY = {apy*100:.2f}% — "
-                        "evaluar rotaci\u00f3n a stable o repay parcial inmediato "
-                        "(threshold cr\u00edtico 10%)."
+                        "evaluate rotation to stable or immediate partial repay "
+                        "(critical threshold 10%)."
                     )
                 else:
                     _clear(state, "ueth_borrow_critical")
@@ -240,8 +240,8 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
                     await _emit(
                         bot, "ueth_borrow_warn", state,
                         f"\u26a0\ufe0f [FLYWHEEL] UETH borrow APY = {apy*100:.2f}% — "
-                        "sobre threshold 6% de la tesis. Costo del pair trade "
-                        "se hace insostenible si se mantiene."
+                        "above thesis 6% threshold. Pair trade cost "
+                        "becomes unsustainable if sustained."
                     )
                 else:
                     _clear(state, "ueth_borrow_warn")
@@ -268,8 +268,8 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
             key = f"liq_{d['wallet']}_{p['coin']}"
             if distance < LIQ_PROXIMITY_PCT:
                 msg = (
-                    f"\u26a0\ufe0f {p['coin']} {p['side']} en {d['label']} ({short_addr}) "
-                    f"a {distance*100:.1f}% de liquidaci\u00f3n (curr ${current:.4f} / liq ${liq_px:.4f})"
+                    f"\u26a0\ufe0f {p['coin']} {p['side']} in {d['label']} ({short_addr}) "
+                    f"{distance*100:.1f}% from liquidation (curr ${current:.4f} / liq ${liq_px:.4f})"
                 )
                 await _emit(bot, key, state, msg)
             else:
@@ -334,8 +334,8 @@ async def _run_dca_zone_alerts(bot, state: dict[str, Any]) -> None:
                     pct = t.get("pct", 0)
                     msg = (
                         f"\U0001f3af [DCA ALERT] {asset} @ ${px:,.2f} "
-                        f"entr\u00f3 en zona {pct}% (${low:,.0f}-${high:,.0f}). "
-                        f"Evaluar compra."
+                        f"entered zone {pct}% (${low:,.0f}-${high:,.0f}). "
+                        f"Evaluate buy."
                     )
                     log.warning("DCA ZONE: %s", msg)
                     if TELEGRAM_CHAT_ID:
@@ -343,7 +343,7 @@ async def _run_dca_zone_alerts(bot, state: dict[str, Any]) -> None:
                     state[alerted_key] = datetime.now(timezone.utc).isoformat()
                 state[zone_key] = True
 
-                # Asset-specific companion alert: ETH entró en debt_flip_range
+                # Asset-specific companion alert: ETH entered debt_flip_range
                 if asset == "ETH":
                     flip = plan.get("debt_flip_range") or []
                     if len(flip) == 2:
@@ -352,10 +352,10 @@ async def _run_dca_zone_alerts(bot, state: dict[str, Any]) -> None:
                             flip_key = "dca_ETH_debt_flip_alerted_at"
                             if not _dca_alerted_within_window(state, flip_key):
                                 msg = (
-                                    f"\U0001f501 [FLYWHEEL] ETH @ ${px:,.2f} entr\u00f3 "
-                                    f"en debt_flip_range (${flow:,.0f}-${fhigh:,.0f}). "
-                                    f"Considerar rotar deuda UETH a stable "
-                                    f"(USDT0/USDC) antes del rebote."
+                                    f"\U0001f501 [FLYWHEEL] ETH @ ${px:,.2f} entered "
+                                    f"debt_flip_range (${flow:,.0f}-${fhigh:,.0f}). "
+                                    f"Consider rotating UETH debt to stable "
+                                    f"(USDT0/USDC) before the rebound."
                                 )
                                 log.warning("ETH DEBT FLIP: %s", msg)
                                 if TELEGRAM_CHAT_ID:

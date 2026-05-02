@@ -124,12 +124,12 @@ def format_log(entries: list[dict[str, Any]]) -> str:
         return (
             "📜 POSITION LOG\n"
             + ("─" * 40)
-            + "\n— vacío —\n"
-            + "Agregá entradas con:  /log add <kind> <mensaje>\n"
-            + "Kinds sugeridos: OPEN / CLOSE / TRANSFER / WITHDRAW / DEBT_ROTATION / NOTE"
+            + "\n— empty —\n"
+            + "Add entries with:  /log add <kind> <message>\n"
+            + "Suggested kinds: OPEN / CLOSE / TRANSFER / WITHDRAW / DEBT_ROTATION / NOTE"
         )
     lines: list[str] = []
-    lines.append("📜 POSITION LOG — últimos {}".format(len(entries)))
+    lines.append("📜 POSITION LOG — last {}".format(len(entries)))
     lines.append("─" * 40)
     for e in entries:
         amount_s = _fmt_amount(e.get("amount_usd"))

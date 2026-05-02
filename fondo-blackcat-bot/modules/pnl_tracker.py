@@ -143,8 +143,8 @@ def build_cycle_summary() -> str:
         return (
             "📊 TRADE DEL CICLO — PNL\n"
             + "─" * 40 + "\n"
-            "Sin eventos registrados aún.\n"
-            "Los cierres parciales/totales se registran automáticamente.\n"
+            "No events recorded yet.\n"
+            "Partial/full closes are recorded automatically.\n"
             "Manual: /pnl add closed BTC <amount> trade_del_ciclo <notes>"
         )
 
@@ -155,9 +155,9 @@ def build_cycle_summary() -> str:
     lines = [
         "📊 TRADE DEL CICLO — PNL",
         "─" * 40,
-        f"  Realized PnL total: {_fmt_usd(total_realized)} ({len(events)} eventos)",
+        f"  Realized PnL total: {_fmt_usd(total_realized)} ({len(events)} events)",
         "",
-        "  Historial:",
+        "  History:",
     ]
     for e in events[:20]:
         ts_short = e["ts"][:16] if e.get("ts") else "?"
@@ -189,20 +189,20 @@ def build_summary() -> str:
         return [
             f"  {label}",
             f"    Realized PnL: {_fmt_usd(closed)}",
-            f"    Transfers: {_fmt_usd(transfer)} (neutral — entre wallets)",
+            f"    Transfers: {_fmt_usd(transfer)} (neutral — between wallets)",
             f"    Withdrawals: {_fmt_usd(withdraw)} (capital out, no PnL)",
         ]
 
     lines: list[str] = []
     lines.append("💰 PNL TRACKER")
     lines.append("─" * 40)
-    lines.extend(_line("Últimos 7d", totals_7d))
+    lines.extend(_line("Last 7d", totals_7d))
     lines.append("")
-    lines.extend(_line("Últimos 30d", totals_30d))
+    lines.extend(_line("Last 30d", totals_30d))
     lines.append("")
     lines.extend(_line(f"YTD {now.year}", totals_ytd))
     lines.append("")
-    lines.extend(_line("Histórico total", totals_all))
+    lines.extend(_line("All time", totals_all))
 
     c = _conn()
     try:
@@ -211,11 +211,11 @@ def build_summary() -> str:
         c.close()
 
     lines.append("")
-    lines.append(f"Total events registrados: {total_events}")
+    lines.append(f"Total events recorded: {total_events}")
     if total_events == 0:
         lines.append(
-            "Tip: registrá eventos con `/pnl add closed <asset> <amount> [notes]` "
-            "(o las variantes transfer / withdraw)."
+            "Tip: record events with `/pnl add closed <asset> <amount> [notes]` "
+            "(or the transfer / withdraw variants)."
         )
 
     # Trade del Ciclo section

@@ -123,14 +123,14 @@ async def _fund_snapshot_block() -> str:
         pass
 
     if not lines:
-        return "  (snapshot no disponible)"
+        return "  (snapshot unavailable)"
     return "\n".join(lines)
 
 
 def _at_risk_block(event: Any) -> str:
     affects = getattr(event, "affects_positions", None) or []
     if not affects:
-        return "  (sin posiciones marcadas)"
+        return "  (no positions flagged)"
     return "\n".join(f"  • {a}" for a in affects)
 
 
@@ -146,40 +146,40 @@ def _scenario_block(event: Any) -> str:
         )
     if cat == "earnings":
         return (
-            "  Bull: beat + raise → risk-on cascade en altcoins de la cesta\n"
-            "  Bear: miss + cut → liquidaciones en HYPE/major beta\n"
-            "  Base: in-line → spreads de la cesta sin cambio direccional"
+            "  Bull: beat + raise → risk-on cascade in basket altcoins\n"
+            "  Bear: miss + cut → liquidations in HYPE/major beta\n"
+            "  Base: in-line → basket spreads with no directional change"
         )
     if cat == "geopolitical":
         return (
-            "  Bull: de-escalación → risk-on, USD weak, BTC bid\n"
-            "  Bear: escalada → flight-to-quality, BTC dump corto plazo\n"
-            "  Base: status quo → vol agotada, rangos de la cesta"
+            "  Bull: de-escalation → risk-on, USD weak, BTC bid\n"
+            "  Bear: escalation → flight-to-quality, BTC dump short term\n"
+            "  Base: status quo → vol exhausted, basket ranges"
         )
     if cat == "unlock" or cat == "tge":
         return (
-            "  Bull: float absorbido sin spot dump\n"
-            "  Bear: dump al unlock → asset cae 5-15%\n"
-            "  Base: chop multi-día previo a recovery"
+            "  Bull: float absorbed without spot dump\n"
+            "  Bear: dump at unlock → asset falls 5-15%\n"
+            "  Base: multi-day chop before recovery"
         )
     return (
-        "  Bull / Bear / Base — definir según contexto\n"
-        "  Recomendado: revisar /tesis y /reporte antes del evento."
+        "  Bull / Bear / Base — define based on context\n"
+        "  Recommended: review /tesis and /reporte before the event."
     )
 
 
 def _checklist_block(event: Any) -> str:
     return (
-        "  □ HF flywheel >= 1.20 con buffer\n"
-        "  □ /reporte fresh (último <30min)\n"
-        "  □ /tesis revisada vs catalyst\n"
-        "  □ Stops actualizados en posiciones afectadas\n"
-        "  □ Liq buffer en HyperLend confirmado (/liqcalc)"
+        "  □ HF flywheel >= 1.20 with buffer\n"
+        "  □ /reporte fresh (last <30min)\n"
+        "  □ /tesis reviewed vs catalyst\n"
+        "  □ Stops updated on affected positions\n"
+        "  □ Liq buffer in HyperLend confirmed (/liqcalc)"
     )
 
 
 def build_pre_event_brief(event: Any, score: int, snapshot: str) -> str:
-    name = getattr(event, "name", "(evento)")
+    name = getattr(event, "name", "(event)")
     ts = getattr(event, "timestamp_utc", datetime.now(timezone.utc))
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
@@ -194,7 +194,7 @@ def build_pre_event_brief(event: Any, score: int, snapshot: str) -> str:
         "Cat: {3} · Impact: {4} · Score: {5}/10 · ETA: {6}\n\n"
         "FUND SNAPSHOT:\n{7}\n\n"
         "AT-RISK POSITIONS:\n{8}\n\n"
-        "ESCENARIOS:\n{9}\n\n"
+        "SCENARIOS:\n{9}\n\n"
         "PRE-CHECK:\n{10}"
     ).format(
         delta_min,

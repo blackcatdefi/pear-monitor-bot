@@ -168,8 +168,8 @@ def search_intel(query: str, limit: int = 15) -> list[dict[str, Any]]:
 
 def format_search_results(query: str, results: list[dict[str, Any]]) -> str:
     if not results:
-        return f"🔍 Sin resultados para '{query}'."
-    lines = [f"🔍 Resultados para '{query}' (top {len(results)}):", "─" * 40]
+        return f"🔍 No results for '{query}'."
+    lines = [f"🔍 Results for '{query}' (top {len(results)}):", "─" * 40]
     for r in results:
         ts = (r.get("ts") or "")[:16]
         src = r.get("source") or "?"

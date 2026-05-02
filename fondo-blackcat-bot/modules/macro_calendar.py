@@ -56,11 +56,11 @@ INITIAL_EVENTS: list[MacroEvent] = [
     ),
     MacroEvent(
         event_id="powell_last_press_2026_04_30",
-        name="Powell última conferencia FOMC",
+        name="Powell last FOMC conference",
         timestamp_utc=datetime(2026, 4, 30, 18, 30, tzinfo=timezone.utc),
         category="fomc",
         impact_level="critical",
-        notes="Volatilidad alta. NO agregar riesgo durante.",
+        notes="High volatility. DO NOT add risk during.",
         affects_positions=["basket_v5", "flywheel", "trade_ciclo"],
     ),
     MacroEvent(
@@ -69,7 +69,7 @@ INITIAL_EVENTS: list[MacroEvent] = [
         timestamp_utc=datetime(2026, 4, 30, 20, 0, tzinfo=timezone.utc),
         category="earnings",
         impact_level="high",
-        notes="Risk-on/off según resultados. NVDA ATH $5.2T.",
+        notes="Risk-on/off depending on results. NVDA ATH $5.2T.",
         affects_positions=["basket_v5"],
     ),
     MacroEvent(
@@ -78,7 +78,7 @@ INITIAL_EVENTS: list[MacroEvent] = [
         timestamp_utc=datetime(2026, 4, 30, 12, 0, tzinfo=timezone.utc),
         category="tge",
         impact_level="medium",
-        notes="Posible rotación capital desde L2s (favorable basket).",
+        notes="Possible capital rotation from L2s (favorable basket).",
         affects_positions=["basket_v5"],
     ),
     MacroEvent(
@@ -87,7 +87,7 @@ INITIAL_EVENTS: list[MacroEvent] = [
         timestamp_utc=datetime(2026, 4, 30, 0, 0, tzinfo=timezone.utc),
         category="unlock",
         impact_level="medium",
-        notes="Presión vendedora EIGEN.",
+        notes="EIGEN selling pressure.",
         affects_positions=[],
     ),
     MacroEvent(
@@ -96,16 +96,16 @@ INITIAL_EVENTS: list[MacroEvent] = [
         timestamp_utc=datetime(2026, 5, 6, 0, 0, tzinfo=timezone.utc),
         category="unlock",
         impact_level="critical",
-        notes="9.9M HYPE/día (~$412M/día) durante semana 6-12 mayo. Monitor HF flywheel.",
+        notes="9.9M HYPE/day (~$412M/day) during week of May 6-12. Monitor HF flywheel.",
         affects_positions=["flywheel"],
     ),
     MacroEvent(
         event_id="ethfi_unlock_2026_05_29",
-        name="ETHFI unlock 95.7% dilución",
+        name="ETHFI unlock 95.7% dilution",
         timestamp_utc=datetime(2026, 5, 29, 0, 0, tzinfo=timezone.utc),
         category="unlock",
         impact_level="critical",
-        notes="110M tokens unlock sobre 115M circulante. 95.7% dilución.",
+        notes="110M tokens unlock on top of 115M circulating. 95.7% dilution.",
         affects_positions=[],
     ),
 ]
@@ -283,7 +283,7 @@ def format_time_until(target: datetime) -> str:
     delta = target - datetime.now(timezone.utc)
     total = int(delta.total_seconds())
     if total <= 0:
-        return "ya pasó"
+        return "already passed"
     days = total // 86400
     hours = (total % 86400) // 3600
     mins = (total % 3600) // 60
@@ -322,11 +322,11 @@ def format_calendar(limit: int = 10) -> str:
     events = upcoming_events(limit=limit)
     if not events:
         return (
-            "📅 Calendar VACÍO. Ejecutar /add_event para agregar eventos manualmente.\n"
-            "Pre-seed automático: ya disponible. Puede que se haya borrado."
+            "📅 Calendar EMPTY. Run /add_event to add events manually.\n"
+            "Auto pre-seed: already available. It may have been deleted."
         )
 
-    lines = [f"📅 PRÓXIMOS {len(events)} CATALYSTS", "─" * 40]
+    lines = [f"📅 UPCOMING {len(events)} CATALYSTS", "─" * 40]
     for ev in events:
         when = ev.timestamp_utc.strftime("%Y-%m-%d %H:%M UTC")
         until = format_time_until(ev.timestamp_utc)
@@ -337,7 +337,7 @@ def format_calendar(limit: int = 10) -> str:
         if ev.notes:
             lines.append(f"   📝 {ev.notes}")
         if ev.affects_positions:
-            lines.append(f"   ⚠️ Afecta: {', '.join(ev.affects_positions)}")
+            lines.append(f"   ⚠️ Affects: {', '.join(ev.affects_positions)}")
         lines.append(f"   id={ev.event_id}")
         lines.append("")
 
@@ -359,13 +359,13 @@ def parse_add_event_args(args: list[str]) -> tuple[str, datetime, str, str, str]
     parts = head.strip().split()
     if len(parts) < 4:
         raise ValueError(
-            "Faltan campos. Formato: id ts cat impact | name"
+            "Missing fields. Format: id ts cat impact | name"
         )
     event_id, ts_str, cat, impact = parts[0], parts[1], parts[2], parts[3]
     try:
         ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
     except Exception as exc:
-        raise ValueError(f"Timestamp inválido '{ts_str}': {exc}")
+        raise ValueError(f"Invalid timestamp '{ts_str}': {exc}")
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
     return event_id, ts, cat.lower(), impact.lower(), name.strip()
@@ -395,22 +395,22 @@ def _format_alert(ev: MacroEvent, level: str) -> str:
     if level == "24h":
         head = f"📅 CATALYST T-24h — {ev.name}"
         body = (
-            f"{emoji}{cat} {when} (en {until})\n"
-            f"Categoría: {ev.category} | Impact: {ev.impact_level}\n"
+            f"{emoji}{cat} {when} (in {until})\n"
+            f"Category: {ev.category} | Impact: {ev.impact_level}\n"
         )
     elif level == "2h":
         head = f"⚠️ CATALYST T-2h — {ev.name}"
         body = (
-            f"{emoji}{cat} {when} (en {until})\n"
-            f"Categoría: {ev.category} | Impact: {ev.impact_level}\n"
-            f"Pre-evento: revisar HF, basket UPnL, kill triggers.\n"
+            f"{emoji}{cat} {when} (in {until})\n"
+            f"Category: {ev.category} | Impact: {ev.impact_level}\n"
+            f"Pre-event: check HF, basket UPnL, kill triggers.\n"
         )
     else:  # 30m
         head = f"🚨 CATALYST T-30min — {ev.name}"
         body = (
-            f"{emoji}{cat} {when} (en {until})\n"
+            f"{emoji}{cat} {when} (in {until})\n"
             f"Impact: {ev.impact_level}\n"
-            f"⛔ NO abrir nuevas posiciones próximas horas.\n"
+            f"⛔ DO NOT open new positions in coming hours.\n"
         )
 
     if ev.notes:
