@@ -126,9 +126,50 @@ function buildHooks({ notify, primaryChatId }) {
     wallet,
     label,
     allPositions,
+    silent,
   }) {
     const key = _snapshotKey(chatId, wallet);
     const prev = lastSeenSnapshots.get(key) || [];
+
+    // R-NOSPAM (2 may 2026): on the silent first-poll cycle (boot/restart),
+    // hydrate the in-memory snapshot AND the persistent basket-dedup store
+    // with the currently-active basket, then return without emitting any
+    // alert. This is the canonical "we're already aware of this basket"
+    // hand-off and prevents stale "NEW BASKET OPENED" pings on every
+    // bot restart for baskets that have been open for hours/days.
+    if (silent === true) {
+      try {
+        if (
+          basketDedup.ENABLED &&
+          Array.isArray(allPositions) &&
+          allPositions.length >= openAlerts.BASKET_MIN_COUNT
+        ) {
+          const positionsForDedup = allPositions.map((p) => ({
+            coin: p.coin,
+            side: p.side || (p.size < 0 ? 'SHORT' : 'LONG'),
+            entryPx: p.entryPrice,
+          }));
+          const check = basketDedup.checkAlreadyAlerted(
+            wallet,
+            positionsForDedup
+          );
+          if (!check.wasAlerted) {
+            basketDedup.markAsAlerted(wallet, positionsForDedup);
+            console.log(
+              `[basketDedup] hydrated current basket for ${label} on silent boot ` +
+                `(${allPositions.length} positions)`
+            );
+          }
+        }
+      } catch (e) {
+        console.error(
+          '[basketDedup] hydration on silent poll failed:',
+          e && e.message ? e.message : e
+        );
+      }
+      lastSeenSnapshots.set(key, allPositions);
+      return;
+    }
 
     // 1. open-alerts
     if (openAlerts.isEnabled()) {
@@ -455,6 +496,15 @@ function patchMonitor(monitor, hooks) {
         wallet: addr,
         label,
         allPositions: post,
+        // R-NOSPAM: forward the `silent` flag so the BASKET_OPEN dedup
+        // hook hydrates the persistent store on bot restart instead of
+        // re-emitting the same v6 basket as "new". Without this, the
+        // first poll classifies all currently-open positions as new
+        // (in-memory snapshot Map starts empty) → BASKET_OPEN fires,
+        // and if the persistent dedup hash hasn't been recorded yet
+        // (e.g. basket opened pre-dedup-deploy), the user gets a stale
+        // "🚀 NEW BASKET OPENED" alert hours/days after the fact.
+        silent: silent === true,
       });
     } catch (e) {
       console.error(
@@ -519,10 +569,16 @@ function bootstrap({
     primaryChatId,
   });
 
-  // 4. Heartbeat scheduler — only if BCD chat configured
+  // 4. Heartbeat scheduler — DISABLED BY DEFAULT (R-NOSPAM, 2 may 2026).
+  //    See src/heartbeat.js header + docs/PUBLIC_BOT_RULES.md for context.
+  //    A public bot must not broadcast uptime/status — that's monitoring
+  //    telemetry, belongs in logs/health endpoint, not in Telegram pings.
+  //    HEARTBEAT_ENABLED=true env var still allows operator opt-in.
   let heartbeatTimer = null;
-  if (primaryChatId) {
+  if (primaryChatId && heartbeat.isEnabled()) {
     heartbeatTimer = heartbeat.startSchedule(wrappedNotify, primaryChatId);
+  } else if (!heartbeat.isEnabled()) {
+    console.log('[extensions] heartbeat skipped (R-NOSPAM default — public bot silence)');
   } else {
     console.log('[extensions] BCD_TELEGRAM_CHAT_ID not set — heartbeat disabled');
   }

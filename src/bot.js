@@ -465,12 +465,25 @@ function createBot(token, hlApi, monitor, hlendApi = null) {
     bot.sendMessage(chatId, '✅ Done!', mainMenu());
   }
 
-  async function sendNotification(chatId, message) {
+  async function sendNotification(chatId, message, opts = {}) {
+    // R-NOSPAM: opts is forwarded to Telegram Bot API. Important fields:
+    //   - disable_notification: silent push (no sound) — used by borrow gate
+    //   - parse_mode: Markdown by default, can be overridden
+    // The wrappedNotify upstream (extensions.js) may also pass `silent`
+    // (legacy alias for disable_notification).
+    const merged = { parse_mode: 'Markdown', ...opts };
+    if (merged.silent === true && merged.disable_notification === undefined) {
+      merged.disable_notification = true;
+    }
+    delete merged.silent; // node-telegram-bot-api rejects unknown fields
     try {
-      await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, message, merged);
     } catch {
       try {
-        await bot.sendMessage(chatId, message);
+        // Fallback without parse_mode if Markdown choked the message
+        const fallback = { ...merged };
+        delete fallback.parse_mode;
+        await bot.sendMessage(chatId, message, fallback);
       } catch (e) {
         console.error(`Failed to send to ${chatId}:`, e.message);
       }

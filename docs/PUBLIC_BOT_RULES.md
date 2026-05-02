@@ -1,0 +1,183 @@
+# Public Bot Rules
+
+**Date created:** 2 may 2026 (R-NOSPAM)
+**Owner:** Black Cat DeFi Fund
+**Service:** `gentle-luck` / `pear-monitor-bot` — public Telegram bot
+**Status:** PERMANENT RULE — applies to every future round.
+
+---
+
+## Why this doc exists
+
+On Sat 2 may 2026 09:29 AR (12:29 UTC), the heartbeat scheduler woke BCD
+and his girlfriend mid-sleep with a sound notification reading:
+
+```
+✅ Pear Alerts Bot online
+· Uptime 6.0h
+· Errors 24h: 0
+· Last poll: 2026-05-02 12:29 UTC
+```
+
+Heartbeats are **operator monitoring telemetry**. They belong in Railway
+logs / `GET /health` — they do NOT belong in a Telegram broadcast that
+vibrates phones. **A user notification that does not require user action
+is a bug.**
+
+This document codifies the rule so future changes (new modules, new
+rounds, new features) cannot regress it.
+
+---
+
+## The Rule
+
+**Public bot = silence by default.** The bot may only emit a Telegram
+message when ONE of these three conditions is true:
+
+### 1. Actionable for the user
+
+The user can do something with the message, and would want to be
+woken up to see it. Examples:
+
+- A new basket opens in a wallet the user is tracking — "you may want to
+  copy-trade this."
+- A copy-trade signal fires — "execute this trade now if you want it."
+- A position closes with profit/loss — "your position resolved."
+
+### 2. Critical risk
+
+The user's tracked position is at imminent risk and inaction has cost.
+Examples:
+
+- HF (Health Factor) of a tracked HyperLend wallet drops below 1.10 —
+  liquidation threshold approaching.
+- A tracked basket hits its stop-loss or take-profit and closes.
+- The Pear API stops responding for >15 min and the user's open positions
+  are now blind.
+
+### 3. On-demand response
+
+The user just sent a slash command. The bot responds. Examples:
+
+- `/status`, `/portfolio`, `/dedup_status`, `/help`, `/start`.
+
+---
+
+## What the bot must NEVER auto-emit
+
+Anything that fits the pattern *"the bot is fine, here's a status
+update"* is a violation. Specifically banned:
+
+- ❌ Heartbeats / "bot online" / "bot started"
+- ❌ Uptime stats, error counters, polling stats
+- ❌ "Successful poll" pings
+- ❌ Self-announcements after deploy/restart
+- ❌ Periodic summaries of internal state (cache hits, rate-limit stats)
+- ❌ Boot announcements ("R-FOO deployed at HH:MM UTC")
+- ❌ Anything that is monitoring telemetry rather than user-facing intel
+
+These belong in:
+
+- **Railway logs** — `console.log(...)` is fine, anyone with a Railway
+  account can tail.
+- **`GET /health` endpoint** (port 8080) — JSON status endpoint already
+  exists at `src/healthServer.js`. Add fields here, not to broadcasts.
+- **Internal admin chat** (BCD's private chat) — IF AND ONLY IF the
+  message is something BCD specifically opted into via env var
+  (`HEARTBEAT_ENABLED=true`, `BOOT_ANNOUNCEMENT_ENABLED=true`, etc.) AND
+  the message has `disable_notification=true` set.
+
+---
+
+## Notification urgency tiers
+
+When a message DOES qualify for emission, classify it:
+
+| Tier | When | Telegram flag |
+|------|------|---------------|
+| **CRITICAL** | HF < 1.10, basket SL/TP triggered, copy-trade signal | sound (default) |
+| **ACTIONABLE** | New basket opened, position closed | sound (default) |
+| **INFORMATIONAL** | Borrow available, funds available, daily digest | `disable_notification: true` |
+
+Borrow-available alerts are explicitly INFORMATIONAL — a wallet having
+$174 of borrow capacity is not urgent. Setting `disable_notification: true`
+on these alerts means the message still arrives in the chat history but
+does not vibrate phones at 3 AM. (Implemented in `monitor.js` for
+HyperLend borrow alerts, R-NOSPAM commit.)
+
+---
+
+## Dedup is mandatory for any auto-emit
+
+If the bot is emitting the same alert more than once for the same
+underlying state, it's spam. Every auto-emit path must have a dedup gate:
+
+- **Basket open** — `src/basketDedup.js` (SHA-256 hash, persistent JSON
+  on Railway Volume, TTL 7d). Must hydrate on silent boot poll so
+  pre-existing baskets don't re-emit.
+- **Borrow available** — `src/borrowAlertGate.js` (per-wallet state on
+  Railway Volume, 30 min cooldown, 5% available delta gate, 0.05 HF
+  delta gate). Force-emits on HF cross < 1.10 or > 50% available delta.
+- **Funds available** — `src/fundsAvailableGate.js` (R(v3): TWAP-aware,
+  1h dedup window, $200 min residual).
+- **Compounding** — `src/compoundingGate.js` (TWAP-aware, account-grew
+  required).
+- **Close alerts** — `src/closeAlerts.js` `shouldSendAlert()` (60s
+  cooldown per `wallet:coin`).
+
+If you add a new auto-emit path, you must add a dedup gate. Period.
+
+---
+
+## Persistence: dedup state must survive restarts
+
+In-memory `Map`s reset on every container restart. Railway redeploys,
+crashes, manual restarts all wipe in-memory state. Therefore every dedup
+state must persist to:
+
+```
+${RAILWAY_VOLUME_MOUNT_PATH}/data/<feature>.json
+```
+
+Railway's Volume on `gentle-luck` is mounted at `/data`, so files land
+at `/data/data/<feature>.json`. The double `data/` is intentional — the
+inner `data/` is a subdir of the volume mountpoint so test fixtures and
+production deploys share the same relative layout.
+
+Atomic writes (write-tmp-then-rename) are required to avoid torn reads
+if the process is killed mid-write.
+
+---
+
+## Test plan for every new auto-emit module
+
+Before merging a new alert path, prove:
+
+1. **First emit works** — fresh state, alert fires.
+2. **Repeat emit suppressed** — same input N seconds later, no fire.
+3. **State persists across module reload** — `delete require.cache[path]`,
+   re-require, repeat input still suppresses.
+4. **State survives restart** — `_resetForTests()` wipes; without that
+   call, JSON file is preserved on disk.
+5. **Critical override works** — force-emit conditions bypass cooldown.
+6. **Off switch works** — `<MODULE>_ENABLED=false` short-circuits to "no
+   emit" without crashing.
+
+All of these patterns are demonstrated in `tests/basketDedup.test.js`,
+`tests/fundsAvailableGate.test.js`, `tests/compoundingGate.test.js`,
+and now `tests/borrowAlertGate.test.js`.
+
+---
+
+## Anyone who wakes a sleeping user owes the bug a postmortem
+
+If a future round emits a non-critical alert that wakes someone up, the
+fix is not "tune the threshold." The fix is:
+
+1. Confirm the alert was non-critical (per the rule above).
+2. Apply `disable_notification: true` so it never wakes anyone again.
+3. Add a dedup gate if missing.
+4. Add a test that proves the dedup works.
+5. Update this doc with the new rule (if a new pattern was uncovered).
+
+R-NOSPAM is a permanent reference for this process.

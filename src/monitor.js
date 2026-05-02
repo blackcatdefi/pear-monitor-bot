@@ -20,6 +20,10 @@ const {
 const { recordOpenEvent, isTWAPActive } = require('./twapDetector');
 const { shouldFireFundsAvailable } = require('./fundsAvailableGate');
 const { withTimestamp } = require('./timestampHelper');
+// R-NOSPAM (2 may 2026) — persistent per-wallet borrow-alert dedup gate.
+// Suppresses identical/near-identical alerts within 30 min, <5% available
+// delta, <0.05 HF delta. Force-emits on HF cross <1.10 or >50% delta.
+const borrowAlertGate = require('./borrowAlertGate');
 
 class PositionMonitor {
   constructor(hlApi, notifyFn, hlendApi = null) {
@@ -95,19 +99,43 @@ class PositionMonitor {
     const crossedThreshold =
       available >= this.minBorrowAvailable && bs.hadBorrowAvailable === false;
     if (crossedThreshold && !silent) {
-      const hf = data.healthFactor === Infinity ? '∞' : data.healthFactor.toFixed(2);
-      await this.notify(
-        chatId,
-        [
-          `🏦 *HyperLend — Borrow Available!*`,
-          ``,
-          `📍 Wallet: ${label}`,
-          `💸 Available to borrow: $${available.toFixed(2)}`,
-          `🔒 Collateral: $${data.totalCollateralUsd.toFixed(2)}`,
-          `💳 Current debt: $${data.totalDebtUsd.toFixed(2)}`,
-          `❤️ Health factor: ${hf}`,
-        ].join('\n')
-      );
+      // R-NOSPAM gate — persistent per-wallet dedup. Even if the legacy
+      // edge-trigger says "fire", suppress if within 30 min cooldown OR
+      // delta is too small. Force-emit only on HF<1.10 cross or >50% delta.
+      const gate = borrowAlertGate.shouldEmitBorrowAlert(addr, {
+        available,
+        healthFactor: data.healthFactor,
+      });
+      if (gate.shouldEmit) {
+        const hf = data.healthFactor === Infinity ? '∞' : data.healthFactor.toFixed(2);
+        await this.notify(
+          chatId,
+          [
+            `🏦 *HyperLend — Borrow Available!*`,
+            ``,
+            `📍 Wallet: ${label}`,
+            `💸 Available to borrow: $${available.toFixed(2)}`,
+            `🔒 Collateral: $${data.totalCollateralUsd.toFixed(2)}`,
+            `💳 Current debt: $${data.totalDebtUsd.toFixed(2)}`,
+            `❤️ Health factor: ${hf}`,
+          ].join('\n'),
+          // Borrow alerts are informative, not urgent — don't wake users
+          // with sound. Critical HF cross still emits via the same path
+          // because it's the only case that matters for action.
+          { disable_notification: true }
+        );
+        borrowAlertGate.markAlertEmitted(addr, {
+          available,
+          healthFactor: data.healthFactor,
+        });
+      } else {
+        console.log(
+          `[monitor] suppressed borrow alert for ${label} (` +
+            `$${available.toFixed(2)}, HF=${
+              data.healthFactor === Infinity ? '∞' : data.healthFactor.toFixed(2)
+            }): ${gate.reason}`
+        );
+      }
     }
     bs.hadBorrowAvailable = available >= this.minBorrowAvailable;
   }
