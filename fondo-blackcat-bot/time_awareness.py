@@ -35,14 +35,14 @@ def format_timestamp(dt: Optional[datetime] = None) -> str:
     if dt is None:
         dt = now_utc()
 
-    days_es = ["lun", "mar", "mié", "jue", "vie", "sáb", "dom"]
-    months_es = [
-        "ene", "feb", "mar", "abr", "may", "jun",
-        "jul", "ago", "sep", "oct", "nov", "dic",
+    days_en = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    months_en = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ]
 
-    day_name = days_es[dt.weekday()]
-    month_name = months_es[dt.month - 1]
+    day_name = days_en[dt.weekday()]
+    month_name = months_en[dt.month - 1]
 
     return f"🕐 {day_name} {dt.day} {month_name} {dt.year} - {dt.strftime('%H:%M')} UTC"
 
@@ -59,7 +59,7 @@ def calculate_time_to_event(
         - is_past: bool (event already happened)
         - is_future: bool
         - delta_seconds: int
-        - human_readable: str ("en 1h 59m" / "hace 15min" / "ya ocurrió")
+        - human_readable: str ("in 1h 59m" / "15min ago" / "already happened")
         - should_send_alert: bool (filter to skip past events)
     """
     if reference is None:
@@ -77,21 +77,21 @@ def calculate_time_to_event(
     if is_past:
         abs_seconds = abs(delta_seconds)
         if abs_seconds < 3600:
-            human = f"hace {abs_seconds // 60}min"
+            human = f"{abs_seconds // 60}min ago"
         elif abs_seconds < 86400:
-            human = f"hace {abs_seconds // 3600}h"
+            human = f"{abs_seconds // 3600}h ago"
         else:
-            human = f"hace {abs_seconds // 86400}d"
+            human = f"{abs_seconds // 86400}d ago"
         should_send = False
     else:
         if delta_seconds < 3600:
-            human = f"en {delta_seconds // 60}min"
+            human = f"in {delta_seconds // 60}min"
         elif delta_seconds < 86400:
             hours = delta_seconds // 3600
             mins = (delta_seconds % 3600) // 60
-            human = f"en {hours}h {mins}m" if mins > 0 else f"en {hours}h"
+            human = f"in {hours}h {mins}m" if mins > 0 else f"in {hours}h"
         else:
-            human = f"en {delta_seconds // 86400}d"
+            human = f"in {delta_seconds // 86400}d"
         should_send = True
 
     return {

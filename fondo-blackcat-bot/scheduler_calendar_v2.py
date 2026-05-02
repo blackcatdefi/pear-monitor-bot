@@ -104,19 +104,19 @@ def _build_alert_body(event: Dict[str, Any], alert_type: str) -> str:
     when_abs = event_utc.strftime("%Y-%m-%d %H:%M")
     pre_action = event.get(
         "pre_event_action",
-        "Pre-evento: revisar HF, basket UPnL, kill triggers.",
+        "Pre-event: check HF, basket UPnL, kill triggers.",
     )
 
     body = (
         f"{emoji} CATALYST {alert_type} — {event['name']}\n\n"
-        f"📅 Evento: {when_abs} UTC ({timing['human_readable']})\n"
-        f"📂 Categoría: {category} | Impact: {impact}\n\n"
+        f"📅 Event: {when_abs} UTC ({timing['human_readable']})\n"
+        f"📂 Category: {category} | Impact: {impact}\n\n"
         f"{pre_action}\n"
     )
     if event.get("notes"):
         body += f"\n📝 {event['notes']}"
     if event.get("affects"):
-        body += f"\n⚠️ Afecta: {event['affects']}"
+        body += f"\n⚠️ Affects: {event['affects']}"
 
     return add_message_timestamp(body, position="bottom")
 
@@ -132,21 +132,21 @@ def _build_post_alert_body(event: Dict[str, Any]) -> str:
     if isinstance(event_utc, str):
         event_utc = datetime.fromisoformat(event_utc.replace("Z", "+00:00"))
     when_abs = event_utc.strftime("%Y-%m-%d %H:%M") if event_utc else "?"
-    name = event.get("name", "evento")
+    name = event.get("name", "event")
     impact = event.get("impact") or event.get("impact_level", "critical")
     category = event.get("category", "macro")
     affects = event.get("affects") or "—"
     notes = event.get("notes") or ""
     body = (
         f"🔴 CATALYST T+post — {name}\n\n"
-        f"📅 Evento: {when_abs} UTC (hace ~15min)\n"
-        f"📂 Categoría: {category} | Impact: {impact}\n"
-        f"⚠️ Afecta: {affects}\n\n"
-        "Post-evento checklist:\n"
-        "  • Re-evaluar HF de cada wallet\n"
-        "  • UPnL de basket vs pre-evento\n"
-        "  • Triggers de kill (BTC, basket DD, UETH APY)\n"
-        "  • Re-leer la tesis si la dirección quedó comprometida\n"
+        f"📅 Event: {when_abs} UTC (~15min ago)\n"
+        f"📂 Category: {category} | Impact: {impact}\n"
+        f"⚠️ Affects: {affects}\n\n"
+        "Post-event checklist:\n"
+        "  • Re-evaluate HF for each wallet\n"
+        "  • Basket UPnL vs pre-event\n"
+        "  • Kill triggers (BTC, basket DD, UETH APY)\n"
+        "  • Re-read the thesis if direction was compromised\n"
     )
     if notes:
         body += f"\n📝 {notes}"

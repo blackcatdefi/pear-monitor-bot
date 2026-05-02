@@ -336,8 +336,8 @@ async def cmd_posiciones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     for close in bt_closes:
         close_msg = (
             f"\U0001f514 Bounce Tech {close['direction']} {close['asset']} "
-            f"{close['leverage']} CERRADA.\n"
-            f"\u00daltimo valor registrado: ${close['last_value_usd']:,.2f}"
+            f"{close['leverage']} CLOSED.\n"
+            f"Last recorded value: ${close['last_value_usd']:,.2f}"
         )
         await update.message.reply_text(close_msg, reply_markup=MAIN_KEYBOARD)
         position_log.append(
@@ -371,12 +371,12 @@ async def cmd_hf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 @with_error_logging
 @throttle(min_interval_s=60, key_prefix="cmd_reporte")
 async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Reporte TODO-EN-UNO: timeline X + posiciones + análisis LLM.
+    """Full report: X timeline + positions + LLM analysis.
 
     Round 16: throttled at 60s/user to avoid stacking concurrent runs.
     """
     await update.message.reply_text(
-        "\u23f3 Generando reporte completo: timeline + posiciones + an\u00e1lisis (30-90s)...",
+        "\u23f3 Generating full report: timeline + positions + analysis (30-90s)...",
         reply_markup=MAIN_KEYBOARD,
     )
 
@@ -400,7 +400,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         intel_legacy = {"status": "error", "error": "telethon_disabled"}
         intel_unread = {"status": "error", "error": "telethon_disabled"}
 
-    # ─── Sección 1: Timeline X (48h) ─────────────────────────────────────────
+    # ─── Section 1: X Timeline (48h) ─────────────────────────────────────────
     x_intel_ok = isinstance(x_intel, dict) and x_intel.get("status") == "ok"
     x_intel_fallback_note = ""
 
@@ -413,8 +413,8 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if isinstance(x_intel, dict):
                 live_err = str(x_intel.get("error") or "")[:200]
             x_intel_fallback_note = (
-                f"\u26a0\ufe0f Live API fall\u00f3: {live_err}\n"
-                f"Mostrando cache scheduler (last success UTC: {last_ok}).\n"
+                f"\u26a0\ufe0f Live API failed: {live_err}\n"
+                f"Showing scheduler cache (last success UTC: {last_ok}).\n"
             )
             x_intel = cached
             x_intel_ok = True
@@ -423,13 +423,13 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         timeline_text = format_timeline(x_intel, top_n=40)
         banner = cache_banner_for_report()
         header = (
-            "\U0001f4e1 TIMELINE X \u2014 48H\n"
+            "\U0001f4e1 X TIMELINE \u2014 48H\n"
             + ("\u2500" * 30) + "\n"
             + banner + "\n\n"
         )
         if x_intel_fallback_note:
             header = (
-                "\U0001f4e1 TIMELINE X \u2014 48H (cache fallback)\n"
+                "\U0001f4e1 X TIMELINE \u2014 48H (cache fallback)\n"
                 + ("\u2500" * 30) + "\n"
                 + banner + "\n"
                 + x_intel_fallback_note + "\n"
@@ -440,7 +440,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             reply_markup=MAIN_KEYBOARD,
         )
 
-    # ─── Sección 2: Posiciones ──────────────────────────────────────────────────
+    # ─── Section 2: Positions ──────────────────────────────────────────────────
     positions_text = format_quick_positions(
         portfolio, hl,
         bounce_tech=bt,
@@ -449,11 +449,11 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
     await send_long_message(
         update,
-        "\U0001f4bc POSICIONES\n" + ("\u2500" * 30) + "\n\n" + positions_text,
+        "\U0001f4bc POSITIONS\n" + ("\u2500" * 30) + "\n\n" + positions_text,
         reply_markup=MAIN_KEYBOARD,
     )
 
-    # ─── Sección 3: Análisis LLM (Sonnet primary) ───────────────────────────────
+    # ─── Section 3: LLM Analysis (Sonnet primary) ───────────────────────────────
     merged_intel: dict = {}
     if isinstance(intel_legacy, dict):
         merged_intel.update(intel_legacy)
@@ -478,7 +478,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     await send_long_message(
         update,
-        "\U0001f9e0 AN\u00c1LISIS COMPLETO\n" + ("\u2500" * 30) + "\n\n" + report,
+        "\U0001f9e0 FULL ANALYSIS\n" + ("\u2500" * 30) + "\n\n" + report,
         reply_markup=MAIN_KEYBOARD,
     )
     if thesis_update:
@@ -489,9 +489,9 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if isinstance(x_intel, dict):
             live_err = str(x_intel.get("error") or "")[:300]
         await update.message.reply_text(
-            "\u2139\ufe0f Timeline X no disponible (live + cache fallaron).\n"
-            f"   Error live: {live_err or '—'}\n"
-            "   Diagn\u00f3stico: correr /debug_x para probe en vivo (bypass cooldown).",
+            "\u2139\ufe0f X Timeline unavailable (live + cache both failed).\n"
+            f"   Live error: {live_err or '—'}\n"
+            "   Diagnostic: run /debug_x for live probe (bypasses cooldown).",
             reply_markup=MAIN_KEYBOARD,
         )
 
@@ -511,20 +511,20 @@ async def cmd_tesis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             sep = "\u2500" * 30
             last_mod = last_modified or "?"
             text = (
-                "\U0001f4ca TESIS (snapshot plain-text \u2014 fallback)\n"
-                f"\u00daltima actualizaci\u00f3n: {last_mod}\n"
+                "\U0001f4ca THESIS (plain-text snapshot \u2014 fallback)\n"
+                f"Last updated: {last_mod}\n"
                 f"{sep}\n\n{content}"
             )
         else:
             await update.message.reply_text(
-                "\U0001f4ca No hay tesis guardada a\u00fan. Ejecutar /reporte primero.",
+                "\U0001f4ca No thesis saved yet. Run /reporte first.",
                 reply_markup=MAIN_KEYBOARD,
             )
             return
 
     unprocessed = get_unprocessed_count()
     if unprocessed > 0:
-        text += f"\n\n\u23f3 {unprocessed} items de intel pendientes de procesar"
+        text += f"\n\n\u23f3 {unprocessed} pending intel items to process"
 
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
@@ -533,7 +533,7 @@ async def cmd_tesis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 @with_error_logging
 async def cmd_timeline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "\u23f3 Leyendo \u00faltimas 48h de tu X list...",
+        "\u23f3 Reading last 48h of your X list...",
         reply_markup=MAIN_KEYBOARD,
     )
     x_intel = await fetch_x_intel(hours=48, caller="timeline", app=context.application)
@@ -542,7 +542,7 @@ async def cmd_timeline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         cached = get_cached_timeline()
         if cached and cached.get("status") == "ok":
             prefix = (
-                f"\u26a0\ufe0f Live fall\u00f3: {x_intel.get('error','')[:200]}\n"
+                f"\u26a0\ufe0f Live failed: {x_intel.get('error','')[:200]}\n"
                 f"{banner}\n"
                 + ("\u2500" * 30) + "\n\n"
             )
@@ -559,7 +559,7 @@ async def cmd_timeline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def cmd_alertas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _alerts_enabled["value"] = not _alerts_enabled["value"]
     estado = "ON \u2705" if _alerts_enabled["value"] else "OFF \U0001f6ab"
-    await update.message.reply_text(f"Alertas autom\u00e1ticas: {estado}", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text(f"Automatic alerts: {estado}", reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
@@ -602,7 +602,7 @@ async def cmd_costos_x(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 @with_error_logging
 async def cmd_intel_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "\u23f3 Leyendo la list X \u2014 top 20 cuentas \u00faltimas 24h...",
+        "\u23f3 Reading X list \u2014 top 20 accounts last 24h...",
         reply_markup=MAIN_KEYBOARD,
     )
     text = await format_intel_sources(hours=24)
@@ -615,7 +615,7 @@ async def cmd_cryexc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     """Round 18: Cryexc snapshot (intel)."""
     if not cryexc_is_enabled():
         await update.message.reply_text(
-            "\u26a0\ufe0f /cryexc deshabilitado (CRYEXC_ENABLED=false en Railway).",
+            "\u26a0\ufe0f /cryexc disabled (CRYEXC_ENABLED=false in Railway).",
             reply_markup=MAIN_KEYBOARD,
         )
         return
@@ -644,7 +644,7 @@ async def cmd_providers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 @authorized
 @with_error_logging
 async def cmd_flywheel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("\u23f3 Calculando flywheel pair trade...", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text("\u23f3 Calculating flywheel pair trade...", reply_markup=MAIN_KEYBOARD)
     text = await compute_flywheel()
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
@@ -654,20 +654,20 @@ async def cmd_flywheel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def cmd_debug_flywheel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if os.getenv("DEBUG_MODE", "").strip().lower() != "true":
         await update.message.reply_text(
-            "\u26a0\ufe0f /debug_flywheel est\u00e1 deshabilitado. Set "
-            "DEBUG_MODE=true en Railway vars para activar.",
+            "\u26a0\ufe0f /debug_flywheel is disabled. Set "
+            "DEBUG_MODE=true in Railway vars to enable.",
             reply_markup=MAIN_KEYBOARD,
         )
         return
 
     await update.message.reply_text(
-        "\u23f3 Dump de reservas HyperLend...", reply_markup=MAIN_KEYBOARD
+        "\u23f3 Dumping HyperLend reserves...", reply_markup=MAIN_KEYBOARD
     )
     payload = await fetch_reserve_rates(force=True)
     if payload.get("status") != "ok":
         err = payload.get("error") or "unknown"
         await send_long_message(
-            update, f"\u274c RPC read fall\u00f3: {err}",
+            update, f"\u274c RPC read failed: {err}",
             reply_markup=MAIN_KEYBOARD,
         )
         return
@@ -704,7 +704,7 @@ async def cmd_debug_flywheel(update: Update, context: ContextTypes.DEFAULT_TYPE)
 @authorized
 @with_error_logging
 async def cmd_liqcalc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("\u23f3 Calculando matriz de liquidaci\u00f3n...", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text("\u23f3 Calculating liquidation matrix...", reply_markup=MAIN_KEYBOARD)
     text = await compute_liq_matrix()
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
@@ -712,7 +712,7 @@ async def cmd_liqcalc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 @authorized
 @with_error_logging
 async def cmd_kill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("\u23f3 Evaluando kill scenarios...", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text("\u23f3 Evaluating kill scenarios...", reply_markup=MAIN_KEYBOARD)
     text = await compute_kill_scenarios()
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
@@ -735,14 +735,14 @@ async def cmd_ciclo_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     await update.message.reply_text(
-        f"\u23f3 Aplicando /ciclo_update STATUS={status}"
+        f"\u23f3 Applying /ciclo_update STATUS={status}"
         + (f" entry=${entry:,.2f}" if entry is not None else "")
         + "...",
         reply_markup=MAIN_KEYBOARD,
     )
     result = apply_cycle_update(status, entry)
     icon = "\u2705" if result.get("ok") else "\u274c"
-    pushed = "pushed" if result.get("pushed") else "NO pushed"
+    pushed = "pushed" if result.get("pushed") else "NOT pushed"
     text = (
         f"{icon} /ciclo_update STATUS={status}\n"
         f"   wrote={result.get('wrote')} · {pushed}\n\n"
@@ -767,7 +767,7 @@ async def cmd_dca(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             px = await get_spot_price(asset)
         except Exception:
             px = None
-        px_str = f"${px:,.2f}" if px else "(sin precio)"
+        px_str = f"${px:,.2f}" if px else "(no price)"
         lines.append(f"\n{asset} — spot {px_str}")
         for idx, t in enumerate(tranches):
             rng = t.get("range") or [0, 0]
@@ -797,14 +797,14 @@ async def cmd_dca(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     f"${float(flip[0]):,.0f}-${float(flip[1]):,.0f}{tag}"
                 )
     lines.append("")
-    lines.append(f"Cycle bottom esperado: {BCD_DCA_PLAN.get('cycle_bottom_expected', '?')}")
+    lines.append(f"Cycle bottom expected: {BCD_DCA_PLAN.get('cycle_bottom_expected', '?')}")
     sources = ", ".join(BCD_DCA_PLAN.get("sources") or [])
     if sources:
-        lines.append(f"Fuentes: {sources}")
+        lines.append(f"Sources: {sources}")
     lines.append("")
     lines.append(
-        "Alertas autom\u00e1ticas edge-triggered cada "
-        f"{POLL_INTERVAL_MIN}min si el precio entra en un range. Rearm 24h."
+        "Edge-triggered automatic alerts every "
+        f"{POLL_INTERVAL_MIN}min when price enters a range. Rearm 24h."
     )
     await send_long_message(update, "\n".join(lines), reply_markup=MAIN_KEYBOARD)
 
@@ -844,7 +844,7 @@ async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             params = position_log.parse_manual_add(args[1:])
             row_id = position_log.append(**params)
             await update.message.reply_text(
-                f"\u2705 Log entry #{row_id} agregada ({params['kind']}).",
+                f"\u2705 Log entry #{row_id} added ({params['kind']}).",
                 reply_markup=MAIN_KEYBOARD,
             )
         except ValueError as exc:
@@ -888,13 +888,13 @@ async def cmd_metrics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def cmd_test_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Round 16: fire a test alert through the alerts pipeline."""
     msg = (
-        "\U0001f9ea TEST ALERT \u2014 sistema de alertas operativo.\n"
+        "\U0001f9ea TEST ALERT \u2014 alert system operational.\n"
         f"Timestamp UTC: {datetime.now(timezone.utc).isoformat()}\n"
-        "Si recibís este mensaje, el canal funciona OK."
+        "If you receive this message, the channel is working OK."
     )
     if TELEGRAM_CHAT_ID:
         await send_bot_message(context.application.bot, TELEGRAM_CHAT_ID, msg)
-    await update.message.reply_text("\u2705 Test alert enviado.", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text("\u2705 Test alert sent.", reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
@@ -903,8 +903,8 @@ async def cmd_reload_commands(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Round 16: re-sync command list with Telegram (BotFather)."""
     n = await sync_commands_with_telegram(context.application)
     await update.message.reply_text(
-        f"\U0001f504 Comandos re-sincronizados con Telegram.\n"
-        f"Total registrados: {n} (visibles en autocompletado).",
+        f"\U0001f504 Commands re-synced with Telegram.\n"
+        f"Total registered: {n} (visible in autocomplete).",
         reply_markup=MAIN_KEYBOARD,
     )
 
@@ -923,8 +923,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 @authorized
 @with_error_logging
 async def cmd_reconcile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """R17 — Reconciliar fund_state vs on-chain."""
-    await update.message.reply_text("⏳ Reconciliando fund_state vs on-chain...", reply_markup=MAIN_KEYBOARD)
+    """R17 — Reconcile fund_state vs on-chain."""
+    await update.message.reply_text("⏳ Reconciling fund_state vs on-chain...", reply_markup=MAIN_KEYBOARD)
     discrepancies = await reconcile_fund_state()
     text = format_reconcile_report(discrepancies)
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
@@ -933,7 +933,7 @@ async def cmd_reconcile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 @authorized
 @with_error_logging
 async def cmd_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """R17 — Próximos catalysts del macro calendar."""
+    """R17 — Upcoming catalysts from the macro calendar."""
     text = cal_format()
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
@@ -941,15 +941,15 @@ async def cmd_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 @authorized
 @with_error_logging
 async def cmd_add_event(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """R17 — Agregar evento al macro calendar.
+    """R17 — Add event to macro calendar.
 
-    Uso: /add_event <event_id> <YYYY-MM-DDTHH:MMZ> <category> <impact> | <name>
+    Usage: /add_event <event_id> <YYYY-MM-DDTHH:MMZ> <category> <impact> | <name>
     """
     raw = " ".join(context.args or [])
     if not raw.strip():
         await update.message.reply_text(
-            "Uso: /add_event <event_id> <YYYY-MM-DDTHH:MMZ> <category> <impact> | <name>\n"
-            "Ej: /add_event fomc_may7 2026-05-07T18:00Z fomc high | FOMC May rate decision",
+            "Usage: /add_event <event_id> <YYYY-MM-DDTHH:MMZ> <category> <impact> | <name>\n"
+            "Ex: /add_event fomc_may7 2026-05-07T18:00Z fomc high | FOMC May rate decision",
             reply_markup=MAIN_KEYBOARD,
         )
         return
@@ -957,7 +957,7 @@ async def cmd_add_event(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         ev = cal_parse_args(raw)
         cal_add_event(ev)
         await update.message.reply_text(
-            f"✅ Evento agregado: {ev.event_id} → {ev.timestamp_utc.isoformat()}",
+            f"✅ Event added: {ev.event_id} → {ev.timestamp_utc.isoformat()}",
             reply_markup=MAIN_KEYBOARD,
         )
     except Exception as exc:  # noqa: BLE001
@@ -967,27 +967,27 @@ async def cmd_add_event(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 @authorized
 @with_error_logging
 async def cmd_remove_event(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """R17 — Borrar evento del macro calendar."""
+    """R17 — Remove event from macro calendar."""
     args = context.args or []
     if not args:
         await update.message.reply_text(
-            "Uso: /remove_event <event_id>",
+            "Usage: /remove_event <event_id>",
             reply_markup=MAIN_KEYBOARD,
         )
         return
     event_id = args[0].strip()
     ok = cal_remove_event(event_id)
     if ok:
-        await update.message.reply_text(f"🗑 {event_id} borrado.", reply_markup=MAIN_KEYBOARD)
+        await update.message.reply_text(f"🗑 {event_id} removed.", reply_markup=MAIN_KEYBOARD)
     else:
-        await update.message.reply_text(f"⚠️ {event_id} no encontrado.", reply_markup=MAIN_KEYBOARD)
+        await update.message.reply_text(f"⚠️ {event_id} not found.", reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
 @with_error_logging
 async def cmd_kill_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """R17 — Estado de los 5 kill triggers."""
-    await update.message.reply_text("⏳ Evaluando kill triggers...", reply_markup=MAIN_KEYBOARD)
+    """R17 — Status of the 5 kill triggers."""
+    await update.message.reply_text("⏳ Evaluating kill triggers...", reply_markup=MAIN_KEYBOARD)
     results = await kill_evaluate_all()
     text = format_kill_status(results)
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
@@ -996,12 +996,12 @@ async def cmd_kill_status(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 @authorized
 @with_error_logging
 async def cmd_intel_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """R17 — Búsqueda full-text en intel_memory."""
+    """R17 — Full-text search in intel_memory."""
     args = context.args or []
     if not args:
         await update.message.reply_text(
-            "Uso: /intel_search <keyword>\n"
-            "Ej: /intel_search hormuz | /intel_search BTC ATH",
+            "Usage: /intel_search <keyword>\n"
+            "Ex: /intel_search hormuz | /intel_search BTC ATH",
             reply_markup=MAIN_KEYBOARD,
         )
         return
@@ -1016,17 +1016,17 @@ async def cmd_intel_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """R17 — Export CSV.
 
-    Uso: /export <tipo> <periodo>
-        tipos: fills, pnl, positions, intel, errors
-        periodos: 7d, 30d, 90d, ytd, all
+    Usage: /export <type> <period>
+        types: fills, pnl, positions, intel, errors
+        periods: 7d, 30d, 90d, ytd, all
     """
     args = context.args or []
     if len(args) < 2:
         await update.message.reply_text(
-            "Uso: /export <tipo> <periodo>\n"
-            "  tipos: fills, pnl, positions, intel, errors\n"
-            "  periodos: 7d, 30d, 90d, ytd, all\n"
-            "Ej: /export fills 30d",
+            "Usage: /export <type> <period>\n"
+            "  types: fills, pnl, positions, intel, errors\n"
+            "  periods: 7d, 30d, 90d, ytd, all\n"
+            "Ex: /export fills 30d",
             reply_markup=MAIN_KEYBOARD,
         )
         return
@@ -1038,10 +1038,10 @@ async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     except Exception:  # noqa: BLE001
         log.exception("/export failed")
-        await update.message.reply_text("❌ Export fallido — ver /errors.", reply_markup=MAIN_KEYBOARD)
+        await update.message.reply_text("❌ Export failed — see /errors.", reply_markup=MAIN_KEYBOARD)
         return
 
-    caption = f"📊 {tipo} ({periodo}) — {count} filas"
+    caption = f"📊 {tipo} ({periodo}) — {count} rows"
     try:
         with open(path, "rb") as f:
             await update.message.reply_document(document=f, filename=os.path.basename(path), caption=caption)
@@ -1056,11 +1056,11 @@ async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 @authorized
 @with_error_logging
 async def cmd_pretrade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """R17 — Checklist pre-trade de 5 puntos."""
+    """R17 — 5-point pre-trade checklist."""
     args = context.args or []
     if not args:
         await update.message.reply_text(
-            "Uso: /pretrade <SYMBOL>\nEj: /pretrade DYDX",
+            "Usage: /pretrade <SYMBOL>\nEx: /pretrade DYDX",
             reply_markup=MAIN_KEYBOARD,
         )
         return
@@ -1076,19 +1076,19 @@ async def cmd_pretrade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 @authorized
 @with_error_logging
 async def cmd_brief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """R18 — Briefing matutino on demand."""
+    """R18 — Morning brief on demand."""
     if r18_send_morning_brief is None:
         await update.message.reply_text(
-            "Morning brief no disponible (módulo no cargado).",
+            "Morning brief unavailable (module not loaded).",
             reply_markup=MAIN_KEYBOARD,
         )
         return
-    await update.message.reply_text("⏳ Briefing matutino...", reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text("⏳ Morning brief...", reply_markup=MAIN_KEYBOARD)
     try:
         await r18_send_morning_brief(context.application.bot, force_chat_id=update.effective_chat.id)
     except Exception as e:  # noqa: BLE001
         await update.message.reply_text(
-            f"⚠️ Brief falló: {str(e)[:200]}",
+            f"⚠️ Brief failed: {str(e)[:200]}",
             reply_markup=MAIN_KEYBOARD,
         )
 
@@ -1096,10 +1096,10 @@ async def cmd_brief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 @authorized
 @with_error_logging
 async def cmd_pnlx(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """R18 — PnL extendido por período."""
+    """R18 — Extended PnL by period."""
     if r18_pnl_period is None:
         await update.message.reply_text(
-            "PnL extendido no disponible (módulo no cargado).",
+            "Extended PnL unavailable (module not loaded).",
             reply_markup=MAIN_KEYBOARD,
         )
         return
@@ -1108,14 +1108,14 @@ async def cmd_pnlx(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     valid = ("today", "week", "month", "ytd", "all")
     if period not in valid:
         await update.message.reply_text(
-            f"Uso: /pnlx <período>\nVálidos: {' / '.join(valid)}",
+            f"Usage: /pnlx <period>\nValid: {' / '.join(valid)}",
             reply_markup=MAIN_KEYBOARD,
         )
         return
     try:
         text = await r18_pnl_period(period)
     except Exception as e:  # noqa: BLE001
-        text = f"⚠️ /pnlx falló: {str(e)[:200]}"
+        text = f"⚠️ /pnlx failed: {str(e)[:200]}"
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
@@ -1125,14 +1125,14 @@ async def cmd_convergence(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """R18 — Macro convergence triggers."""
     if r18_convergence_status is None:
         await update.message.reply_text(
-            "Convergence module no disponible.",
+            "Convergence module unavailable.",
             reply_markup=MAIN_KEYBOARD,
         )
         return
     try:
         text = await r18_convergence_status()
     except Exception as e:  # noqa: BLE001
-        text = f"⚠️ /convergence falló: {str(e)[:200]}"
+        text = f"⚠️ /convergence failed: {str(e)[:200]}"
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
@@ -1142,48 +1142,48 @@ async def cmd_risk_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """R18 — Risk config invariant validator."""
     if r18_risk_check_report is None:
         await update.message.reply_text(
-            "Risk check no disponible (módulo no cargado).",
+            "Risk check unavailable (module not loaded).",
             reply_markup=MAIN_KEYBOARD,
         )
         return
     try:
         text = r18_risk_check_report()
     except Exception as e:  # noqa: BLE001
-        text = f"⚠️ /risk_check falló: {str(e)[:200]}"
+        text = f"⚠️ /risk_check failed: {str(e)[:200]}"
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
 @with_error_logging
 async def cmd_compounding_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """R18 — Compounding events últimos 30 días."""
+    """R18 — Compounding events last 30 days."""
     if r18_compounding_history is None:
         await update.message.reply_text(
-            "Compounding history no disponible (módulo no cargado).",
+            "Compounding history unavailable (module not loaded).",
             reply_markup=MAIN_KEYBOARD,
         )
         return
     try:
         text = r18_compounding_history(days=30)
     except Exception as e:  # noqa: BLE001
-        text = f"⚠️ /compounding_history falló: {str(e)[:200]}"
+        text = f"⚠️ /compounding_history failed: {str(e)[:200]}"
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
 @with_error_logging
 async def cmd_scheduler_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """R18 add-on — Tabla de health de schedulers (last_ok, fails_in_a_row, last_error)."""
+    """R18 add-on — Scheduler health table (last_ok, fails_in_a_row, last_error)."""
     if r18_sched_health_format is None:
         await update.message.reply_text(
-            "Scheduler health no disponible (módulo scheduler_self_healing no cargado).",
+            "Scheduler health unavailable (scheduler_self_healing module not loaded).",
             reply_markup=MAIN_KEYBOARD,
         )
         return
     try:
         text = r18_sched_health_format()
     except Exception as e:  # noqa: BLE001
-        text = f"⚠️ /scheduler_health falló: {str(e)[:200]}"
+        text = f"⚠️ /scheduler_health failed: {str(e)[:200]}"
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
@@ -1193,12 +1193,12 @@ async def cmd_scheduler_health(update: Update, context: ContextTypes.DEFAULT_TYP
 @authorized
 @with_error_logging
 async def cmd_silent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """R-SILENT — toggle bot a modo emergency-only.
+    """R-SILENT — toggle bot to emergency-only mode.
 
     Usage:
         /silent on      → suppresses everything except HF<1.05 + post-event critical
         /silent off     → normal mode (with R-SILENT gates applied)
-        /silent status  → muestra estado actual y configuración de los gates
+        /silent status  → show current status and gate configuration
     """
     from auto import silent_mode as _silent
     from auto import hf_alert_gate as _hfg
@@ -1211,24 +1211,24 @@ async def cmd_silent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         s = _silent.set_silent(True)
         msg = (
             "🔇 SILENT MODE: ON\n\n"
-            f"Activado: {s.get('since_iso', '?')}\n\n"
-            "Suprimido:\n"
-            "  • HF warn (1.05–1.10) — solo critical/preliq escapan\n"
-            "  • Catalyst T-30min — incluso critical\n"
+            f"Activated: {s.get('since_iso', '?')}\n\n"
+            "Suppressed:\n"
+            "  • HF warn (1.05–1.10) — only critical/preliq escape\n"
+            "  • Catalyst T-30min — including critical\n"
             "  • Boot announcements\n"
-            "  • Heartbeats / morning brief / weekly summary (vía gate)\n\n"
-            "Sigue activo:\n"
-            "  • HF critical (<1.05) y preliq (<1.02)\n"
+            "  • Heartbeats / morning brief / weekly summary (via gate)\n\n"
+            "Still active:\n"
+            "  • HF critical (<1.05) and preliq (<1.02)\n"
             "  • Post-event critical T+15min (CATALYST_POST_ALLOWED_IN_SILENT=true)\n"
-            "  • Basket close detector (siempre edge-triggered)\n\n"
-            "Tipea /silent off para volver a modo normal."
+            "  • Basket close detector (always edge-triggered)\n\n"
+            "Type /silent off to return to normal mode."
         )
     elif cmd == "off":
         s = _silent.set_silent(False)
         msg = (
             "🔊 SILENT MODE: OFF\n\n"
-            f"Desactivado: {s.get('since_iso', '?')}\n\n"
-            "Bot vuelve a modo normal con gates R-SILENT aplicados:\n"
+            f"Deactivated: {s.get('since_iso', '?')}\n\n"
+            "Bot returning to normal mode with R-SILENT gates applied:\n"
             f"  • HF gate: warn <{_hfg.THRESHOLD:.2f} | critical <{_hfg.CRITICAL:.2f} | preliq <{_hfg.PRELIQ:.2f}\n"
             f"  • Catalyst gate: impacts={sorted(_cgate.ALLOW_IMPACTS)} timings={sorted(_cgate.ALLOW_TIMINGS)}\n"
             f"  • Boot dedup window: {os.getenv('BOOT_DEDUP_WINDOW_MIN', '30')} min"
@@ -1241,7 +1241,7 @@ async def cmd_silent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         emoji = "🔇" if s.get("silent") else "🔊"
         lines = [
             f"{emoji} SILENT MODE: {bot_status}",
-            f"Desde: {s.get('since_iso', '?')} ({s.get('age_s', 0)//3600}h{(s.get('age_s', 0)%3600)//60}min)",
+            f"Since: {s.get('since_iso', '?')} ({s.get('age_s', 0)//3600}h{(s.get('age_s', 0)%3600)//60}min)",
             f"Source: {s.get('source', '?')}",
             "",
             "── HF gate ──",
@@ -1417,7 +1417,7 @@ async def _risk_validator_job(application: Application) -> None:
         for c in failures:
             lines.append(f"  \u2022 {c.name}: {c.detail} (expected: {c.expected})")
         lines.append("")
-        lines.append("Tipea /risk_check para detalle, ajusta env vars en Railway.")
+        lines.append("Run /risk_check for details, adjust env vars in Railway.")
         await send_bot_message(application.bot, chat_id, "\n".join(lines))
     except Exception:  # noqa: BLE001
         log.exception("risk_validator job failed")
@@ -1464,10 +1464,10 @@ async def sync_commands_with_telegram(application: Application) -> int:
     tg_commands = [TGBotCommand(cmd, desc) for cmd, desc in payload]
     try:
         await application.bot.set_my_commands(tg_commands)
-        log.info("\u2705 Sync %d comandos con Telegram (BotFather autocomplete)", len(tg_commands))
+        log.info("\u2705 Synced %d commands with Telegram (BotFather autocomplete)", len(tg_commands))
         return len(tg_commands)
     except Exception as exc:  # noqa: BLE001
-        log.exception("\u274c set_my_commands fall\u00f3: %s", exc)
+        log.exception("\u274c set_my_commands failed: %s", exc)
         return 0
 
 
@@ -1908,10 +1908,10 @@ HANDLER_MAP = {
 
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
-        print("ERROR: TELEGRAM_BOT_TOKEN no configurado", file=sys.stderr)
+        print("ERROR: TELEGRAM_BOT_TOKEN not configured", file=sys.stderr)
         sys.exit(1)
     if not TELEGRAM_CHAT_ID:
-        print("ERROR: TELEGRAM_CHAT_ID no configurado", file=sys.stderr)
+        print("ERROR: TELEGRAM_CHAT_ID not configured", file=sys.stderr)
         sys.exit(1)
 
     app = (

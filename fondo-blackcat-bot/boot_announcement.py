@@ -72,11 +72,11 @@ def _build_boot_text() -> str:
         lines = []
         for ev_utc, ev in critical_only:
             t_str = ev_utc.strftime("%H:%M UTC")
-            name = ev.get("name", "evento")
+            name = ev.get("name", "event")
             lines.append(f"  • {t_str} — {name}")
-        events_section = "📋 Catalysts hoy:\n" + "\n".join(lines)
+        events_section = "📋 Catalysts today:\n" + "\n".join(lines)
     else:
-        events_section = "📋 Sin catalysts critical hoy."
+        events_section = "📋 No critical catalysts today."
 
     if not calendar_ok:
         events_section = "⚠️ Calendar refresh failed.\n" + events_section

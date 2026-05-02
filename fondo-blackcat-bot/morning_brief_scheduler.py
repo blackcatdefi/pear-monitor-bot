@@ -86,17 +86,17 @@ def _build_brief_text() -> str:
             lines.append(f"  {impact_emoji.get(impact, '⚪')} {t_str} — {name}")
         events_section = "\n".join(lines)
     else:
-        events_section = "  Sin eventos catalyst programados para hoy."
+        events_section = "  No catalyst events scheduled for today."
 
     return (
         "☀️ MORNING BRIEF\n\n"
-        "📋 Eventos catalyst HOY:\n"
+        "📋 Catalyst events TODAY:\n"
         f"{events_section}\n\n"
-        "🐈‍⬛ Recordatorio operativo:\n"
-        "- Pre-evento high/critical: revisar HF, basket UPnL, kill triggers\n"
-        "- NO abrir nuevas posiciones en T-30min de catalysts critical\n"
-        "- Bot va a alertar T-2h y T-30min de cada evento automáticamente\n\n"
-        "Sistema operativo. Trabajo en curso."
+        "🐈‍⬛ Operational reminder:\n"
+        "- Pre-event high/critical: check HF, basket UPnL, kill triggers\n"
+        "- DO NOT open new positions within T-30min of critical catalysts\n"
+        "- Bot will alert at T-2h and T-30min for each event automatically\n\n"
+        "System operational. Work in progress."
     )
 
 

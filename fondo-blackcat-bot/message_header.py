@@ -31,17 +31,17 @@ def format_header() -> str:
     """
     now = now_utc()
 
-    days_es = [
-        "Lunes", "Martes", "Miércoles", "Jueves",
-        "Viernes", "Sábado", "Domingo",
+    days_en = [
+        "Monday", "Tuesday", "Wednesday", "Thursday",
+        "Friday", "Saturday", "Sunday",
     ]
-    months_es = [
-        "enero", "febrero", "marzo", "abril", "mayo", "junio",
-        "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+    months_en = [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
     ]
 
-    day_name = days_es[now.weekday()]
-    month_name = months_es[now.month - 1]
+    day_name = days_en[now.weekday()]
+    month_name = months_en[now.month - 1]
 
     return (
         f"📅 {day_name} {now.day} {month_name} {now.year} — "
