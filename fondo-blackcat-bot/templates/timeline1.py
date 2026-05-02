@@ -22,21 +22,21 @@ def _engagement(m: dict[str, Any]) -> int:
 
 
 def format_timeline(x_intel: dict[str, Any] | None, top_n: int = 40) -> str:
-    """Render a compact Spanish-language summary of last-48h tweets.
+    """Render a compact summary of last-48h tweets.
 
     Input is the dict returned by `fetch_x_intel(hours=48)`.
     """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     if not isinstance(x_intel, dict):
-        return f"🐦 Timeline X — {now}\n\n— Sin datos."
+        return f"🐦 X Timeline — {now}\n\n— No data."
 
     status = x_intel.get("status")
     if status != "ok":
         err = x_intel.get("error", "unknown_error")
         return (
-            f"🐦 Timeline X — {now}\n\n"
-            f"❌ No se pudo leer el timeline: {err}\n"
-            "(verificá X_BEARER_TOKEN en Railway)"
+            f"🐦 X Timeline — {now}\n\n"
+            f"❌ Could not read the timeline: {err}\n"
+            "(check X_BEARER_TOKEN in Railway)"
         )
 
     data: dict[str, list[dict[str, Any]]] = x_intel.get("data") or {}
@@ -51,13 +51,13 @@ def format_timeline(x_intel: dict[str, Any] | None, top_n: int = 40) -> str:
     flat.sort(key=lambda p: _engagement(p[1].get("metrics") or {}), reverse=True)
 
     header = (
-        f"🐦 Timeline X (últimas 48h) — {now}\n"
-        f"Cuentas con actividad: {scanned} | Tweets: {total} | "
-        f"Mostrando top {min(top_n, len(flat))} por engagement\n"
+        f"🐦 X Timeline (last 48h) — {now}\n"
+        f"Active accounts: {scanned} | Tweets: {total} | "
+        f"Showing top {min(top_n, len(flat))} by engagement\n"
         "─────────────────────────────"
     )
     if not flat:
-        return header + "\n\n— Sin tweets nuevos en las últimas 48h."
+        return header + "\n\n— No new tweets in the last 48h."
 
     lines: list[str] = [header]
     for uname, t in flat[:top_n]:

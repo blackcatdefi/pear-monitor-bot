@@ -45,7 +45,7 @@ def _fmt_hf(v: float | None) -> str:
     if v is None:
         return "—"
     if math.isinf(v):
-        return "∞ (sin deuda)"
+        return "∞ (no debt)"
     return f"{v:.3f}"
 
 
@@ -124,28 +124,28 @@ def _fmt_cycle_upnl_block(lines_out: list[str], market: dict[str, Any] | None) -
     lines_out.append(
         f"TRADE DEL CICLO (BTC LONG {TRADE_DEL_CICLO_LEVERAGE}x — {TRADE_DEL_CICLO_PLATFORM.upper()}) · {status}"
     )
-    lines_out.append("  ⚠️ Blofin no expone API pública — el bot NO lee esta posición en tiempo real.")
+    lines_out.append("  ⚠️ Blofin does not expose a public API — the bot does NOT read this position in real time.")
 
     if status == "CLOSED":
-        lines_out.append(f"  ✅ CERRADO: {TRADE_DEL_CICLO_LAST_CLOSE}")
+        lines_out.append(f"  ✅ CLOSED: {TRADE_DEL_CICLO_LAST_CLOSE}")
         lines_out.append(
-            f"  PnL realizado: {_fmt_usd(TRADE_DEL_CICLO_PNL_REALIZED)} "
-            f"(desde entry ${TRADE_DEL_CICLO_LAST_ENTRY:,.2f})"
+            f"  Realized PnL: {_fmt_usd(TRADE_DEL_CICLO_PNL_REALIZED)} "
+            f"(from entry ${TRADE_DEL_CICLO_LAST_ENTRY:,.2f})"
         )
         lines_out.append(
-            f"  Balance Blofin disponible: {_fmt_usd(BLOFIN_BALANCE_AVAILABLE)} USDT "
-            "(copy-trading descopiado, esperando nueva entrada)"
+            f"  Available Blofin balance: {_fmt_usd(BLOFIN_BALANCE_AVAILABLE)} USDT "
+            "(copy-trading uncopied, waiting for new entry)"
         )
         lines_out.append(
-            "  Próxima entrada: pendiente orden manual BCD. "
-            "Edit fund_state.py → STATUS=OPEN + nuevo LAST_ENTRY al reabrir."
+            "  Next entry: pending BCD manual order. "
+            "Edit fund_state.py → STATUS=OPEN + new LAST_ENTRY when reopening."
         )
         return
 
     # STATUS == OPEN → render UPnL estimate
-    lines_out.append(f"  Último entry confirmado por BCD: ${TRADE_DEL_CICLO_LAST_ENTRY:,.2f}")
-    lines_out.append(f"  Balance Blofin (manual + copy-trading): {_fmt_usd(TRADE_DEL_CICLO_BLOFIN_BALANCE_USD)}")
-    lines_out.append(f"  Última lectura manual: {TRADE_DEL_CICLO_LAST_UPDATE}")
+    lines_out.append(f"  Last entry confirmed by BCD: ${TRADE_DEL_CICLO_LAST_ENTRY:,.2f}")
+    lines_out.append(f"  Blofin balance (manual + copy-trading): {_fmt_usd(TRADE_DEL_CICLO_BLOFIN_BALANCE_USD)}")
+    lines_out.append(f"  Last manual read: {TRADE_DEL_CICLO_LAST_UPDATE}")
 
     btc_price: float | None = None
     if isinstance(market, dict):
@@ -164,20 +164,20 @@ def _fmt_cycle_upnl_block(lines_out: list[str], market: dict[str, Any] | None) -
         assumed_margin = TRADE_DEL_CICLO_BLOFIN_BALANCE_USD * 0.5
         est_pnl_usd = assumed_margin * pct_pnl
         lines_out.append(
-            f"  BTC actual: ${btc_price:,.2f} | Movimiento subyacente: {pct_move*100:+.2f}%"
+            f"  BTC current: ${btc_price:,.2f} | Underlying move: {pct_move*100:+.2f}%"
         )
         lines_out.append(
-            f"  PnL estimado ({TRADE_DEL_CICLO_LEVERAGE}x sobre ~${assumed_margin:,.0f} margen): "
+            f"  Estimated PnL ({TRADE_DEL_CICLO_LEVERAGE}x on ~${assumed_margin:,.0f} margin): "
             f"{pct_pnl*100:+.2f}% → {_fmt_usd(est_pnl_usd)}"
         )
         lines_out.append(
-            "  ⚠️ Estimación. No confirmado por API Blofin — BCD debe confirmar balance real."
+            "  ⚠️ Estimate. Not confirmed by Blofin API — BCD must confirm real balance."
         )
     else:
-        lines_out.append("  UPnL: no calculable (BTC price feed no disponible).")
+        lines_out.append("  UPnL: not calculable (BTC price feed unavailable).")
 
     lines_out.append("  DCA plan: $70K Add 1 ($500) / $63K Add 2 ($750) / $55K Add 3 ($1,000)")
-    lines_out.append("  SL individual = liq price (único SL). TP manual en zona $130K–$150K.")
+    lines_out.append("  Individual SL = liq price (single SL). Manual TP in zone $130K–$150K.")
 
 
 def format_quick_positions(wallets: list[dict[str, Any]],
@@ -336,13 +336,13 @@ def format_quick_positions(wallets: list[dict[str, Any]],
         if positions:
             pos_summary = ", ".join(f"{p['side']} {p['coin']}" for p in positions[:5])
         elif _is_alt_short_wallet(d.get("wallet", "")) and not BASKET_STATUS.get("active"):
-            # Wallet históricamente del basket Alt Short Bleed, hoy IDLE.
+            # Wallet historically from Alt Short Bleed basket, now IDLE.
             last = BASKET_STATUS.get("last_basket", "?")
             net = BASKET_STATUS.get("last_basket_result_net_usd", 0.0)
             nxt = BASKET_STATUS.get("next_basket", "pending")
             pos_summary = (
-                f"IDLE (basket {last} cerrado NET {_fmt_usd(net)}, {nxt}). "
-                "Dust residual — no posición activa."
+                f"IDLE (basket {last} closed NET {_fmt_usd(net)}, {nxt}). "
+                "Residual dust — no active position."
             )
         else:
             pos_summary = "sin posiciones perp"
@@ -523,10 +523,10 @@ def format_quick_positions(wallets: list[dict[str, Any]],
             coll_bal = h.get("collateral_balance") or 0.0
             if coll_sym and coll_bal:
                 lines.append(
-                    f"    Colateral: {coll_bal:.4f} {coll_sym} ({_fmt_usd(h.get('total_collateral_usd'))})"
+                    f"    Collateral: {coll_bal:.4f} {coll_sym} ({_fmt_usd(h.get('total_collateral_usd'))})"
                 )
             else:
-                lines.append(f"    Colateral: {_fmt_usd(h.get('total_collateral_usd'))}")
+                lines.append(f"    Collateral: {_fmt_usd(h.get('total_collateral_usd'))}")
 
             debt_sym = h.get("debt_symbol")
             debt_bal = h.get("debt_balance") or 0.0
@@ -564,7 +564,7 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                 lines.append(f"  {direction} {asset} {lev} — {_fmt_usd(val)}")
             lines.append(f"  Total BT: {_fmt_usd(bt_total)}")
         else:
-            lines.append("  INACTIVA — sin posiciones abiertas")
+            lines.append("  INACTIVE — no open positions")
 
     # ── Trades cerrados últimas 24h (agrupados por classify_fill) ──
     if recent_fills:
@@ -625,7 +625,7 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                     f"    {icon} {side} {coin} {sz:.4f} @ ${px:,.4f} | {pnl_str} | {time_str}"
                 )
             if len(fills) > 8:
-                lines.append(f"    … +{len(fills)-8} fills más en este grupo")
+                lines.append(f"    … +{len(fills)-8} more fills in this group")
 
         lines.append(
             f"  TOTAL PnL: {_fmt_usd(total_pnl)} | Fees: {_fmt_usd(total_fees)} | Net: {_fmt_usd(total_pnl - total_fees)}"
@@ -656,8 +656,8 @@ def format_hf(hyperlend: list[dict[str, Any]] | dict[str, Any]) -> str:
         hf = h.get("health_factor")
         icon = "🟢"
         if hf is not None and not math.isinf(hf):
-            # Regla operativa: <1.00 liquidación real, <1.10 acción, <1.15 monitoreo,
-            # 1.10–1.20 normal operativo (NO alertar), >1.20 cómodo.
+            # Operational rule: <1.00 real liquidation, <1.10 action, <1.15 monitor,
+            # 1.10–1.20 normal operational (DO NOT alert), >1.20 comfortable.
             if hf < 1.10:
                 icon = "🚨"
             elif hf < 1.15:
@@ -683,12 +683,12 @@ def format_hf(hyperlend: list[dict[str, Any]] | dict[str, Any]) -> str:
 
         parts.append(
             f"{icon} [{label}] HF: {_fmt_hf(hf)}\n"
-            f"  Colateral: {coll_str}\n"
+            f"  Collateral: {coll_str}\n"
             f"  Borrowed: {debt_str}\n"
             f"  Available: {_fmt_usd(h.get('available_borrows_usd'))}"
         )
 
-    return "\n".join(parts) if parts else "— Sin posiciones HyperLend activas"
+    return "\n".join(parts) if parts else "— No active HyperLend positions"
 
 
 def compile_raw_data(
@@ -719,8 +719,8 @@ def compile_raw_data(
     }
     pretty = json.dumps(blob, ensure_ascii=False, indent=2, default=str)
     return (
-        "DATA CRUDA (timestamp UTC " + now + "):\n\n"
+        "RAW DATA (timestamp UTC " + now + "):\n\n"
         "```json\n" + pretty + "\n```\n\n"
-        "Genera el reporte siguiendo el formato del system prompt. "
-        "Sin relleno, números específicos, conclusiones accionables."
+        "Generate the report following the system prompt format. "
+        "No filler, specific numbers, actionable conclusions."
     )

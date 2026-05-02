@@ -110,7 +110,7 @@ def should_announce() -> bool:
     if age_s >= window_s:
         return True
     log.info(
-        "boot_dedup: suppressing boot announcement (último hace %ds, ventana %ds)",
+        "boot_dedup: suppressing boot announcement (last %ds ago, window %ds)",
         age_s,
         window_s,
     )

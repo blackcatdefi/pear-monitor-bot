@@ -364,18 +364,18 @@ def format_hf_line(entry: dict[str, Any]) -> str:
             f"debt ${debt:,.0f})"
         )
     if cls == "ZERO":
-        return f"{label} — sin posiciones (collateral=0, debt=0)"
+        return f"{label} — no positions (collateral=0, debt=0)"
     # UNKNOWN
     last_hf = data.get("last_known_hf")
     last_age = data.get("age_seconds")
     if last_hf is None:
-        return f"⚠️ {label} — RPC rate-limited (sin lectura previa)"
+        return f"⚠️ {label} — RPC rate-limited (no prior read)"
     if isinstance(last_hf, str):
         # 'inf' marker
-        return f"⚠️ {label} — RPC rate-limited (último HF ∞ hace {_age_label(last_age)})"
+        return f"⚠️ {label} — RPC rate-limited (last HF ∞ {_age_label(last_age)} ago)"
     return (
         f"⚠️ {label} — RPC rate-limited "
-        f"(último HF {float(last_hf):.3f} hace {_age_label(last_age)})"
+        f"(last HF {float(last_hf):.3f} {_age_label(last_age)} ago)"
     )
 
 

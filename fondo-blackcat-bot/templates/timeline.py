@@ -22,30 +22,30 @@ def _engagement(m: dict[str, Any]) -> int:
 
 
 def format_timeline(x_intel: dict[str, Any] | None, top_n: int = 40) -> str:
-    """Render a compact Spanish-language summary of last-48h tweets.
+    """Render a compact summary of last-48h tweets.
 
     Input is the dict returned by `fetch_x_intel(hours=48)`.
     """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     if not isinstance(x_intel, dict):
-        return f"🐦 Timeline X — {now}\n\n— Sin datos."
+        return f"🐦 X Timeline — {now}\n\n— No data."
 
     status = x_intel.get("status")
     if status != "ok":
         err = x_intel.get("error", "unknown_error")
-        # err ya viene diagnóstico-específico de x_intel._diag_for_status
+        # err already comes with diagnostic info from x_intel._diag_for_status
         lines_err = [
-            f"🐦 Timeline X — {now}",
+            f"🐦 X Timeline — {now}",
             "",
-            "❌ No se pudo leer el timeline.",
+            "❌ Could not read the timeline.",
             "",
-            f"Diagnóstico: {err}",
+            f"Diagnostic: {err}",
             "",
-            "Chequeos rápidos:",
-            "  1. console.x.com → balance X API > $0 (auto-recharge VISA 4463)",
-            "  2. developer.x.com → Bearer token válido (X_API_BEARER_TOKEN)",
+            "Quick checks:",
+            "  1. console.x.com → X API balance > $0 (auto-recharge VISA 4463)",
+            "  2. developer.x.com → valid Bearer token (X_API_BEARER_TOKEN)",
             "  3. Railway vars → X_LIST_ID = 2046698139873378486",
-            "  4. /debug_x para test en vivo",
+            "  4. /debug_x for live test",
         ]
         return "\n".join(lines_err)
 
@@ -61,13 +61,13 @@ def format_timeline(x_intel: dict[str, Any] | None, top_n: int = 40) -> str:
     flat.sort(key=lambda p: _engagement(p[1].get("metrics") or {}), reverse=True)
 
     header = (
-        f"🐦 Timeline X (últimas 48h) — {now}\n"
-        f"Cuentas con actividad: {scanned} | Tweets: {total} | "
-        f"Mostrando top {min(top_n, len(flat))} por engagement\n"
+        f"🐦 X Timeline (last 48h) — {now}\n"
+        f"Active accounts: {scanned} | Tweets: {total} | "
+        f"Showing top {min(top_n, len(flat))} by engagement\n"
         "─────────────────────────────"
     )
     if not flat:
-        return header + "\n\n— Sin tweets nuevos en las últimas 48h."
+        return header + "\n\n— No new tweets in the last 48h."
 
     lines: list[str] = [header]
     for uname, t in flat[:top_n]:
