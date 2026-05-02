@@ -3,14 +3,21 @@
 /**
  * R-EN — Backward-compat shim.
  *
- * Public bot is now English-only. This file preserves the legacy `t(key)` /
- * `MESSAGES` / `isSpanish()` interface so existing consumers (branding.js,
- * messageFormatters.js, weeklySummary.js, sanitizer.js) keep working without
- * code changes — but the actual strings come from `src/i18n/en.js`.
+ * Public bot is English-only. DEFAULT LANGUAGE: 'en'.
+ * This file preserves the legacy `t(key)` / `MESSAGES` / `isSpanish()`
+ * interface so existing consumers (branding.js, messageFormatters.js,
+ * weeklySummary.js, sanitizer.js) keep working without code changes — but
+ * the actual strings come from `src/i18n/en.js`.
  *
  * The original Spanish dictionary lives at `src/legacy_es.js` for reference
  * and is NOT imported by any code path.
+ *
+ * Env var LANGUAGE is intentionally ignored — language is always 'en'.
  */
+
+// Explicitly lock to English regardless of any env or system locale.
+const DEFAULT_LANGUAGE = 'en';
+void DEFAULT_LANGUAGE; // used as documentation / grep anchor
 
 const en = require('./i18n/en');
 
