@@ -1,35 +1,58 @@
 'use strict';
 
 /**
- * R-PUBLIC — Scheduler for the per-user wallet tracker.
+ * R-PUBLIC + R-BASKET — Scheduler for the per-user wallet tracker.
  *
- * Polls each unique address from walletTracker.js, diffs against last
- * snapshot, and fans out OPEN / CLOSE alerts to every subscribing user
- * (so multiple users tracking the same whale share one HL fetch).
+ * R-BASKET (3 may 2026) — Wired through src/basketEngine.js so each tracked
+ * wallet emits AT MOST one OPEN and one CLOSE message per basket lifecycle.
+ * Replaces the legacy per-leg loop that produced ~200 messages/day per user
+ * for a single 10-leg Pear basket. See src/basketEngine.js header for the
+ * root-cause and design notes.
  *
- * Each alert is rendered with the subscriber's local timezone (via
- * timezoneManager.formatLocalTime) and ships with a Pear "Copy trade"
- * inline-keyboard button (via pearUrlBuilder).
+ * Per-user behaviour preserved from R-PUBLIC:
+ *   • Per-subscriber timezone in the rendered footer (timezoneManager).
+ *   • Per-subscriber inline keyboard with anonymized utm_id (alertButtons).
+ *   • Multiple users tracking the same whale share ONE Hyperliquid fetch.
  */
 
 const wt = require('./walletTracker');
-const tzMgr = require('./timezoneManager');
-const pearUrl = require('./pearUrlBuilder');
+// tzMgr no longer required here — R-BASKET dropped the per-message
+// timestamp footer in favour of Telegram's native delivery timestamp.
+// timezoneManager is still imported by /timezone (hidden command) and by
+// schedulers that legitimately need to format absolute times.
 const alertButtons = require('./alertButtons');
 const { fetchHyperliquidPositions } = require('./externalWalletTracker');
+const { BasketEngine } = require('./basketEngine');
+const formattersV2 = require('./messageFormattersV2');
 
 const POLL_INTERVAL_SEC = parseInt(
   process.env.TRACK_POLL_INTERVAL_SEC || '60', 10
 );
 
 function isEnabled() {
-  return (
-    (process.env.TRACK_ENABLED || 'true').toLowerCase() !== 'false'
-  );
+  return (process.env.TRACK_ENABLED || 'true').toLowerCase() !== 'false';
 }
 
 let _timer = null;
 let _notify = null;
+let _engine = null; // lazy — first poll constructs it
+
+function _getEngine() {
+  if (!_engine) {
+    _engine = new BasketEngine({
+      // separate file from the BCD-internal monitor's basket engine so
+      // public-bot lifecycle state can't accidentally collide with fund
+      // wallets. Both live on the same Railway volume.
+      dbPath:
+        process.env.PUBLIC_BASKET_ENGINE_DB_PATH ||
+        require('path').join(
+          process.env.RAILWAY_VOLUME_MOUNT_PATH || '/app/data',
+          'basket_engine_public.json'
+        ),
+    });
+  }
+  return _engine;
+}
 
 function _shortAddr(a) {
   if (!a) return '?';
@@ -38,97 +61,87 @@ function _shortAddr(a) {
   return `${s.slice(0, 6)}...${s.slice(-4)}`;
 }
 
-function _fmtPx(n) {
-  if (!Number.isFinite(n) || n <= 0) return '?';
-  if (n >= 100) return n.toFixed(2);
-  if (n >= 1) return n.toFixed(4);
-  return n.toFixed(6);
+function _renderOpenMessage(label, address, legs) {
+  return formattersV2.renderBasketOpen({
+    traderLabel: label || null,
+    traderAddr: address,
+    legs,
+  });
 }
 
-function _fmtUsd(n) {
-  if (!Number.isFinite(n)) return '$0';
-  return `$${Math.round(n).toLocaleString()}`;
-}
-
-function _diffPositions(prev, curr) {
-  const pSet = new Set((prev || []).map((p) => `${p.coin}:${p.side}`));
-  const cSet = new Set((curr || []).map((p) => `${p.coin}:${p.side}`));
-  const opens = (curr || []).filter((p) => !pSet.has(`${p.coin}:${p.side}`));
-  const closes = (prev || []).filter((p) => !cSet.has(`${p.coin}:${p.side}`));
-  return { opens, closes };
-}
-
-function _renderOpenForUser(userId, label, address, opens) {
-  const isBasket = opens.length >= 3;
-  const heading = isBasket
-    ? '🚀 *NEW BASKET OPENED*'
-    : '🐋 *NEW POSITION OPENED*';
-  const traderLabel = label || _shortAddr(address);
-  const lines = [
-    heading,
-    '',
-    `👤 Trader: ${traderLabel} (\`${_shortAddr(address)}\`)`,
-    '',
-    `📊 Composition (${opens.length}):`,
-  ];
-  let totalNotional = 0;
-  for (const p of opens) {
-    const side = p.side || 'SHORT';
-    const px = p.entryPx || p.entryPrice || 0;
+function _renderCloseMessage(label, address, legs, openedAt) {
+  // Phase-1 PnL estimator: sum the unrealizedPnl carried on each leg in
+  // the last snapshot the engine saw before the basket vanished. We don't
+  // have authoritative fills here without an extra call; this is the
+  // closest-to-exit PnL available from clearinghouseState alone.
+  let realized = 0;
+  let gross = 0;
+  for (const p of legs || []) {
+    const u = Number(p.unrealizedPnl);
+    if (Number.isFinite(u)) realized += u;
     const sz = Math.abs(Number(p.size) || 0);
-    totalNotional += sz * px;
-    lines.push(`  • ${p.coin} ${side} @ $${_fmtPx(px)}`);
+    const px = Number(p.entryPrice || p.entryPx) || 0;
+    gross += sz * px;
   }
-  lines.push('');
-  lines.push(`💰 Notional: ${_fmtUsd(totalNotional)}`);
-  if (opens[0] && opens[0].leverage) {
-    lines.push(`⚡ Leverage: ${opens[0].leverage}x`);
+  // Conservative fee estimate: Hyperliquid taker fee ≈ 0.05% per side,
+  // so a round-trip on the gross is ≈ 0.10%. Used only by the sanity
+  // gate (and informally rendered as part of the message via the PnL).
+  const fees = gross * 0.001;
+  const pnl = { realized, fees };
+  if (!formattersV2.isCloseEmittable(pnl)) {
+    return null; // sanity gate refuses to emit
   }
-  lines.push('');
-  // R-START — copy-trade invitation text precedes the hero button row.
-  lines.push(alertButtons.getCopyCtaText());
-  lines.push('');
-  lines.push(`🕐 ${tzMgr.formatLocalTime(userId)}`);
-  return lines.join('\n');
+  const heldMs =
+    openedAt && Number.isFinite(openedAt)
+      ? Math.max(0, Date.now() - Number(openedAt))
+      : null;
+  return formattersV2.renderBasketClose({
+    traderLabel: label || null,
+    traderAddr: address,
+    legs,
+    pnl,
+    heldMs,
+  });
 }
 
-function _renderCloseForUser(userId, label, address, closes) {
-  const lines = [
-    '✅ *POSITION CLOSED ON TRACKED WALLET*',
-    '',
-    `Wallet: ${label || _shortAddr(address)} (\`${_shortAddr(address)}\`)`,
-    '',
-    `Closed (${closes.length}):`,
-  ];
-  for (const p of closes) {
-    const side = p.side || 'SHORT';
-    const px = p.entryPx || p.entryPrice || 0;
-    lines.push(`  • ${p.coin} ${side} @ entry $${_fmtPx(px)}`);
-  }
-  lines.push('');
-  lines.push(`🕐 ${tzMgr.formatLocalTime(userId)}`);
-  return lines.join('\n');
-}
-
-async function _fanOut(subscribers, msgFn, opts) {
-  // R-CTAOPTIMIZE — opts may now be either:
-  //   • an object   → broadcast same opts to every user (legacy path)
-  //   • a function  → invoked per-user with (userId, sub) so the call site
-  //                   can build a per-user inline_keyboard carrying that
-  //                   user's anonymized utm_id.
-  for (const sub of subscribers) {
+async function _fanOutOpen(subs, address, legs) {
+  for (const sub of subs) {
     const userId = parseInt(sub.userId, 10);
     if (!userId) continue;
     try {
-      const personalized = msgFn(userId, sub.label);
-      const sendOpts = typeof opts === 'function'
-        ? opts(userId, sub) || { parse_mode: 'Markdown' }
-        : opts || { parse_mode: 'Markdown' };
-      await _notify(userId, personalized, sendOpts);
+      const message = _renderOpenMessage(sub.label, address, legs);
+      const keyboard = alertButtons.buildAlertKeyboard(legs, 'open', {
+        wallet: address,
+        userId,
+        source: 'tg-track',
+      });
+      const sendOpts = keyboard
+        ? { parse_mode: 'Markdown', reply_markup: keyboard }
+        : { parse_mode: 'Markdown' };
+      await _notify(userId, message, sendOpts);
     } catch (err) {
       console.error(
-        '[walletTrackerScheduler] notify failed for',
-        sub.userId, err && err.message ? err.message : err
+        '[walletTrackerScheduler] notify (open) failed for',
+        sub.userId,
+        err && err.message ? err.message : err
+      );
+    }
+  }
+}
+
+async function _fanOutClose(subs, address, legs, openedAt) {
+  for (const sub of subs) {
+    const userId = parseInt(sub.userId, 10);
+    if (!userId) continue;
+    try {
+      const message = _renderCloseMessage(sub.label, address, legs, openedAt);
+      if (!message) continue; // sanity gate refused
+      await _notify(userId, message, { parse_mode: 'Markdown' });
+    } catch (err) {
+      console.error(
+        '[walletTrackerScheduler] notify (close) failed for',
+        sub.userId,
+        err && err.message ? err.message : err
       );
     }
   }
@@ -139,6 +152,8 @@ async function pollOnce() {
   if (typeof _notify !== 'function') return;
   const all = wt.getAllUniqueAddresses();
   if (all.length === 0) return;
+
+  const engine = _getEngine();
 
   for (const entry of all) {
     const address = entry.address;
@@ -154,39 +169,25 @@ async function pollOnce() {
       continue;
     }
     const prev = wt.getLastSnapshot(address);
-    if (prev === null) {
-      // First sighting → baseline only, no alert
-      wt.setLastSnapshot(address, curr);
-      continue;
+    const baseline = prev === null;
+
+    const events = engine.processSnapshot({
+      walletKey: address,
+      positions: curr,
+      baseline,
+    });
+
+    for (const ev of events) {
+      if (ev.type === 'BASKET_OPEN') {
+        await _fanOutOpen(subs, address, ev.legs);
+      } else if (ev.type === 'BASKET_CLOSE') {
+        await _fanOutClose(subs, address, ev.legs, ev.openedAt);
+      }
     }
-    const { opens, closes } = _diffPositions(prev, curr);
-    if (opens.length > 0) {
-      // R-START — hero CTA layout (Pear copy button row 1, mute button row 2).
-      // R-CTAOPTIMIZE — build per-user keyboard so each carries its own
-      // anonymized utm_id. Source 'tg-track' is the wallet-tracker channel
-      // (distinct from copy-trading sources).
-      await _fanOut(
-        subs,
-        (uid, lbl) => _renderOpenForUser(uid, lbl, address, opens),
-        (uid) => {
-          const keyboard = alertButtons.buildAlertKeyboard(opens, 'open', {
-            wallet: address,
-            userId: uid,
-            source: 'tg-track',
-          });
-          return keyboard
-            ? { parse_mode: 'Markdown', reply_markup: keyboard }
-            : { parse_mode: 'Markdown' };
-        }
-      );
-    }
-    if (closes.length > 0) {
-      await _fanOut(
-        subs,
-        (uid, lbl) => _renderCloseForUser(uid, lbl, address, closes),
-        { parse_mode: 'Markdown' }
-      );
-    }
+
+    // Persist the raw snapshot so we know "we've seen this wallet at
+    // least once" — basketEngine needs no more than that since it holds
+    // its own structured state.
     wt.setLastSnapshot(address, curr);
   }
 }
@@ -208,7 +209,7 @@ function startSchedule({ notify }) {
   }, POLL_INTERVAL_SEC * 1000);
   if (typeof _timer.unref === 'function') _timer.unref();
   console.log(
-    `[walletTrackerScheduler] started, every ${POLL_INTERVAL_SEC}s`
+    `[walletTrackerScheduler] started, every ${POLL_INTERVAL_SEC}s (R-BASKET engine)`
   );
   return _timer;
 }
@@ -220,13 +221,17 @@ function stopSchedule() {
   }
 }
 
+function _resetEngineForTests() {
+  _engine = null;
+}
+
 module.exports = {
   isEnabled,
   pollOnce,
   startSchedule,
   stopSchedule,
   POLL_INTERVAL_SEC,
-  _diffPositions,
-  _renderOpenForUser,
-  _renderCloseForUser,
+  _renderOpenMessage,
+  _renderCloseMessage,
+  _resetEngineForTests,
 };

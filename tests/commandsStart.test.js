@@ -124,17 +124,24 @@ test('/start no clobbera TZ si user ya la tiene seteada', async () => {
   assert.strictEqual(tzMgr.getUserTz(77777), 'America/New_York');
 });
 
-test('keyboard tiene 4 filas: track, signals+copy, tz+status, hero', () => {
+test('keyboard tiene 4 filas: track, copy+status, learn, hero (R-BASKET tz button removed)', () => {
   const kb = commandsStart.buildStartKeyboard();
   assert.strictEqual(kb.inline_keyboard.length, 4);
   // Row 1: 2 buttons (track add + track list)
   assert.strictEqual(kb.inline_keyboard[0].length, 2);
-  // Row 2: 2 buttons (signals + copy_auto) — R-AUTOCOPY
+  // Row 2: 2 buttons (copy_trading + status) — R-AUTOCOPY-MENU
   assert.strictEqual(kb.inline_keyboard[1].length, 2);
-  // Row 3: 2 buttons (tz menu + status)
-  assert.strictEqual(kb.inline_keyboard[2].length, 2);
+  // Row 3: 1 button (learn). R-BASKET (3 may 2026) removed the /timezone
+  // button — TZ is auto-detected silently from Telegram language_code.
+  assert.strictEqual(kb.inline_keyboard[2].length, 1);
   // Row 4: 1 hero button
   assert.strictEqual(kb.inline_keyboard[3].length, 1);
+  // Sanity: no callback_data wires the obsolete tz_menu action.
+  const allBtns = kb.inline_keyboard.flat();
+  assert.ok(
+    allBtns.every((b) => b.callback_data !== 'start:tz_menu'),
+    '/start keyboard must not surface start:tz_menu after R-BASKET'
+  );
 });
 
 test('callback start:track_list with zero wallets prompts /track', async () => {

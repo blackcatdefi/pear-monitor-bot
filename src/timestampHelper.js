@@ -30,8 +30,13 @@ const MONTHS_EN = [
 ];
 
 function isEnabled() {
+  // R-BASKET (3 may 2026) — default flipped from 'true' → 'false'.
+  // Telegram already shows the delivery time on every message; the
+  // hand-rolled "🕐 Sun 03 May 2026 - 19:00 UTC" footer was the user's
+  // #1 complaint about message clutter (spec §5.2). Operators who want
+  // it back can set TIMESTAMP_ON_MESSAGES=true explicitly.
   return (
-    (process.env.TIMESTAMP_ON_MESSAGES || 'true').toLowerCase() !== 'false'
+    (process.env.TIMESTAMP_ON_MESSAGES || 'false').toLowerCase() === 'true'
   );
 }
 

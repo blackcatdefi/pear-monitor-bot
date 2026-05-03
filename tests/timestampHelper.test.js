@@ -17,27 +17,32 @@ test('formatTimestamp pads single-digit hours and minutes', () => {
   assert.match(ts, / 03:07 UTC$/);
 });
 
-test('withTimestamp default position is bottom (italic)', () => {
+test('withTimestamp at position=bottom (italic) when explicitly enabled', () => {
+  process.env.TIMESTAMP_ON_MESSAGES = 'true';
   const out = withTimestamp('Hello world');
   assert.match(out, /^Hello world\n\n_🕐 .*UTC_$/);
+  delete process.env.TIMESTAMP_ON_MESSAGES;
 });
 
-test('withTimestamp position=top puts stamp at the start', () => {
+test('withTimestamp position=top puts stamp at the start (when enabled)', () => {
+  process.env.TIMESTAMP_ON_MESSAGES = 'true';
   const out = withTimestamp('Body', 'top');
   assert.match(out, /^🕐 .*UTC\n\nBody$/);
+  delete process.env.TIMESTAMP_ON_MESSAGES;
 });
 
 test('withTimestamp respects TIMESTAMP_ON_MESSAGES kill switch', () => {
   process.env.TIMESTAMP_ON_MESSAGES = 'false';
   const out = withTimestamp('Body');
   assert.equal(out, 'Body');
-  process.env.TIMESTAMP_ON_MESSAGES = 'true';
+  delete process.env.TIMESTAMP_ON_MESSAGES;
 });
 
-test('withTimestamp passes through non-strings', () => {
+test('withTimestamp passes through non-strings (when enabled)', () => {
   process.env.TIMESTAMP_ON_MESSAGES = 'true';
   const out = withTimestamp(42);
   assert.equal(out, 42);
+  delete process.env.TIMESTAMP_ON_MESSAGES;
 });
 
 test('DAYS_EN and MONTHS_EN are 7 and 12 entries', () => {
@@ -45,7 +50,16 @@ test('DAYS_EN and MONTHS_EN are 7 and 12 entries', () => {
   assert.equal(MONTHS_EN.length, 12);
 });
 
-test('isEnabled defaults true', () => {
+// R-BASKET (3 may 2026): default flipped to OFF — Telegram already shows
+// the delivery time on every message, so the hand-rolled footer was pure
+// clutter. Operators may opt-in via TIMESTAMP_ON_MESSAGES=true.
+test('isEnabled defaults FALSE (R-BASKET footer kill switch)', () => {
   delete process.env.TIMESTAMP_ON_MESSAGES;
+  assert.equal(isEnabled(), false);
+});
+
+test('isEnabled true when explicitly opted in', () => {
+  process.env.TIMESTAMP_ON_MESSAGES = 'true';
   assert.equal(isEnabled(), true);
+  delete process.env.TIMESTAMP_ON_MESSAGES;
 });

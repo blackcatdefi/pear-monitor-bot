@@ -264,17 +264,31 @@ function startSchedulers() {
   if (!_signalsTimer) {
     _signalsTimer = scraper.startSchedule({
       onSignal: dispatchSignalToSubscribers,
-      // R-SCRAPERROBUST — owner alert callback. Fires on FAILURES_HARD_ALERT
-      // consecutive scrape failures (default 10) and again on recovery.
-      // Best-effort: notification failure is swallowed inside the scraper.
+      // R-SCRAPERROBUST + R-BASKET (3 may 2026) — Telegram broadcast
+      // KILLED. Scraper liveness/recovery is monitoring telemetry, not a
+      // user-facing alert (per spec §11 phase-1 "delete SIGNALS SCRAPER
+      // RECOVERED type messages — log only" and docs/PUBLIC_BOT_RULES.md
+      // "public bot must not broadcast uptime/status").
+      //
+      // The /health endpoint + Railway logs already surface this for
+      // operators. To re-enable for a single owner chat (debug only),
+      // set SCRAPER_OPS_BROADCAST=true.
       onAlert: async ({ severity, consecutiveFailures, message }) => {
+        const optIn =
+          (process.env.SCRAPER_OPS_BROADCAST || 'false').toLowerCase() === 'true';
+        const tag = severity === 'critical' ? '[SCRAPER-DOWN]' : '[SCRAPER-OK]';
+        // Always log so the operator can grep `[SCRAPER-` in Railway logs.
+        console.log(
+          `${tag} severity=${severity} consecutive=${consecutiveFailures} msg=${message}`
+        );
+        if (!optIn) return;
         const ownerId = process.env.BCD_TELEGRAM_CHAT_ID;
         if (!ownerId) return;
-        const tag = severity === 'critical' ? '🚨' : '✅';
+        const emoji = severity === 'critical' ? '🚨' : '✅';
         const title = severity === 'critical'
           ? 'SIGNALS SCRAPER DOWN'
           : 'SIGNALS SCRAPER RECOVERED';
-        const body = `${tag} *${title}*\n\nFailures: ${consecutiveFailures}\n${message}`;
+        const body = `${emoji} *${title}*\n\nFailures: ${consecutiveFailures}\n${message}`;
         try { await _notify(ownerId, body, { parse_mode: 'Markdown' }); }
         catch (_) {}
       },

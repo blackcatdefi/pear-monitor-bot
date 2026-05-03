@@ -1,25 +1,26 @@
 'use strict';
 
 /**
- * R(v3) — External Wallet Tracker.
+ * R(v3) + R-BASKET — External Wallet Tracker.
  *
  * Polls a configurable list of Hyperliquid wallets (whales, top traders,
  * benchmark accounts) and emits a Telegram alert whenever any of them
- * OPENs or CLOSEs a position. Operators use these alerts as intel signal —
- * to track whales/top traders and inform their own trades (e.g., "top trader
- * just opened BTC long").
+ * OPENs or CLOSEs a basket. Operators use these alerts as intel signal —
+ * to track whales/top traders and inform their own trades.
+ *
+ * R-BASKET (3 may 2026): all events flow through src/basketEngine.js so the
+ * per-leg loop ("one Telegram message per assetPosition") is replaced with
+ * one OPEN + one CLOSE per basket lifecycle, keyed by the sorted-leg
+ * signature. Eliminates the apr-30 incident where an external whale opened
+ * a 12-leg basket and the bot fired 12 OPENs in 60 seconds.
  *
  * Configuration:
  *   EXTERNAL_WALLETS_ENABLED              — kill-switch (default true)
  *   EXTERNAL_WALLETS_JSON                 — JSON array; entries:
  *                                            { address, label, chain? }
  *   EXTERNAL_WALLETS_POLL_INTERVAL_SECONDS — poll cadence (default 60)
- *
- * State is in-memory only. On restart we re-baseline (no spurious
- * "closed" alerts because we have no prior snapshot).
  */
 
-const { withTimestamp } = require('./timestampHelper');
 const { appendFooter } = (() => {
   try {
     return require('./branding');
@@ -27,6 +28,9 @@ const { appendFooter } = (() => {
     return { appendFooter: (m) => m };
   }
 })();
+// R-BASKET — basket lifecycle engine + compact templates.
+const { BasketEngine } = require('./basketEngine');
+const formattersV2 = require('./messageFormattersV2');
 
 const HL_INFO_URL =
   process.env.HYPERLIQUID_API_URL || 'https://api.hyperliquid.xyz';
@@ -47,6 +51,23 @@ const _lastSeenPositions = new Map(); // key: lc(address) -> array of { coin, si
 let _pollTimer = null;
 let _notify = null; // (chatId, message, opts) => Promise
 let _primaryChatId = null;
+// R-BASKET — single shared engine for the external whale-tracker schedule.
+// Persists to a dedicated file so external-whale lifecycle never collides
+// with the public per-user tracker engine or the BCD fund engine.
+let _engine = null;
+function _getEngine() {
+  if (_engine) return _engine;
+  const path = require('path');
+  _engine = new BasketEngine({
+    dbPath:
+      process.env.EXTERNAL_BASKET_ENGINE_DB_PATH ||
+      path.join(
+        process.env.RAILWAY_VOLUME_MOUNT_PATH || '/app/data',
+        'basket_engine_external.json'
+      ),
+  });
+  return _engine;
+}
 
 function loadExternalWalletsFromEnv() {
   try {
@@ -180,7 +201,10 @@ function _diffPositions(prev, curr) {
 async function _send(message) {
   if (typeof _notify !== 'function' || !_primaryChatId) return;
   try {
-    const decorated = withTimestamp(appendFooter(message, false), 'bottom');
+    // R-BASKET: timestamp footer dropped (Telegram already shows the
+    // delivery time on every message). branding footer kept since it
+    // distinguishes BCD's fund alerts from generic public broadcasts.
+    const decorated = appendFooter(message, false);
     await _notify(_primaryChatId, decorated, { parse_mode: 'Markdown' });
   } catch (err) {
     console.error(
@@ -191,13 +215,16 @@ async function _send(message) {
 }
 
 /**
- * One poll cycle. Iterates each tracked wallet, fetches positions,
- * diffs against prior snapshot, emits alerts. Errors per-wallet are
- * isolated so one flaky address can't kill the schedule.
+ * One poll cycle. Iterates each tracked wallet, fetches positions, hands
+ * the snapshot to the basket engine, and emits at most ONE OPEN and ONE
+ * CLOSE message per basket lifecycle. Errors per-wallet are isolated so
+ * one flaky address can't kill the schedule.
  */
 async function pollExternalWallets() {
   if (!isEnabled()) return;
   if (_trackedExternalWallets.length === 0) return;
+
+  const engine = _getEngine();
 
   for (const config of _trackedExternalWallets) {
     const lc = String(config.address || '').toLowerCase();
@@ -205,24 +232,21 @@ async function pollExternalWallets() {
 
     try {
       const curr = await fetchHyperliquidPositions(config.address);
-      const prev = _lastSeenPositions.get(lc);
+      const baseline = !_lastSeenPositions.has(lc);
 
-      // First sighting — baseline only, do not alert.
-      if (!prev) {
-        _lastSeenPositions.set(lc, curr);
-        continue;
-      }
+      const events = engine.processSnapshot({
+        walletKey: config.address,
+        positions: curr,
+        baseline,
+      });
 
-      const { opens, closes } = _diffPositions(prev, curr);
-
-      for (const open of opens) {
-        await _send(formatExternalOpenAlert(config, open));
-      }
-      for (const close of closes) {
-        // For CLOSE alerts, use the snapshot's last-seen PnL since we don't
-        // have a closing fill price for an external wallet without an extra
-        // user-fills query. unrealizedPnl is the closest signal we have.
-        await _send(formatExternalCloseAlert(config, close));
+      for (const ev of events) {
+        if (ev.type === 'BASKET_OPEN') {
+          await _send(formatExternalBasketOpenAlert(config, ev.legs));
+        } else if (ev.type === 'BASKET_CLOSE') {
+          const msg = formatExternalBasketCloseAlert(config, ev.legs, ev.openedAt);
+          if (msg) await _send(msg);
+        }
       }
 
       _lastSeenPositions.set(lc, curr);
@@ -233,6 +257,49 @@ async function pollExternalWallets() {
       );
     }
   }
+}
+
+/**
+ * Render a basket OPEN alert via the V2 compact template, then prepend the
+ * intel banner the legacy operators rely on ("EXTERNAL WALLET — possible
+ * market signal"). One Telegram message per basket, regardless of leg count.
+ */
+function formatExternalBasketOpenAlert(config, legs) {
+  const body = formattersV2.renderBasketOpen({
+    traderLabel: config.label || null,
+    traderAddr: config.address,
+    legs,
+  });
+  return `🐋 EXTERNAL WALLET — possible market signal\n${body}`;
+}
+
+function formatExternalBasketCloseAlert(config, legs, openedAt) {
+  let realized = 0;
+  let gross = 0;
+  for (const p of legs || []) {
+    const u = Number(p.unrealizedPnl);
+    if (Number.isFinite(u)) realized += u;
+    const sz = Math.abs(Number(p.size) || 0);
+    const px = Number(p.entryPrice || p.entryPx) || 0;
+    gross += sz * px;
+  }
+  const fees = gross * 0.001;
+  const pnl = { realized, fees };
+  if (!formattersV2.isCloseEmittable(pnl)) {
+    return null;
+  }
+  const heldMs =
+    openedAt && Number.isFinite(openedAt)
+      ? Math.max(0, Date.now() - Number(openedAt))
+      : null;
+  const body = formattersV2.renderBasketClose({
+    traderLabel: config.label || null,
+    traderAddr: config.address,
+    legs,
+    pnl,
+    heldMs,
+  });
+  return `🐋 EXTERNAL WALLET — possible exit signal\n${body}`;
 }
 
 /**
@@ -287,6 +354,7 @@ function _resetForTests() {
   _lastSeenPositions.clear();
   _notify = null;
   _primaryChatId = null;
+  _engine = null;
   if (_pollTimer) {
     clearInterval(_pollTimer);
     _pollTimer = null;

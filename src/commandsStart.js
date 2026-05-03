@@ -63,8 +63,12 @@ function buildStartKeyboard(/* isReturning unused — same layout */) {
         { text: t('start.kb_copy_trading'), callback_data: 'start:copytrading_menu' },
         { text: t('start.kb_status'), callback_data: 'start:status_view' },
       ],
+      // R-BASKET (3 may 2026) — /timezone UI button removed from /start.
+      // Telegram already shows the delivery time on every message and the
+      // bot auto-detects the user's TZ from `language_code` on first /start
+      // (silent, no UI). The /timezone command is still available for
+      // power-users who want to override it manually.
       [
-        { text: t('start.kb_tz'), callback_data: 'start:tz_menu' },
         { text: t('start.kb_learn'), callback_data: 'start:learn_menu' },
       ],
       [
