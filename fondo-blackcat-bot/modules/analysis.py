@@ -430,14 +430,52 @@ def _build_degraded_report(
         lines.append("")
 
     if hyperlend and isinstance(hyperlend, list):
+        # R-HF-RENDER (3 may 2026): respect hf_status from cache-aware
+        # reader so the LLM context never sees raw "HF nan" / "HF inf"
+        # — render the same UNKNOWN fallback the user-facing /reporte uses.
+        import math as _math
         lines.append("HYPERLEND:")
         for hl in hyperlend:
-            if hl.get("status") == "ok":
-                data = hl.get("data", {})
-                label = data.get("label", "?")
-                coll = data.get("total_collateral_usd", 0)
-                hf = data.get("health_factor", "?")
-                lines.append(f"  \u2022 {label}: Collateral ${coll:,.0f} | HF {hf}")
+            if hl.get("status") != "ok":
+                continue
+            data = hl.get("data", {})
+            label = data.get("label", "?")
+            coll = data.get("total_collateral_usd", 0) or 0
+            hf_status = (hl.get("hf_status") or "OK").upper()
+            if hf_status == "UNKNOWN":
+                last_hf = data.get("last_known_hf")
+                age_s = data.get("age_seconds")
+                age_label = (
+                    f"{int(age_s)//60}min" if age_s is not None and age_s >= 60
+                    else (f"{int(age_s)}s" if age_s is not None else "?")
+                )
+                if last_hf is None:
+                    hf_repr = "UNKNOWN (RPC rate-limited, no cache)"
+                elif isinstance(last_hf, str) and last_hf.lower() == "inf":
+                    hf_repr = f"UNKNOWN (last known ∞ {age_label} ago)"
+                else:
+                    try:
+                        hf_repr = f"UNKNOWN (last known {float(last_hf):.4f} {age_label} ago)"
+                    except (TypeError, ValueError):
+                        hf_repr = "UNKNOWN (cache parse error)"
+                last_coll = data.get("last_known_collateral_usd") or coll
+                lines.append(
+                    f"  \u2022 {label}: Collateral ${last_coll:,.0f} | HF {hf_repr}"
+                )
+                continue
+            hf = data.get("health_factor")
+            try:
+                if hf is None:
+                    hf_str = "—"
+                elif isinstance(hf, float) and _math.isnan(hf):
+                    hf_str = "—"
+                elif isinstance(hf, float) and _math.isinf(hf):
+                    hf_str = "∞ (no debt)"
+                else:
+                    hf_str = f"{float(hf):.4f}"
+            except (TypeError, ValueError):
+                hf_str = "—"
+            lines.append(f"  \u2022 {label}: Collateral ${coll:,.0f} | HF {hf_str}")
         lines.append("")
 
     if market and isinstance(market, dict) and market.get("status") == "ok":

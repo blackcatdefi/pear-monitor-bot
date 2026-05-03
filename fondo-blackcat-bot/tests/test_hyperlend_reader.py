@@ -240,14 +240,16 @@ def test_format_hf_line_unknown_no_cache():
     }
     line = hyperlend_reader.format_hf_line(entry)
     assert "rate-limited" in line
-    assert "sin lectura previa" in line
+    # English copy after R-EN-PY migration:
+    assert "no prior read" in line
 
 
 def test_format_hf_line_zero():
     entry = _zero_entry(WALLET_FLY)
     entry["hf_status"] = "ZERO"
     line = hyperlend_reader.format_hf_line(entry)
-    assert "sin posiciones" in line
+    # English copy after R-EN-PY migration:
+    assert "no positions" in line
 
 
 def test_total_failure_no_cache_returns_empty():

@@ -42,11 +42,69 @@ def _fmt_usd(v: float | None) -> str:
 
 
 def _fmt_hf(v: float | None) -> str:
+    """Render a HealthFactor numeric value.
+
+    R-HF-RENDER (3 may 2026): defensive — must NEVER emit literal "nan".
+    The cache-aware reader (auto.hyperlend_reader) flags rate-limited
+    entries with hf_status='UNKNOWN' AND sets data.health_factor=NaN as a
+    sentinel. Callers MUST branch on hf_status before formatting; this
+    helper still degrades to "—" if a NaN slips through (defense-in-depth).
+    """
     if v is None:
         return "—"
-    if math.isinf(v):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    if math.isnan(f):
+        return "—"
+    if math.isinf(f):
         return "∞ (no debt)"
-    return f"{v:.3f}"
+    return f"{f:.3f}"
+
+
+def _fmt_hf_loose(v: Any) -> str:
+    """Render a HF value that may be the cache 'inf' string sentinel.
+
+    Used for ``last_known_hf`` rendering (cache stores 'inf' as a string
+    when the wallet was last seen with collateral and zero debt — see
+    auto.hyperlend_reader._persist_ok).
+    """
+    if v is None:
+        return "—"
+    if isinstance(v, str):
+        if v.strip().lower() == "inf":
+            return "∞"
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return "—"
+    else:
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return "—"
+    if math.isnan(f):
+        return "—"
+    if math.isinf(f):
+        return "∞"
+    return f"{f:.3f}"
+
+
+def _hl_age_label(age_seconds: int | None) -> str:
+    """Human age label for cached HyperLend reads (single-source-of-truth
+    with auto.hyperlend_reader._age_label semantics)."""
+    if age_seconds is None:
+        return "?"
+    try:
+        s = int(age_seconds)
+    except (TypeError, ValueError):
+        return "?"
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}min"
+    return f"{s // 3600}h"
 
 
 def _estimate_spot_usd(spot_balances: list[dict[str, Any]],
@@ -505,42 +563,88 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                      if hl.get("status") == "ok" else 0,
                      reverse=True)
 
+    # ─── R-HF-RENDER (3 may 2026) ───────────────────────────────────────
+    # Single-source-of-truth with auto.hyperlend_reader.read_all_with_cache.
+    # Each entry carries hf_status ∈ {OK, UNKNOWN, ZERO}. The /reporte
+    # block, the HF<1.20 alerts (modules/alerts.py), and the LLM analyzer
+    # (modules/analysis.py) MUST all consume the same reader so they
+    # never disagree (3 may bug: alert fired HF=1.2001 OK, /reporte
+    # showed HF=nan + LTV=0.0% for the same wallet). The reader sets
+    # data.health_factor=NaN as a sentinel for UNKNOWN; we never pass
+    # that through _fmt_hf — we branch on hf_status instead.
     for hl in hl_list:
-        if hl.get("status") == "ok":
-            h = hl["data"]
-            coll = h.get("total_collateral_usd", 0.0) or 0.0
-            if coll < 0.01:
-                continue
-            label = h.get("label") or hl.get("label") or "—"
-            wallet_short = (h.get("wallet") or "")[:6]
-            if wallet_short:
-                wallet_short = wallet_short + "…" + (h.get("wallet") or "")[-4:]
-            header = f"  [{label}]" + (f" {wallet_short}" if wallet_short else "")
-            lines.append(header)
-            lines.append(f"    HF: {_fmt_hf(h.get('health_factor'))}")
-
-            coll_sym = h.get("collateral_symbol")
-            coll_bal = h.get("collateral_balance") or 0.0
-            if coll_sym and coll_bal:
-                lines.append(
-                    f"    Collateral: {coll_bal:.4f} {coll_sym} ({_fmt_usd(h.get('total_collateral_usd'))})"
-                )
-            else:
-                lines.append(f"    Collateral: {_fmt_usd(h.get('total_collateral_usd'))}")
-
-            debt_sym = h.get("debt_symbol")
-            debt_bal = h.get("debt_balance") or 0.0
-            if debt_sym and debt_bal:
-                lines.append(
-                    f"    Borrowed: {debt_bal:.4f} {debt_sym} ({_fmt_usd(h.get('total_debt_usd'))})"
-                )
-            else:
-                lines.append(f"    Borrowed: {_fmt_usd(h.get('total_debt_usd'))}")
-
-            lines.append(f"    Available borrow: {_fmt_usd(h.get('available_borrows_usd'))}")
-            lines.append(f"    LTV: {(h.get('ltv') or 0)*100:.1f}% | LiqThr: {(h.get('current_liquidation_threshold') or 0)*100:.1f}%")
-        else:
+        if hl.get("status") != "ok":
             lines.append(f"  ❌ {hl.get('error','error')}")
+            continue
+
+        h = hl["data"]
+        # hf_status absent → treat as OK (legacy fetch path / older cache).
+        hf_status = (hl.get("hf_status") or "OK").upper()
+
+        label = h.get("label") or hl.get("label") or "—"
+        wallet_full = h.get("wallet") or ""
+        wallet_short = (wallet_full[:6] + "…" + wallet_full[-4:]) if wallet_full else ""
+        header = f"  [{label}]" + (f" {wallet_short}" if wallet_short else "")
+
+        if hf_status == "UNKNOWN":
+            # Degraded read: HyperEVM RPC rate-limited. Render last-known
+            # HF from cache (or a clear "no prior read" message) so the
+            # block NEVER shows literal "nan" / "0.0%" / "$0.00".
+            lines.append(header)
+            last_hf = h.get("last_known_hf")
+            last_age = h.get("age_seconds")
+            last_coll = h.get("last_known_collateral_usd")
+            last_debt = h.get("last_known_debt_usd")
+
+            if last_hf is None and not last_coll and not last_debt:
+                lines.append(
+                    "    ⚠️ HyperEVM RPC rate-limited — no prior cached read"
+                )
+                lines.append("    (HyperLend offline, no cache available)")
+            else:
+                hf_str = _fmt_hf_loose(last_hf)
+                age_str = _hl_age_label(last_age)
+                lines.append(
+                    f"    ⚠️ HyperEVM RPC rate-limited — last known HF: {hf_str} "
+                    f"(cached {age_str} ago)"
+                )
+                if last_coll is not None and last_coll > 0:
+                    lines.append(
+                        f"    Last cached Collateral: {_fmt_usd(last_coll)}"
+                    )
+                if last_debt is not None and last_debt > 0:
+                    lines.append(
+                        f"    Last cached Borrowed: {_fmt_usd(last_debt)}"
+                    )
+            continue
+
+        # OK or ZERO branch — same rendering, but skip empty wallets.
+        coll = h.get("total_collateral_usd", 0.0) or 0.0
+        if coll < 0.01:
+            continue
+        lines.append(header)
+        lines.append(f"    HF: {_fmt_hf(h.get('health_factor'))}")
+
+        coll_sym = h.get("collateral_symbol")
+        coll_bal = h.get("collateral_balance") or 0.0
+        if coll_sym and coll_bal:
+            lines.append(
+                f"    Collateral: {coll_bal:.4f} {coll_sym} ({_fmt_usd(h.get('total_collateral_usd'))})"
+            )
+        else:
+            lines.append(f"    Collateral: {_fmt_usd(h.get('total_collateral_usd'))}")
+
+        debt_sym = h.get("debt_symbol")
+        debt_bal = h.get("debt_balance") or 0.0
+        if debt_sym and debt_bal:
+            lines.append(
+                f"    Borrowed: {debt_bal:.4f} {debt_sym} ({_fmt_usd(h.get('total_debt_usd'))})"
+            )
+        else:
+            lines.append(f"    Borrowed: {_fmt_usd(h.get('total_debt_usd'))}")
+
+        lines.append(f"    Available borrow: {_fmt_usd(h.get('available_borrows_usd'))}")
+        lines.append(f"    LTV: {(h.get('ltv') or 0)*100:.1f}% | LiqThr: {(h.get('current_liquidation_threshold') or 0)*100:.1f}%")
 
     # ── Bounce Tech leveraged tokens ──
     if bounce_tech is not None:
@@ -649,13 +753,49 @@ def format_hf(hyperlend: list[dict[str, Any]] | dict[str, Any]) -> str:
             parts.append(f"❌ HyperLend: {hl.get('error','error')}")
             continue
         h = hl["data"]
+        # R-HF-RENDER: respect hf_status from auto.hyperlend_reader
+        hf_status = (hl.get("hf_status") or "OK").upper()
+
+        if hf_status == "UNKNOWN":
+            label = h.get("label") or hl.get("label") or "—"
+            last_hf = h.get("last_known_hf")
+            last_age = h.get("age_seconds")
+            last_coll = h.get("last_known_collateral_usd")
+            last_debt = h.get("last_known_debt_usd")
+            if last_hf is None and not last_coll and not last_debt:
+                parts.append(
+                    f"⚠️ [{label}] HyperLend offline — no cached read available"
+                )
+            else:
+                hf_str = _fmt_hf_loose(last_hf)
+                age_str = _hl_age_label(last_age)
+                cached_block = (
+                    f"⚠️ [{label}] RPC rate-limited — last known HF: {hf_str} "
+                    f"(cached {age_str} ago)"
+                )
+                if last_coll is not None and last_coll > 0:
+                    cached_block += f"\n  Last cached Collateral: {_fmt_usd(last_coll)}"
+                if last_debt is not None and last_debt > 0:
+                    cached_block += f"\n  Last cached Borrowed: {_fmt_usd(last_debt)}"
+                parts.append(cached_block)
+            continue
+
         coll = h.get("total_collateral_usd", 0.0) or 0.0
         if coll < 0.01:
             continue
 
         hf = h.get("health_factor")
         icon = "🟢"
-        if hf is not None and not math.isinf(hf):
+        # Defensive: NaN must NOT silently keep the green icon. Treat NaN
+        # the same as the UNKNOWN branch above (this should be unreachable
+        # because hf_status would be UNKNOWN, but defense-in-depth).
+        try:
+            _hf_is_nan = math.isnan(float(hf)) if hf is not None else False
+        except (TypeError, ValueError):
+            _hf_is_nan = False
+        if _hf_is_nan:
+            icon = "⚠️"
+        elif hf is not None and not math.isinf(hf):
             # Operational rule: <1.00 real liquidation, <1.10 action, <1.15 monitor,
             # 1.10–1.20 normal operational (DO NOT alert), >1.20 comfortable.
             if hf < 1.10:
