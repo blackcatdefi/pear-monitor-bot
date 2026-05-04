@@ -95,6 +95,10 @@ Reglas:
 - Mantener este manual actualizado cuando el usuario agregue nuevas preferencias de flujo.
 
 ## Historial de interacciones
+- **2026-05-03** — **R-PUBLIC-START-FIX-V2** (Node, PR #7, commit `47ec2ce`) — Bot seguía mudo después de 0571161. Tres root causes encontrados y corregidos:
+  - **BUG 1 (principal):** `createBot()` usaba `{ polling: true }` iniciando `getUpdates` inmediatamente. Si había un webhook activo, Telegram rechaza con 409 "Can not getUpdates when webhook is active" en CADA llamada. `polling_error` lo logea pero nunca para — bot vivo, health checks OK, pero recibe CERO updates. Los tests pasan porque mockean TelegramBot. Fix: `{ polling: false }` en `bot.js` + `await bot.deleteWebhook()` en `index.js` antes de `bot.startPolling()`.
+  - **BUG 2:** Handlers SIGTERM/SIGINT registrados DESPUÉS de `await monitor.start()` (que hace el primer poll, puede tomar segundos). Durante ese window, si Railway envía SIGTERM al container viejo, sale sin llamar `stopPolling()` → 409 Conflict para la nueva instancia. Fix: mover `process.once('SIGTERM'/'SIGINT')` inmediatamente después de `extensions.bootstrap()`.
+  - **BUG 3 (defensivo):** `commands.attachCommands(bot)` en `extensions.js` no tenía try/catch — si tiraba, `bootstrap()` crasheaba antes de que `commandsStart.attach()` corriera. Fix: wrapped in try/catch.
 - **2026-05-03** — **R-DASHBOARD-FIX (Python)** — 5 bugs corregidos en `fondo-blackcat-bot/modules/dashboard.py` + `portfolio_snapshot.py` + `auto/hyperlend_reader.py`:
   - **BUG 1 (Spot tokens ausentes):** Added `spot_balances` field to `WalletSnapshot`; `_build_state()` aggregates spot balances per coin from fresh wallet data; Spot Tokens HTML card added to dashboard grid.
   - **BUG 2 (UPnL discrepancy):** `_build_state()` fetches wallets once, computes UPnL directly from `unrealized_pnl_total` fields — same source as `/posiciones`. No more stale snapshot UPnL.
