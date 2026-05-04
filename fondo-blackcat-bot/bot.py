@@ -831,7 +831,8 @@ async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text(f"\u274c {exc}", reply_markup=MAIN_KEYBOARD)
         return
 
-    text = pnl_tracker.build_summary()
+    await update.message.reply_text("⏳ Fetching fills from Hyperliquid...", reply_markup=MAIN_KEYBOARD)
+    text = await pnl_tracker.build_auto_summary()
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 

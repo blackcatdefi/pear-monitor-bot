@@ -76,6 +76,70 @@ async def user_fills(wallet: str) -> list[dict[str, Any]]:
     return await _info({"type": "userFills", "user": wallet})
 
 
+async def user_fills_by_time(
+    wallet: str,
+    start_time_ms: int,
+    end_time_ms: int | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch fills for a wallet within a time range (HL userFillsByTime endpoint)."""
+    payload: dict[str, Any] = {
+        "type": "userFillsByTime",
+        "user": wallet,
+        "startTime": start_time_ms,
+    }
+    if end_time_ms is not None:
+        payload["endTime"] = end_time_ms
+    return await _info(payload)
+
+
+def _normalize_fill(f: dict[str, Any], wallet_label: str = "") -> dict[str, Any]:
+    """Normalise a raw HL fill dict to the canonical shape used across the bot."""
+    return {
+        "coin": f.get("coin", "?"),
+        "side": f.get("side", "?"),
+        "dir": f.get("dir", ""),
+        "px": float(f.get("px", 0) or 0),
+        "sz": float(f.get("sz", 0) or 0),
+        "time": f.get("time"),
+        "closedPnl": float(f.get("closedPnl", 0) or 0),
+        "fee": float(f.get("fee", 0) or 0),
+        "_wallet_label": wallet_label,
+    }
+
+
+async def fetch_fills_since(
+    wallet: str,
+    since: datetime,
+    label: str = "",
+) -> list[dict[str, Any]]:
+    """Fetch all fills for one wallet since `since` datetime (inclusive)."""
+    start_ms = int(since.timestamp() * 1000)
+    try:
+        raw = await user_fills_by_time(wallet, start_ms)
+        if not isinstance(raw, list):
+            return []
+        return [_normalize_fill(f, wallet_label=label) for f in raw]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("fetch_fills_since(%s, %s) failed: %s", wallet, since.isoformat(), exc)
+        return []
+
+
+async def fetch_all_fills_since(since: datetime) -> list[dict[str, Any]]:
+    """Fetch fills for ALL fund wallets since `since` datetime."""
+    if not FUND_WALLETS:
+        return []
+    tasks = [
+        fetch_fills_since(wallet, since, label=label)
+        for wallet, label in FUND_WALLETS.items()
+    ]
+    results = await asyncio.gather(*tasks)
+    out: list[dict[str, Any]] = []
+    for r in results:
+        out.extend(r)
+    out.sort(key=lambda x: x.get("time") or 0, reverse=True)
+    return out
+
+
 def _summarize_positions(state: dict[str, Any], dex_label: str = "main") -> dict[str, Any]:
     """Extract a compact summary from clearinghouseState response."""
     margin = state.get("marginSummary", {}) or {}

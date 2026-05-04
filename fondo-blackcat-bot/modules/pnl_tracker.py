@@ -1,13 +1,17 @@
-"""PnL tracker — realized PnL, transfers, withdrawals (SQLite-backed).
+"""PnL tracker — realized PnL auto-detected from Hyperliquid fills.
 
-Three event categories:
+Auto-fills (single source of truth):
+    /pnl reads fills directly from the HL userFillsByTime API — the same
+    reader used by /posiciones — so numbers are always in sync.
+
+Manual event categories (legacy, merged into output):
 • CLOSED  — realized PnL from a closed position (positive or negative $)
 • TRANSFER — movement between own wallets; neutral for PnL accounting
 • WITHDRAW — capital removed from the fund; NOT counted as PnL
 
 Commands:
-    /pnl       → 7D / 30D / YTD summaries
-    /pnl add ... → record a new event (one-off manual entry; future work)
+    /pnl       → 7D / 30D / YTD / all-time summaries (auto-detected)
+    /pnl add ... → record a manual event (legacy)
     /pnl ciclo → Trade del Ciclo detailed report
 
 Storage: sqlite3 at DATA_DIR/pnl.db, single table `pnl_events`.
@@ -15,6 +19,7 @@ Storage: sqlite3 at DATA_DIR/pnl.db, single table `pnl_events`.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sqlite3
@@ -266,3 +271,140 @@ def parse_manual_add(args: list[str]) -> dict[str, Any]:
         "wallet_label": wallet_label,
         "notes": notes,
     }
+
+
+# ─── Auto-fill PnL (single source of truth = same reader as /posiciones) ─────
+
+# Earliest start date for "all time" queries.
+_ALLTIME_START = datetime(2020, 1, 1, tzinfo=timezone.utc)
+
+
+def _count_manual_events() -> int:
+    """Return count of manual CLOSED events in SQLite."""
+    c = _conn()
+    try:
+        row = c.execute(
+            "SELECT COUNT(*) FROM pnl_events WHERE category=?", (EVENT_CLOSED,)
+        ).fetchone()
+        return int(row[0]) if row else 0
+    finally:
+        c.close()
+
+
+def _compute_fill_stats(fills: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compute realized PnL stats for a list of HL fills.
+
+    Rules:
+    • realized_pnl (gross) = sum(closedPnl) for Close fills only
+    • fees = sum(fee) for ALL fills in the period (opens + closes)
+    • net = gross - fees
+    • volume = sum(sz * px) for ALL fills (informational)
+    • n_trades = number of Close fills
+    """
+    close_fills = [f for f in fills if (f.get("dir") or "").startswith("Close")]
+    gross = sum(f.get("closedPnl", 0) or 0 for f in close_fills)
+    fees = sum(f.get("fee", 0) or 0 for f in fills)
+    volume = sum((f.get("sz", 0) or 0) * (f.get("px", 0) or 0) for f in fills)
+    return {
+        "gross": gross,
+        "fees": fees,
+        "net": gross - fees,
+        "n_trades": len(close_fills),
+        "volume": volume,
+    }
+
+
+def _filter_fills_since(fills: list[dict[str, Any]], since: datetime) -> list[dict[str, Any]]:
+    """Return only fills whose timestamp >= since."""
+    cutoff_ms = since.timestamp() * 1000
+    return [f for f in fills if (f.get("time") or 0) >= cutoff_ms]
+
+
+def _fmt_volume(v: float) -> str:
+    if v >= 1_000_000:
+        return f"${v / 1_000_000:.1f}M"
+    if v >= 1_000:
+        return f"${v / 1_000:.1f}K"
+    return f"${v:.2f}"
+
+
+def build_auto_summary_from_fills(
+    fills_ytd: list[dict[str, Any]],
+    fills_alltime: list[dict[str, Any]],
+    manual_count: int = 0,
+    year: int | None = None,
+) -> str:
+    """Pure function: build /pnl summary from pre-fetched HL fills lists.
+
+    `fills_ytd` covers Jan 1 → now (used for 7d / 30d / YTD sub-windows).
+    `fills_alltime` is the full history available from the API.
+    Injecting fills as params makes unit testing trivial (no HTTP needed).
+    """
+    now = datetime.now(timezone.utc)
+    _year = year or now.year
+    d7 = now - timedelta(days=7)
+    d30 = now - timedelta(days=30)
+
+    s7 = _compute_fill_stats(_filter_fills_since(fills_ytd, d7))
+    s30 = _compute_fill_stats(_filter_fills_since(fills_ytd, d30))
+    sytd = _compute_fill_stats(fills_ytd)
+    sall = _compute_fill_stats(fills_alltime)
+
+    def _section(label: str, s: dict[str, Any]) -> list[str]:
+        return [
+            f"  {label}:",
+            f"    Realized: {_fmt_usd(s['net'])} net  (gross {_fmt_usd(s['gross'])}, fees {_fmt_usd(s['fees'])})",
+            f"    Closed trades: {s['n_trades']}",
+            f"    Volume: {_fmt_volume(s['volume'])}",
+        ]
+
+    lines: list[str] = [
+        "💰 PNL TRACKER (auto-detected)",
+        "─" * 40,
+    ]
+    lines.extend(_section("Last 7d", s7))
+    lines.append("")
+    lines.extend(_section("Last 30d", s30))
+    lines.append("")
+    lines.extend(_section(f"YTD {_year}", sytd))
+    lines.append("")
+    lines.extend(_section("All time", sall))
+
+    if manual_count:
+        lines.append("")
+        lines.append(f"+ {manual_count} manual event(s) (legacy · /pnl add)")
+
+    return "\n".join(lines)
+
+
+async def build_auto_summary() -> str:
+    """Fetch HL fills then render /pnl summary (async entry point).
+
+    Fetches YTD fills (covers 7d/30d/YTD) and all-time fills in parallel.
+    Falls back to a helpful error message if the API is unreachable.
+    """
+    from modules.portfolio import fetch_all_fills_since  # local import avoids circular
+
+    now = datetime.now(timezone.utc)
+    ytd_start = datetime(now.year, 1, 1, tzinfo=timezone.utc)
+
+    try:
+        fills_ytd, fills_all = await asyncio.gather(
+            fetch_all_fills_since(ytd_start),
+            fetch_all_fills_since(_ALLTIME_START),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("build_auto_summary: fill fetch failed: %s", exc)
+        return (
+            "⚠️ /pnl — could not fetch fills from Hyperliquid API.\n"
+            f"Error: {exc}\n"
+            "Manual events still available via /pnl add."
+        )
+
+    manual_count = _count_manual_events()
+    return build_auto_summary_from_fills(
+        fills_ytd=fills_ytd,
+        fills_alltime=fills_all,
+        manual_count=manual_count,
+        year=now.year,
+    )
