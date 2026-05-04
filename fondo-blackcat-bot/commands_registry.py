@@ -26,6 +26,7 @@ COMMANDS: List[BotCommand] = [
     # ─── CORE ───
     BotCommand("reporte", "All-in-one: timeline + positions + analysis", "core", "cmd_reporte"),
     BotCommand("posiciones", "Quick snapshot (wallets + HF + Bounce Tech)", "core", "cmd_posiciones"),
+    BotCommand("dashboard", "Live dashboard: capital + flywheels + basket + market (R-DASHBOARD-COMMAND)", "core", "cmd_dashboard"),
     BotCommand("status", "R17 quick status (no LLM, <3s)", "core", "cmd_status"),
     BotCommand("flywheel", "HL pair trade (LONG HYPE / SHORT UETH)", "core", "cmd_flywheel"),
     BotCommand("tesis", "Current macro thesis state", "core", "cmd_tesis"),

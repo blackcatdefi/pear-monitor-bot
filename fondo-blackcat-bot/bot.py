@@ -1188,6 +1188,28 @@ async def cmd_scheduler_health(update: Update, context: ContextTypes.DEFAULT_TYP
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
+# ─── R-DASHBOARD-COMMAND: /dashboard ─────────────────────────────────────────
+
+
+@authorized
+@with_error_logging
+async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-DASHBOARD-COMMAND — full dashboard as a Telegram message.
+
+    Renders the same data as the web dashboard (R-DASHBOARD-FIX SSoT):
+    Capital, Main flywheel, Secondary flywheel, Active basket, Market,
+    Wallets summary, Upcoming catalysts, Footer.
+    """
+    await update.message.reply_text("⏳ Fetching dashboard...", reply_markup=MAIN_KEYBOARD)
+    try:
+        from modules.dashboard_telegram import build_dashboard_telegram
+        text = await build_dashboard_telegram()
+    except Exception as exc:  # noqa: BLE001
+        log.exception("/dashboard render failed")
+        text = f"❌ Dashboard error: {str(exc)[:200]}\nSee /errors for details."
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
 # ─── R-SILENT: /silent command ───────────────────────────────────────────────
 
 
@@ -1904,6 +1926,8 @@ HANDLER_MAP = {
     "scheduler_health": cmd_scheduler_health,
     # R-SILENT
     "silent": cmd_silent,
+    # R-DASHBOARD-COMMAND
+    "dashboard": cmd_dashboard,
 }
 
 
