@@ -8,7 +8,15 @@ const {
 function createBot(token, hlApi, monitor, hlendApi = null) {
   const bot = new TelegramBot(token, { polling: true });
 
+  // R-PUBLIC-START-FIX: log polling errors so they're visible in Railway logs
+  // and don't silently kill the update stream.
+  bot.on('polling_error', (err) => {
+    console.error('[bot] polling_error:', err && err.message ? err.message : err);
+  });
+
   // Register bot commands menu (R-AUTOCOPY: 14 user cmds + 11 operator cmds)
+  // R-PUBLIC-START-FIX: must use .catch() — unawaited rejections crash Node 20
+  // before any onText/callback_query handlers are registered.
   bot.setMyCommands([
     { command: 'start',         description: '🍐 Start' },
     { command: 'track',         description: '🎯 Track external wallets' },
@@ -37,7 +45,9 @@ function createBot(token, hlApi, monitor, hlendApi = null) {
     { command: 'export',        description: '📤 Export CSV' },
     { command: 'summary',       description: '📊 Weekly summary' },
     { command: 'healthcheck',   description: '✅ Health check' },
-  ]);
+  ]).catch((err) => {
+    console.error('[bot] setMyCommands failed (non-fatal):', err && err.message ? err.message : err);
+  });
 
   function mainMenu() {
     return {
@@ -99,8 +109,16 @@ function createBot(token, hlApi, monitor, hlendApi = null) {
 
   // Handle button presses
   bot.on('callback_query', async (query) => {
+    // R-PUBLIC-START-FIX: query.message can be null in inline mode or when
+    // the originating message was deleted. Guard before accessing .chat.id to
+    // prevent an unhandled rejection that crashes Node 20 and kills all handlers.
+    if (!query.message) return;
     const chatId = query.message.chat.id;
-    await bot.answerCallbackQuery(query.id);
+    try {
+      await bot.answerCallbackQuery(query.id);
+    } catch (_) {
+      // query already answered or expired — safe to ignore
+    }
 
     switch (query.data) {
       case 'status':

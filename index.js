@@ -1,5 +1,16 @@
 require('dotenv').config();
 
+// R-PUBLIC-START-FIX: Node 20 exits on unhandledRejection by default.
+// Guard here so a transient Telegram API error during startup (e.g. a
+// setMyCommands call racing against Railway's deployment window) does NOT
+// kill the process before /start and other handlers are registered.
+process.on('unhandledRejection', (reason) => {
+  console.error('[index] unhandledRejection (non-fatal):', reason && reason.message ? reason.message : reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[index] uncaughtException:', err && err.message ? err.message : err);
+});
+
 const HyperliquidApi = require('./src/hyperliquidApi');
 const HyperLendApi = require('./src/hyperLendApi');
 const PositionMonitor = require('./src/monitor');
@@ -45,6 +56,20 @@ async function main() {
   console.log(`Bot running. Polling every ${POLL_INTERVAL}s. Public mode - any user can add wallets.`);
   console.log(`HyperLend enabled via ${HYPEREVM_RPC_URL} (Pool ${HYPERLEND_POOL_ADDRESS})`);
   console.log(`R(v2) extensions active. Health on :${process.env.HEALTH_PORT || 8080}`);
+
+  // R-PUBLIC-START-FIX: handle SIGTERM (Railway sends this when stopping the
+  // old container during a deploy). Without this, the old instance keeps its
+  // Telegram polling connection open for up to 30 s, causing 409 Conflict for
+  // the new instance — which means the new bot never receives any updates
+  // (including /start) until the OS finally kills the old process.
+  function _shutdown(signal) {
+    console.log(`[index] ${signal} received — stopping polling gracefully`);
+    try { bot.stopPolling(); } catch (_) {}
+    try { rv2.stop(); } catch (_) {}
+    setTimeout(() => process.exit(0), 1500);
+  }
+  process.once('SIGTERM', () => _shutdown('SIGTERM'));
+  process.once('SIGINT',  () => _shutdown('SIGINT'));
 }
 
 main().catch(err => {
