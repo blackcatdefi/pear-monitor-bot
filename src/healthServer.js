@@ -16,6 +16,22 @@ const _state = {
   startedAt: Date.now(),
   lastSuccessfulPoll: null,
   errors: [], // {timestamp, message}
+  // R-PUBLIC-START-NUCLEAR — Telegram polling-specific telemetry so future
+  // regressions are detectable in seconds via curl /health (instead of
+  // grepping Railway logs by hand). Polling can crash silently or drop
+  // updates without changing wallet-monitor pulse — these counters separate
+  // the two failure modes.
+  telegramUpdatesLifetime: 0,
+  lastTelegramUpdateAt: null,
+  lastStartCommandAt: null,
+  lastStartCommandFromUserId: null,
+  pollingStartedAt: null,
+  registeredHandlers: [],
+  bootDeployId: process.env.RAILWAY_DEPLOYMENT_ID || null,
+  bootCommitSha:
+    process.env.RAILWAY_GIT_COMMIT_SHA ||
+    process.env.RAILWAY_GIT_COMMIT ||
+    null,
 };
 
 const ERRORS_BUFFER_MAX = 200;
@@ -31,6 +47,33 @@ function recordError(err) {
   });
   if (_state.errors.length > ERRORS_BUFFER_MAX) {
     _state.errors.splice(0, _state.errors.length - ERRORS_BUFFER_MAX);
+  }
+}
+
+// R-PUBLIC-START-NUCLEAR — instrumented from src/extensions.js bootstrap so
+// the lifetime counter increments on every Telegram update the bot consumes.
+// If pending_update_count > 0 on Telegram side AND lifetime stays flat → the
+// bot is not polling.
+function recordTelegramUpdate(msg) {
+  _state.telegramUpdatesLifetime += 1;
+  _state.lastTelegramUpdateAt = Date.now();
+}
+
+// Called from commandsStart.js whenever /start is consumed. Lets the bot
+// prove end-to-end that the /start handler fires, not just that polling
+// returns updates.
+function recordStartCommand(userId) {
+  _state.lastStartCommandAt = Date.now();
+  if (userId != null) _state.lastStartCommandFromUserId = String(userId);
+}
+
+function recordPollingStarted() {
+  _state.pollingStartedAt = Date.now();
+}
+
+function registerHandler(name) {
+  if (!_state.registeredHandlers.includes(name)) {
+    _state.registeredHandlers.push(name);
   }
 }
 
@@ -61,6 +104,29 @@ function getStatus() {
       : null,
     errors_24h_count: errors24h.length,
     errors_24h_recent: errors24h.slice(-10),
+    // R-PUBLIC-START-NUCLEAR — Telegram-specific health
+    telegram: {
+      polling_started_at: _state.pollingStartedAt
+        ? new Date(_state.pollingStartedAt).toISOString()
+        : null,
+      updates_lifetime: _state.telegramUpdatesLifetime,
+      last_update_at: _state.lastTelegramUpdateAt
+        ? new Date(_state.lastTelegramUpdateAt).toISOString()
+        : null,
+      last_update_age_ms: _state.lastTelegramUpdateAt
+        ? now - _state.lastTelegramUpdateAt
+        : null,
+      last_start_command_at: _state.lastStartCommandAt
+        ? new Date(_state.lastStartCommandAt).toISOString()
+        : null,
+      last_start_command_from_user_id: _state.lastStartCommandFromUserId,
+      registered_handlers: _state.registeredHandlers.slice(),
+      handlers_count: _state.registeredHandlers.length,
+    },
+    deploy: {
+      deploy_id: _state.bootDeployId,
+      commit_sha: _state.bootCommitSha,
+    },
   };
 }
 
@@ -120,12 +186,22 @@ function _resetForTests() {
   _state.startedAt = Date.now();
   _state.lastSuccessfulPoll = null;
   _state.errors.length = 0;
+  _state.telegramUpdatesLifetime = 0;
+  _state.lastTelegramUpdateAt = null;
+  _state.lastStartCommandAt = null;
+  _state.lastStartCommandFromUserId = null;
+  _state.pollingStartedAt = null;
+  _state.registeredHandlers.length = 0;
 }
 
 module.exports = {
   start,
   recordSuccessfulPoll,
   recordError,
+  recordTelegramUpdate,
+  recordStartCommand,
+  recordPollingStarted,
+  registerHandler,
   getStatus,
   isHealthy,
   _resetForTests,

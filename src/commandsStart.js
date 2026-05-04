@@ -354,10 +354,23 @@ async function _handleMuteCallback(bot, cb) {
 }
 
 function attach(bot) {
+  // R-PUBLIC-START-NUCLEAR — observability: record /start receipts in
+  // healthServer so curl /health proves the handler fires end-to-end.
+  let _hs = null;
+  try { _hs = require('./healthServer'); _hs.registerHandler('start'); }
+  catch (_) {}
+
   // R-AUTOCOPY — accept optional /start payload (deep-link referral) so
   // the regex matches `/start ref_12345` as well as bare `/start`.
   bot.onText(/^\/start(?:@\w+)?(?:\s+\S+)?$/i, async (msg) => {
     try {
+      if (_hs) {
+        try { _hs.recordStartCommand(msg && msg.from && msg.from.id); }
+        catch (_) {}
+      }
+      console.log(
+        `[commandsStart] /start received from user_id=${msg && msg.from && msg.from.id} chat_id=${msg && msg.chat && msg.chat.id}`
+      );
       await handleStart(bot, msg);
     } catch (e) {
       console.error(

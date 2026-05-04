@@ -135,6 +135,25 @@ async function main() {
   bot.startPolling();
   console.log('[index] polling started');
 
+  // R-PUBLIC-START-NUCLEAR — record polling start in healthServer so /health
+  // exposes telegram.polling_started_at and the lifetime counter starts at 0.
+  // Wire a global bot.on('message') counter here so EVERY consumed update
+  // (not just /start) increments lifetime — proves the poll loop is alive
+  // even when no command-specific handler is attached yet.
+  try {
+    const _hs = require('./src/healthServer');
+    _hs.recordPollingStarted();
+    bot.on('message', (msg) => {
+      try { _hs.recordTelegramUpdate(msg); }
+      catch (_) {}
+    });
+  } catch (e) {
+    console.error(
+      '[index] healthServer instrumentation failed (non-fatal):',
+      e && e.message ? e.message : e
+    );
+  }
+
   await monitor.start(POLL_INTERVAL);
 
   console.log(`Bot running. Polling every ${POLL_INTERVAL}s. Public mode - any user can add wallets.`);
