@@ -16,8 +16,66 @@
 const { shouldSendAlert } = require('./closeAlerts');
 const pearUrlBuilder = require('./pearUrlBuilder');
 
+// R-PUBLIC-BASKET-SPAM-NUCLEAR — forensic counters with no-op fallback so
+// pure unit tests don't need to stub healthServer.
+const _healthCounters = (() => {
+  try {
+    return require('./healthServer');
+  } catch (_) {
+    return {
+      recordPhantomSuppressed: () => {},
+      recordEventDeduplicated: () => {},
+    };
+  }
+})();
+
+// R-PUBLIC-BASKET-SPAM-NUCLEAR — persistent SHA-256 dedup. Required so
+// 18-leg baskets don't get re-emitted when the basket detector splits them
+// into two consecutive polls (Bug C: 1 basket = 2 BASKET_OPEN events
+// because Hyperliquid surfaces TWAP fills across multiple snapshots).
+const basketDedup = require('./basketDedup');
+
 const BASKET_WINDOW_MS = 5 * 60 * 1000;
 const BASKET_MIN_COUNT = 3;
+
+// R-PUBLIC-BASKET-SPAM-NUCLEAR (Bug C) — 60s wallet-level debounce. This
+// is independent of and stricter than the per-coin shouldSendAlert window:
+// even if the SHA-256 hash differs (because the "split basket" emerges with
+// a different leg subset on each poll), we refuse to emit a *second*
+// BASKET_OPEN for the same wallet within 60s of the first.
+//
+// Implemented as an in-memory Map<wallet, lastEmitMs>. We accept that this
+// resets across bot restarts — that's why basketDedup (persistent SHA-256)
+// stacks on top. The debounce is the fast lane; the SHA-256 is the durable
+// lane. Either gate alone is sufficient to suppress the duplicate.
+const BASKET_WALLET_DEBOUNCE_MS = parseInt(
+  process.env.BASKET_WALLET_DEBOUNCE_MS || `${60 * 1000}`,
+  10
+);
+const _walletLastBasketEmit = new Map();
+
+function _walletDebounceCheck(wallet) {
+  const w = String(wallet || '').toLowerCase();
+  if (!w) return { allowed: true };
+  const last = _walletLastBasketEmit.get(w);
+  if (last && Date.now() - last < BASKET_WALLET_DEBOUNCE_MS) {
+    return {
+      allowed: false,
+      ageMs: Date.now() - last,
+    };
+  }
+  return { allowed: true };
+}
+
+function _walletDebounceMark(wallet) {
+  const w = String(wallet || '').toLowerCase();
+  if (!w) return;
+  _walletLastBasketEmit.set(w, Date.now());
+}
+
+function _resetWalletDebounceForTests() {
+  _walletLastBasketEmit.clear();
+}
 
 function isEnabled() {
   return (process.env.OPEN_ALERTS_ENABLED || 'true').toLowerCase() !== 'false';
@@ -137,15 +195,61 @@ async function emitAlerts({ chatId, wallet, label, newPositions, notify }) {
   if (ev.type === 'NONE') return { dispatched: 0, type: 'NONE' };
 
   if (ev.type === 'BASKET_OPEN') {
-    if (shouldSendAlert(wallet, 'BASKET_OPEN')) {
-      const msg = formatBasketOpenAlert(label, ev.positions);
-      const keyboard = pearUrlBuilder.buildInlineKeyboard(
-        _enrichWithNotional(ev.positions)
-      );
-      await notify(chatId, msg, keyboard ? { reply_markup: keyboard } : undefined);
-      return { dispatched: 1, type: 'BASKET_OPEN' };
+    // Gate 1 — fast in-memory wallet-level debounce. Even if SHA-256 hash
+    // differs (split basket on Bug C), 60s after the first emit blocks
+    // the second.
+    const debounce = _walletDebounceCheck(wallet);
+    if (!debounce.allowed) {
+      try {
+        _healthCounters.recordPhantomSuppressed(
+          `openAlerts.wallet_debounce:${String(wallet).slice(0, 10)}:${debounce.ageMs}ms`
+        );
+      } catch (_) {
+        /* ignore */
+      }
+      return { dispatched: 0, type: 'BASKET_OPEN_WALLET_DEBOUNCED' };
     }
-    return { dispatched: 0, type: 'BASKET_OPEN_DEDUPED' };
+
+    // Gate 2 — persistent SHA-256 dedup (Bug D). Survives bot restarts
+    // via Railway volume. checkAlreadyAlerted internally increments the
+    // events_deduplicated_lifetime counter on a hit.
+    let dedupResult = { wasAlerted: false, hash: null };
+    try {
+      dedupResult = basketDedup.checkAlreadyAlerted(wallet, ev.positions);
+    } catch (_) {
+      /* basketDedup failure must not block alerts — fail-open */
+    }
+    if (dedupResult.wasAlerted) {
+      // counter already incremented inside basketDedup — return early
+      return { dispatched: 0, type: 'BASKET_OPEN_DEDUPED' };
+    }
+
+    // Gate 3 — legacy shouldSendAlert keyed on wallet+'BASKET_OPEN' string
+    // (60s window per process). Kept as belt-and-suspenders.
+    if (!shouldSendAlert(wallet, 'BASKET_OPEN')) {
+      try {
+        _healthCounters.recordPhantomSuppressed(
+          `openAlerts.shouldSendAlert_block:${String(wallet).slice(0, 10)}`
+        );
+      } catch (_) {
+        /* ignore */
+      }
+      return { dispatched: 0, type: 'BASKET_OPEN_DEDUPED' };
+    }
+
+    // All three gates clear — emit and mark.
+    const msg = formatBasketOpenAlert(label, ev.positions);
+    const keyboard = pearUrlBuilder.buildInlineKeyboard(
+      _enrichWithNotional(ev.positions)
+    );
+    await notify(chatId, msg, keyboard ? { reply_markup: keyboard } : undefined);
+    _walletDebounceMark(wallet);
+    try {
+      basketDedup.markAsAlerted(wallet, ev.positions);
+    } catch (_) {
+      /* persist failure logged inside basketDedup */
+    }
+    return { dispatched: 1, type: 'BASKET_OPEN' };
   }
 
   let count = 0;
@@ -170,4 +274,7 @@ module.exports = {
   emitAlerts,
   BASKET_WINDOW_MS,
   BASKET_MIN_COUNT,
+  BASKET_WALLET_DEBOUNCE_MS,
+  // test-only — never call from production
+  _resetWalletDebounceForTests,
 };

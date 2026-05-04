@@ -1,8 +1,22 @@
 'use strict';
 
+// R-PUBLIC-BASKET-SPAM-NUCLEAR — emitAlerts now consults basketDedup (SHA-256
+// persistent) AND wallet debounce (in-memory Map) BEFORE shouldSendAlert.
+// Use an isolated dedup DB so the default `data/basket_dedup.json` doesn't
+// poison the assertions when prior runs leave entries on disk.
+const path = require('path');
+process.env.DEDUP_DB_PATH = path.join(
+  __dirname,
+  '..',
+  'data',
+  '__test_openAlerts_main.json'
+);
+process.env.BASKET_DEDUP_ENABLED = 'true';
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
+const openAlerts = require('../src/openAlerts');
 const {
   findNewPositions,
   classifyOpenEvent,
@@ -10,9 +24,16 @@ const {
   formatIndividualOpenAlert,
   emitAlerts,
   BASKET_MIN_COUNT,
-} = require('../src/openAlerts');
+} = openAlerts;
 
 const { _resetCachesForTests } = require('../src/closeAlerts');
+const basketDedup = require('../src/basketDedup');
+
+function _resetAllOpenAlertGates() {
+  _resetCachesForTests();
+  basketDedup._resetForTests();
+  openAlerts._resetWalletDebounceForTests();
+}
 
 test('findNewPositions returns [] when both lists empty', () => {
   assert.deepEqual(findNewPositions([], []), []);
@@ -76,7 +97,7 @@ test('formatIndividualOpenAlert: renders English "NEW POSITION OPENED" header', 
 });
 
 test('emitAlerts: BASKET_OPEN dispatches single message via dedupe', async () => {
-  _resetCachesForTests();
+  _resetAllOpenAlertGates();
   const sent = [];
   const positions = [
     { coin: 'A', size: 1, entryPrice: 1 },
@@ -94,7 +115,7 @@ test('emitAlerts: BASKET_OPEN dispatches single message via dedupe', async () =>
 });
 
 test('emitAlerts: BASKET_OPEN second call within dedupe window suppressed', async () => {
-  _resetCachesForTests();
+  _resetAllOpenAlertGates();
   const sent = [];
   const positions = [
     { coin: 'A', size: 1, entryPrice: 1 },
@@ -105,6 +126,11 @@ test('emitAlerts: BASKET_OPEN second call within dedupe window suppressed', asyn
     chatId: 'cid', wallet: '0xabc', label: 'W', newPositions: positions,
     notify: async (cid, msg) => { sent.push(msg); },
   });
+  // Second call: identical basket. The wallet-debounce gate fires first
+  // (returns BASKET_OPEN_WALLET_DEBOUNCED). After clearing the in-memory
+  // debounce, the SHA-256 dedup gate fires (returns BASKET_OPEN_DEDUPED).
+  // Either suppression is acceptable for the spam-prevention spec.
+  openAlerts._resetWalletDebounceForTests();
   const r2 = await emitAlerts({
     chatId: 'cid', wallet: '0xabc', label: 'W', newPositions: positions,
     notify: async (cid, msg) => { sent.push(msg); },

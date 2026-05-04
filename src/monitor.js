@@ -6,14 +6,14 @@ const {
   saveState,
   shortenAddress,
 } = require('./store');
-const {
-  shouldSendAlert,
-  aggregateClosePnl,
-  classifyCloseReason,
-  trackCloseForBasket,
-  formatCloseAlert,
-  formatBasketSummary,
-} = require('./closeAlerts');
+// R-PUBLIC-BASKET-SPAM-NUCLEAR (4 may 2026) — the legacy per-leg open/close
+// emit and the legacy basket-summary emit are GONE from this file.
+// Single source of truth for OPEN alerts is now extensions.js → openAlerts.js
+// (with the new 60s wallet-level debounce + persistent SHA-256 basketDedup),
+// and for CLOSE alerts it is walletTrackerScheduler.js / externalWalletTracker.js
+// → basketEngine.js (with isCloseEmittable phantom-zero gate). closeAlerts.js
+// helpers are intentionally NOT imported here; ESLint will flag any new usage.
+// See docs/PUBLIC_BOT_RULES.md + tests/regression_basket_spam_nuclear.test.js.
 // R(v3) — TWAP-aware gating + timestamp helper. Imported here so the
 // existing edge-triggered funds-available branch can pass through the
 // gate without any structural rewrite of monitor.js.
@@ -24,6 +24,13 @@ const { withTimestamp } = require('./timestampHelper');
 // Suppresses identical/near-identical alerts within 30 min, <5% available
 // delta, <0.05 HF delta. Force-emits on HF cross <1.10 or >50% delta.
 const borrowAlertGate = require('./borrowAlertGate');
+// R-PUBLIC-BASKET-SPAM-NUCLEAR — phantom event counter for /health.
+const _healthCounters = (() => {
+  try { return require('./healthServer'); }
+  catch (_) {
+    return { recordPhantomSuppressed: () => {}, recordEventDeduplicated: () => {} };
+  }
+})();
 
 class PositionMonitor {
   constructor(hlApi, notifyFn, hlendApi = null) {
@@ -177,24 +184,12 @@ class PositionMonitor {
         } catch (_) {
           /* never let detection break the poll cycle */
         }
-        if (!silent) {
-          const dexTag =
-            pos.dex !== 'Native' ? ` _(${pos.dexDisplay || pos.dex})_` : '';
-          await this.notify(
-            chatId,
-            [
-              `📈 *New position opened*`,
-              ``,
-              `📍 Wallet: ${label}`,
-              `🪙 ${pos.coin}${dexTag} ${pos.side}`,
-              `📏 Size: ${Math.abs(pos.size).toFixed(4)}`,
-              `💲 Entry: $${pos.entryPrice.toFixed(2)}`,
-              pos.leverage ? `⚡ Leverage: ${pos.leverage}x` : '',
-            ]
-              .filter(Boolean)
-              .join('\n')
-          );
-        }
+        // R-PUBLIC-BASKET-SPAM-NUCLEAR (4 may 2026): the legacy per-leg
+        // `📈 *New position opened*` notify is INTENTIONALLY ABSENT here.
+        // OPEN alerts are emitted exactly once per basket lifecycle from
+        // extensions.js → openAlerts.js (BASKET_OPEN with 60s debounce +
+        // persistent SHA-256 dedup). Re-introducing a notify call in this
+        // loop is a regression — see tests/regression_basket_spam_nuclear.test.js.
       }
     }
 
@@ -227,59 +222,35 @@ class PositionMonitor {
       };
     }
 
-    // 3. Detect closed coins (= disappeared from positions). ONE alert per coin
-    //    with reason classified from disappeared triggers and aggregated PnL
-    //    summed from ALL fills since the position was opened.
+    // 3. Detect closed coins (= disappeared from positions).
+    //
+    // R-PUBLIC-BASKET-SPAM-NUCLEAR (4 may 2026): the legacy per-coin
+    // `formatCloseAlert` + `trackCloseForBasket` Telegram emits are GONE.
+    // Phantom-zero events ($0 PnL & $0 fees from HL `clearinghouseState`
+    // funding-settlement / margin-recompute jitter) used to leak through
+    // the legacy path as `📋 Manual close` and the synthesized basket
+    // summary as `🐱‍⬛ BASKET CLOSED — $0.00`. Both formats are now
+    // produced exclusively by basketEngine.js → messageFormattersV2.js
+    // (with `isCloseEmittable` refusing realized==0 && fees==0).
+    //
+    // We KEEP the state-mutation half of this loop so the patchMonitor()
+    // pre/post diff in extensions.js still drives the eventLog hooks
+    // (used by /history /pnl /export). The `fills` fetch + classification
+    // are dropped — extensions.js owns those side effects now.
     const closedCoins = Object.keys(ws.positions).filter((k) => !currentKeys.has(k));
-    let fills = null; // lazy
-
-    for (const coin of closedCoins) {
-      const oldPos = ws.positions[coin];
-      const dexTag =
-        oldPos && oldPos.dex && oldPos.dex !== 'Native'
-          ? ` _(${oldPos.dexDisplay || oldPos.dex})_`
-          : '';
-
-      if (!silent && shouldSendAlert(addr, coin)) {
-        if (fills === null) {
-          await this.hlApi.sleep(500);
-          fills = (await this.hlApi.getUserFills(addr)) || [];
+    if (closedCoins.length > 0) {
+      // Forensic counter — every dropped close here is a "would-have-been"
+      // legacy emit that the new architecture suppresses by design.
+      try {
+        for (let i = 0; i < closedCoins.length; i++) {
+          _healthCounters.recordPhantomSuppressed &&
+            _healthCounters.recordPhantomSuppressed(
+              `monitor.legacy_close_drop:${addr}:${closedCoins[i]}`
+            );
         }
-
-        const sinceMs = oldPos.openedAt
-          ? new Date(oldPos.openedAt).getTime()
-          : Date.now() - 7 * 24 * 60 * 60 * 1000;
-        const { pnl, exitPrice, fees } = aggregateClosePnl(fills, coin, sinceMs);
-
-        const reason = classifyCloseReason(
-          disappearedTriggersByCoin[coin] || [],
-          exitPrice
-        );
-
-        const msg = formatCloseAlert({ label, oldPos, pnl, exitPrice, reason, dexTag });
-        await this.notify(chatId, msg);
-
-        // Track for basket-close summary (3+ within 5 minutes)
-        trackCloseForBasket(
-          chatId,
-          addr,
-          label,
-          {
-            coin,
-            pnl,
-            fees,
-            side: oldPos.side,
-            entryPrice: oldPos.entryPrice,
-            exitPrice,
-            reason,
-          },
-          async (cId, _w, lbl, closes) => {
-            const summary = formatBasketSummary(lbl, closes);
-            await this.notify(cId, summary);
-          }
-        );
-      }
-
+      } catch (_) {}
+    }
+    for (const coin of closedCoins) {
       delete ws.positions[coin];
     }
 

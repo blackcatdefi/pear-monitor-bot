@@ -43,6 +43,17 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
+// R-PUBLIC-BASKET-SPAM-NUCLEAR — forensic counter for the SHA-256 dedup hits.
+// Lazy-loaded with a no-op fallback so basketDedup.test.js doesn't need to
+// stub healthServer (pure unit tests stay free of side effects).
+const _healthCounters = (() => {
+  try {
+    return require('./healthServer');
+  } catch (_) {
+    return { recordEventDeduplicated: () => {} };
+  }
+})();
+
 const VOLUME = process.env.RAILWAY_VOLUME_MOUNT_PATH;
 const DATA_DIR = VOLUME
   ? path.join(VOLUME, 'data')
@@ -182,6 +193,20 @@ function checkAlreadyAlerted(wallet, positions) {
   const expiresAt = Number(entry.sentAt) + ttlMs;
   if (Date.now() > expiresAt) {
     return { wasAlerted: false, alertedAt: null, hash };
+  }
+
+  // R-PUBLIC-BASKET-SPAM-NUCLEAR — Bug D forensic. If this counter never
+  // moves while BCD is repeatedly opening identical baskets (e.g. /track
+  // a wallet and re-running monitor), the dedup persistence is broken
+  // (volume not mounted, write failed silently, etc.).
+  try {
+    if (typeof _healthCounters.recordEventDeduplicated === 'function') {
+      _healthCounters.recordEventDeduplicated(
+        `basketDedup.hit:${String(wallet).slice(0, 10)}:${hash.slice(0, 8)}`
+      );
+    }
+  } catch (_) {
+    /* never let telemetry break the gate */
   }
 
   return { wasAlerted: true, alertedAt: Number(entry.sentAt), hash };

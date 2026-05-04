@@ -32,6 +32,19 @@ const _state = {
     process.env.RAILWAY_GIT_COMMIT_SHA ||
     process.env.RAILWAY_GIT_COMMIT ||
     null,
+  // R-PUBLIC-BASKET-SPAM-NUCLEAR (4 may 2026) — forensic counters for the
+  // anti-spam architecture. Each emit-suppressing path (basketDedup hit,
+  // 60s wallet debounce, isCloseEmittable refusal, monitor.js legacy close
+  // drop) increments one of these. If `events_deduplicated_lifetime` stays
+  // at 0 in a busy hour, the dedup wiring is broken. If
+  // `phantom_events_suppressed_lifetime` stays at 0 across an HL margin
+  // recompute, the phantom guard is broken.
+  eventsDeduplicatedLifetime: 0,
+  phantomEventsSuppressedLifetime: 0,
+  lastDedupEventAt: null,
+  lastDedupReason: null,
+  lastPhantomSuppressedAt: null,
+  lastPhantomReason: null,
 };
 
 const ERRORS_BUFFER_MAX = 200;
@@ -75,6 +88,27 @@ function registerHandler(name) {
   if (!_state.registeredHandlers.includes(name)) {
     _state.registeredHandlers.push(name);
   }
+}
+
+// R-PUBLIC-BASKET-SPAM-NUCLEAR — invoked from src/basketDedup.js whenever
+// `markAsAlerted` finds the SHA-256 hash already stored. The reason string
+// is opaque (e.g. "basketDedup.hit:0xc7ae:abcd1234") so we keep just the
+// last one for /health forensic spot-checks; the running total is what
+// matters for regression dashboards.
+function recordEventDeduplicated(reason) {
+  _state.eventsDeduplicatedLifetime += 1;
+  _state.lastDedupEventAt = Date.now();
+  _state.lastDedupReason = reason ? String(reason).slice(0, 200) : null;
+}
+
+// R-PUBLIC-BASKET-SPAM-NUCLEAR — invoked from monitor.js (legacy close drop),
+// from messageFormattersV2.isCloseEmittable refusals, and from openAlerts.js
+// 60s wallet debounce. Reason strings stay namespaced so it's obvious which
+// gate fired.
+function recordPhantomSuppressed(reason) {
+  _state.phantomEventsSuppressedLifetime += 1;
+  _state.lastPhantomSuppressedAt = Date.now();
+  _state.lastPhantomReason = reason ? String(reason).slice(0, 200) : null;
 }
 
 function _formatDurationMs(ms) {
@@ -127,6 +161,21 @@ function getStatus() {
       deploy_id: _state.bootDeployId,
       commit_sha: _state.bootCommitSha,
     },
+    // R-PUBLIC-BASKET-SPAM-NUCLEAR — dedup + phantom-suppression telemetry.
+    // Read these to confirm the anti-spam wiring is live in prod after
+    // deploy. Both should grow under any meaningful BCD trading load.
+    spam_guard: {
+      events_deduplicated_lifetime: _state.eventsDeduplicatedLifetime,
+      phantom_events_suppressed_lifetime: _state.phantomEventsSuppressedLifetime,
+      last_dedup_at: _state.lastDedupEventAt
+        ? new Date(_state.lastDedupEventAt).toISOString()
+        : null,
+      last_dedup_reason: _state.lastDedupReason,
+      last_phantom_suppressed_at: _state.lastPhantomSuppressedAt
+        ? new Date(_state.lastPhantomSuppressedAt).toISOString()
+        : null,
+      last_phantom_reason: _state.lastPhantomReason,
+    },
   };
 }
 
@@ -168,6 +217,13 @@ function start(port) {
         `# HELP pear_alerts_last_poll_age_seconds Age of last successful poll`,
         `# TYPE pear_alerts_last_poll_age_seconds gauge`,
         `pear_alerts_last_poll_age_seconds ${s.last_poll_age_ms ? Math.floor(s.last_poll_age_ms / 1000) : -1}`,
+        // R-PUBLIC-BASKET-SPAM-NUCLEAR
+        `# HELP pear_alerts_events_deduplicated_lifetime Basket-open emits suppressed by SHA-256 dedup since boot`,
+        `# TYPE pear_alerts_events_deduplicated_lifetime counter`,
+        `pear_alerts_events_deduplicated_lifetime ${s.spam_guard.events_deduplicated_lifetime}`,
+        `# HELP pear_alerts_phantom_events_suppressed_lifetime Phantom $0/$0 events refused by isCloseEmittable + monitor.js + 60s wallet debounce`,
+        `# TYPE pear_alerts_phantom_events_suppressed_lifetime counter`,
+        `pear_alerts_phantom_events_suppressed_lifetime ${s.spam_guard.phantom_events_suppressed_lifetime}`,
       ];
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end(lines.join('\n'));
@@ -192,6 +248,12 @@ function _resetForTests() {
   _state.lastStartCommandFromUserId = null;
   _state.pollingStartedAt = null;
   _state.registeredHandlers.length = 0;
+  _state.eventsDeduplicatedLifetime = 0;
+  _state.phantomEventsSuppressedLifetime = 0;
+  _state.lastDedupEventAt = null;
+  _state.lastDedupReason = null;
+  _state.lastPhantomSuppressedAt = null;
+  _state.lastPhantomReason = null;
 }
 
 module.exports = {
@@ -202,6 +264,8 @@ module.exports = {
   recordStartCommand,
   recordPollingStarted,
   registerHandler,
+  recordEventDeduplicated,
+  recordPhantomSuppressed,
   getStatus,
   isHealthy,
   _resetForTests,
