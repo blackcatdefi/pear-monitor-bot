@@ -11,6 +11,7 @@ process.on('uncaughtException', (err) => {
   console.error('[index] uncaughtException:', err && err.message ? err.message : err);
 });
 
+const axios = require('axios');
 const HyperliquidApi = require('./src/hyperliquidApi');
 const HyperLendApi = require('./src/hyperLendApi');
 const PositionMonitor = require('./src/monitor');
@@ -66,25 +67,68 @@ async function main() {
   process.once('SIGTERM', () => _shutdown('SIGTERM'));
   process.once('SIGINT',  () => _shutdown('SIGINT'));
 
-  // R-PUBLIC-START-FIX-V2: delete any stale webhook BEFORE starting polling.
+  // R-PUBLIC-START-FIX-V3: use axios directly for all startup Telegram API
+  // calls so Railway logs show the exact result of each step and we can
+  // diagnose 401 (revoked token), active webhook, or 409 loops.
   //
-  // Root cause of the "bot mudo" production bug after 0571161:
-  //   If a webhook was ever set on this token (e.g. during development or a
-  //   previous test with a different framework), Telegram rejects ALL
-  //   getUpdates calls with 409 "Can not getUpdates when webhook is active".
-  //   The polling_error handler logs the 409 but the library keeps retrying —
-  //   so the process stays alive, Railway health-checks pass, but the bot
-  //   never receives a single update including /start. Tests pass because they
-  //   mock TelegramBot and never hit the real API.
+  // V2 used bot.deleteWebhook() which silently no-ops if the underlying
+  // request fails AND doesn't log the API response body. That made it
+  // impossible to tell from logs whether the webhook was actually cleared.
   //
-  // Fix: deleteWebhook() is idempotent and safe. Cost: one extra API call at
-  // startup. If it fails (network hiccup) we log and continue — worst case
-  // the webhook is already absent and polling works anyway.
+  // V3: explicit axios calls with full response logging. Each step is
+  // non-fatal so the bot starts even if one call has a transient error.
+  const _TG = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
+
+  // Step 1 — verify token is alive
   try {
-    await bot.deleteWebhook();
-    console.log('[index] deleteWebhook OK (webhook cleared or was already absent)');
+    const meRes = await axios.get(`${_TG}/getMe`);
+    const me = meRes.data && meRes.data.result;
+    console.log(`[index] getMe OK — @${me && me.username} id=${me && me.id}`);
   } catch (err) {
-    console.error('[index] deleteWebhook failed (non-fatal, continuing):', err && err.message ? err.message : err);
+    const status = err.response && err.response.status;
+    const body   = err.response && err.response.data;
+    console.error(`[index] getMe FAILED (status=${status}):`, JSON.stringify(body || err.message));
+    if (status === 401) {
+      console.error('[index] FATAL: TELEGRAM_BOT_TOKEN is revoked or invalid — exiting');
+      process.exit(1);
+    }
+  }
+
+  // Step 2 — read current webhook state before touching it
+  let _webhookBefore = '?';
+  try {
+    const wiRes = await axios.get(`${_TG}/getWebhookInfo`);
+    const wi = wiRes.data && wiRes.data.result;
+    _webhookBefore = wi && wi.url ? wi.url : '(empty)';
+    console.log(`[index] webhookInfo BEFORE: url="${_webhookBefore}" pending=${wi && wi.pending_update_count}`);
+    if (wi && wi.last_error_message) {
+      console.warn(`[index] webhookInfo last_error: ${wi.last_error_message}`);
+    }
+  } catch (err) {
+    console.error('[index] getWebhookInfo(before) failed:', err && err.message ? err.message : err);
+  }
+
+  // Step 3 — delete webhook (idempotent, safe to call when no webhook set)
+  try {
+    const delRes = await axios.post(`${_TG}/deleteWebhook`, { drop_pending_updates: false });
+    console.log('[index] deleteWebhook result:', JSON.stringify(delRes.data));
+  } catch (err) {
+    const body = err.response && err.response.data;
+    console.error('[index] deleteWebhook FAILED:', JSON.stringify(body || err.message));
+  }
+
+  // Step 4 — confirm webhook is gone
+  try {
+    const wiRes2 = await axios.get(`${_TG}/getWebhookInfo`);
+    const wi2 = wiRes2.data && wiRes2.data.result;
+    const afterUrl = wi2 && wi2.url ? wi2.url : '(empty)';
+    if (afterUrl && afterUrl !== '(empty)') {
+      console.error(`[index] ERROR: webhook STILL ACTIVE after delete → "${afterUrl}" — polling will get 409`);
+    } else {
+      console.log('[index] webhookInfo AFTER: url="" — clear to poll');
+    }
+  } catch (err) {
+    console.error('[index] getWebhookInfo(after) failed:', err && err.message ? err.message : err);
   }
 
   // Start polling NOW — webhook is confirmed absent.

@@ -95,6 +95,15 @@ Reglas:
 - Mantener este manual actualizado cuando el usuario agregue nuevas preferencias de flujo.
 
 ## Historial de interacciones
+- **2026-05-03** — **R-PUBLIC-START-FIX-V3** (Node) — Bot seguía mudo después de V2. Chrome MCP no disponible para obtener el token y correr diagnóstico curl directo. Root cause analysis desde código estático:
+  - **V2 tenía un gap diagnóstico crítico:** `bot.deleteWebhook()` (wrapper interno de NTBA) no loguea la respuesta real de la API de Telegram ni distingue éxito de error de red. Si la llamada falla, `catch` la absorbe y el bot sigue tratando de hacer polling contra un webhook activo → 409 perpetuo. Sin Railway logs visibles, imposible saber si el webhook se limpió.
+  - **Fix V3:** Reemplazar `bot.deleteWebhook()` con 4 llamadas axios explícitas en `index.js`:
+    1. `GET /getMe` → verifica token válido; si retorna 401 → `process.exit(1)` con mensaje claro
+    2. `GET /getWebhookInfo` ANTES del delete → loguea url + pending_update_count + last_error_message
+    3. `POST /deleteWebhook` → loguea el body completo de la respuesta (`{"ok":true,"result":true}`)
+    4. `GET /getWebhookInfo` DESPUÉS del delete → confirma url="" o logea "STILL ACTIVE" como error
+  - **Fix adicional (bot.js):** `polling_error` ahora logea el HTTP status code (`code=409`, `code=401`, etc.) para distinguir escenarios en Railway logs. 409 → mensaje explicativo de overlap de deploy. 401 → mensaje de token revocado.
+  - **Objetivo:** El próximo Railway deploy mostrará en logs el estado exacto del webhook y del token. Esto permite saber si V2 realmente limpió el webhook, si el token es válido, o si hay otro problema.
 - **2026-05-03** — **R-PUBLIC-START-FIX-V2** (Node, PR #7, commit `47ec2ce`) — Bot seguía mudo después de 0571161. Tres root causes encontrados y corregidos:
   - **BUG 1 (principal):** `createBot()` usaba `{ polling: true }` iniciando `getUpdates` inmediatamente. Si había un webhook activo, Telegram rechaza con 409 "Can not getUpdates when webhook is active" en CADA llamada. `polling_error` lo logea pero nunca para — bot vivo, health checks OK, pero recibe CERO updates. Los tests pasan porque mockean TelegramBot. Fix: `{ polling: false }` en `bot.js` + `await bot.deleteWebhook()` en `index.js` antes de `bot.startPolling()`.
   - **BUG 2:** Handlers SIGTERM/SIGINT registrados DESPUÉS de `await monitor.start()` (que hace el primer poll, puede tomar segundos). Durante ese window, si Railway envía SIGTERM al container viejo, sale sin llamar `stopPolling()` → 409 Conflict para la nueva instancia. Fix: mover `process.once('SIGTERM'/'SIGINT')` inmediatamente después de `extensions.bootstrap()`.
