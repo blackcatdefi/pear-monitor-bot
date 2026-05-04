@@ -201,16 +201,26 @@ def _render_html(state: dict[str, Any]) -> str:
             hf_str2 = f"{float(sec['hf']):.3f}" if sec.get("hf") is not None else "—"
         except Exception:
             hf_str2 = "—"
+        # R-DASH-FIX Bug 4: mirror the conditional-check pattern from the main
+        # flywheel so "0.0000 ?" never appears when per-reserve data is absent.
+        sec_coll_amt = (
+            _fmt_token_amount(sec.get("collateral_balance"), dec=4)
+            if sec.get("collateral_balance") else "—"
+        )
+        sec_coll_sym = sec.get("collateral_symbol") or "?"
+        sec_debt_amt = (
+            _fmt_token_amount(sec.get("debt_balance"), dec=4)
+            if sec.get("debt_balance") else "—"
+        )
+        sec_debt_sym = sec.get("debt_symbol") or "?"
         secondary_html = (
             "<div class='card'>"
             "<h2>Secondary flywheel</h2>"
             f"<p>Wallet: <span class='dim'>{_esc(sec.get('short'))}</span></p>"
             f"<p>HF: <strong>{_esc(hf_str2)}</strong></p>"
-            f"<p>Collateral: {_esc(_fmt_token_amount(sec.get('collateral_balance'), dec=4))}"
-            f" {_esc(sec.get('collateral_symbol') or '?')}"
+            f"<p>Collateral: {_esc(sec_coll_amt)} {_esc(sec_coll_sym)}"
             f" <span class='dim'>({_esc(_fmt_compact_usd(sec.get('collateral_usd')))})</span></p>"
-            f"<p>Debt: {_esc(_fmt_token_amount(sec.get('debt_balance'), dec=4))}"
-            f" {_esc(sec.get('debt_symbol') or '?')}"
+            f"<p>Debt: {_esc(sec_debt_amt)} {_esc(sec_debt_sym)}"
             f" <span class='dim'>({_esc(_fmt_compact_usd(sec.get('debt_usd')))})</span></p>"
             "</div>"
         )
@@ -232,9 +242,22 @@ def _render_html(state: dict[str, Any]) -> str:
         # callers / cached snapshots.
         for addr, w in active_wallets:
             short_addr = addr[:6] + "…" + addr[-4:] if len(addr) >= 10 else addr
+            # R-DASH-FIX Bug 5: dynamic label — show basket_id_inferido + leg
+            # count so "Alt Short Bleed v4" (stale env-var label) is never shown.
+            # basket_id_inferido is derived on-chain by fund_state_v2 from the
+            # actual position coins, e.g. "v6" for DYDX/OP/ARB/PYTH/ENA basket.
+            basket_id = w.get("basket_id_inferido") or ""
+            all_legs = w.get("positions") or w.get("shorts") or []
+            n_legs = len(all_legs)
+            if basket_id and n_legs > 0:
+                basket_display = f"Basket {basket_id} ({n_legs} legs)"
+            elif basket_id:
+                basket_display = f"Basket {basket_id}"
+            else:
+                basket_display = w.get("label", "")
             basket_rows.append(
                 f"<p>Wallet: <span class='dim'>{_esc(short_addr)}</span>"
-                f" <strong>{_esc(w.get('label', ''))}</strong></p>"
+                f" <strong>{_esc(basket_display)}</strong></p>"
             )
             entries = w.get("positions") or w.get("shorts") or []
             # Sort by notional desc
@@ -305,6 +328,31 @@ def _render_html(state: dict[str, Any]) -> str:
         )
     if not wallet_rows:
         wallet_rows.append("<p class='dim'>No wallets reported.</p>")
+
+    # ─── Spot tokens (R-DASH-FIX Bug 1) ──────────────────────────────────
+    # Show ALL spot tokens individually (USDC, USDH, USDT0, kHYPE, etc.)
+    # matching /posiciones single-source-of-truth from spot_tokens list.
+    DUST_USD = 1.0
+    spot_token_rows: list[str] = []
+    for st in state.get("spot_tokens") or []:
+        if st.get("usd", 0) < DUST_USD:
+            continue
+        coin = st.get("coin", "?")
+        total_amt = float(st.get("total") or 0)
+        usd_val = float(st.get("usd") or 0)
+        wallets_list = st.get("wallets") or []
+        wallet_hint = (
+            f" <span class='dim'>[{_esc(', '.join(set(wallets_list)))}]</span>"
+            if wallets_list else ""
+        )
+        spot_token_rows.append(
+            f"<p>{_esc(coin)}: "
+            f"<strong>{_esc(_fmt_token_amount(total_amt, dec=4))}</strong>"
+            f" <span class='dim'>({_esc(_fmt_compact_usd(usd_val))})</span>"
+            f"{wallet_hint}</p>"
+        )
+    if not spot_token_rows:
+        spot_token_rows.append("<p class='dim'>No spot tokens.</p>")
 
     btc = state.get("btc")
     eth = state.get("eth")
@@ -408,6 +456,11 @@ def _render_html(state: dict[str, Any]) -> str:
         </div>
 
         <div class="card">
+            <h2>Spot tokens</h2>
+            {''.join(spot_token_rows)}
+        </div>
+
+        <div class="card">
             <h2>Wallets ({len(state.get('wallets') or [])})</h2>
             {''.join(wallet_rows)}
         </div>
@@ -426,6 +479,7 @@ def _render_html(state: dict[str, Any]) -> str:
 
 async def _build_state() -> dict[str, Any]:
     """Translate ``PortfolioSnapshot`` into the flat dict ``_render_html`` consumes."""
+    import asyncio as _asyncio
     import time as _time
     from modules.portfolio_snapshot import build_portfolio_snapshot
     from modules.macro_calendar import upcoming_events
@@ -433,11 +487,97 @@ async def _build_state() -> dict[str, Any]:
     snap = await build_portfolio_snapshot()
     snap_age = (_time.time() - snap.built_at_ts) if getattr(snap, "built_at_ts", 0) else None
 
-    # R-SILENT: on-chain basket autodetect (single source of truth).
+    # R-DASH-FIX Bug 2: fetch fresh wallet data once, reuse for both UPnL
+    # (single-source-of-truth with /posiciones) and basket detection (avoids
+    # a redundant second fetch_all_wallets() call inside detect_active_baskets).
+    from modules.portfolio import fetch_all_wallets as _faw
+    fresh_wallets: list[dict[str, Any]] = []
+    try:
+        fresh_wallets = await _faw()
+    except Exception:  # noqa: BLE001
+        log.exception("dashboard: fresh fetch_all_wallets failed (non-fatal)")
+
+    # Compute UPnL from fresh wallet data — same formula as /posiciones so
+    # the Capital block always agrees with the live /posiciones snapshot.
+    upnl_fresh: float = sum(
+        float((w.get("data") or {}).get("unrealized_pnl_total") or 0.0)
+        for w in (fresh_wallets or [])
+        if w.get("status") == "ok"
+    )
+
+    # R-DASH-FIX Bug 2: also collect fresh spot_balances for Bug 1 token display.
+    # Collect all spot balances across wallets — same source as /posiciones.
+    from modules.portfolio_snapshot import _spot_usd_value  # reuse price calc
+    prices_for_spot: dict[str, Any] = {}
+    if snap.market:
+        try:
+            from modules.market import fetch_market_data as _fmd
+            # Use market data already in the snapshot rather than re-fetching.
+            # Reconstruct a prices dict compatible with _current_usd_value.
+            _btc = snap.market.btc
+            _eth = snap.market.eth
+            _hype = snap.market.hype
+            if _btc:
+                prices_for_spot["BTC"] = {"price_usd": _btc}
+            if _eth:
+                prices_for_spot["ETH"] = {"price_usd": _eth}
+            if _hype:
+                prices_for_spot["HYPE"] = {"price_usd": _hype}
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Build per-coin spot token list from fresh wallet data (Bug 1).
+    _all_spot_raw: list[dict[str, Any]] = []
+    for w in (fresh_wallets or []):
+        if w.get("status") != "ok":
+            continue
+        d = w.get("data") or {}
+        wallet_label = d.get("label") or "?"
+        for sb in (d.get("spot_balances") or []):
+            _all_spot_raw.append({**sb, "_wallet_label": wallet_label})
+
+    # Aggregate by coin, compute USD value.
+    _coin_map: dict[str, dict[str, Any]] = {}
+    for sb in _all_spot_raw:
+        coin = (sb.get("coin") or "?").upper()
+        if coin not in _coin_map:
+            _coin_map[coin] = {"coin": coin, "total": 0.0, "entry_ntl": 0.0,
+                               "usd": 0.0, "wallets": []}
+        amt = float(sb.get("total") or 0)
+        entl = float(sb.get("entry_ntl") or 0)
+        _coin_map[coin]["total"] += amt
+        _coin_map[coin]["entry_ntl"] += entl
+        if sb.get("_wallet_label"):
+            _coin_map[coin]["wallets"].append(sb["_wallet_label"])
+        # USD valuation: stables 1:1, others via price map
+        c = coin
+        if c in {"USDC", "USDH", "USDT", "USDT0", "DAI"}:
+            usd_val = amt
+        else:
+            lookup = c[1:] if c.startswith("K") else c  # kHYPE → HYPE
+            entry = prices_for_spot.get(lookup) or prices_for_spot.get(c) or {}
+            px = entry.get("price_usd") if isinstance(entry, dict) else None
+            usd_val = amt * float(px) if (px and amt) else entl
+        _coin_map[coin]["usd"] += usd_val
+
+    # Sort by USD value desc, keep only tokens >= $1 USD value.
+    spot_tokens: list[dict[str, Any]] = sorted(
+        [v for v in _coin_map.values() if v["usd"] >= 1.0],
+        key=lambda x: -x["usd"],
+    )
+
+    # R-SILENT: on-chain basket autodetect — reuse fresh_wallets to avoid a
+    # second fetch_all_wallets() call inside detect_active_baskets().
     basket_state: dict[str, Any] = {}
     try:
         from auto.fund_state_v2 import detect_active_baskets
-        basket_state = await detect_active_baskets()
+
+        async def _preloaded_wallets():
+            return fresh_wallets
+
+        basket_state = await detect_active_baskets(
+            fetch_wallets_fn=_preloaded_wallets if fresh_wallets else None
+        )
     except Exception:  # noqa: BLE001
         log.exception("dashboard: fund_state_v2 detect_active_baskets failed (non-fatal)")
 
@@ -477,7 +617,8 @@ async def _build_state() -> dict[str, Any]:
         "hl_debt_total": snap.hl_debt_total,
         "perp_equity_total": snap.perp_equity_total,
         "spot_usd_total": snap.spot_usd_total,
-        "upnl_perp_total": snap.upnl_perp_total,
+        # R-DASH-FIX Bug 2: use fresh UPnL — same source as /posiciones.
+        "upnl_perp_total": upnl_fresh if fresh_wallets else snap.upnl_perp_total,
         "main_flywheel": _ws_to_dict(snap.main_flywheel),
         "secondary_flywheel": _ws_to_dict(snap.secondary_flywheel),
         "basket_positions": [
@@ -512,6 +653,8 @@ async def _build_state() -> dict[str, Any]:
         # R-SILENT: on-chain basket autodetect + price cache fallback.
         "basket_state": basket_state,
         "cached_prices": cached_prices,
+        # R-DASH-FIX Bug 1: per-coin spot token list for the Spot Tokens card.
+        "spot_tokens": spot_tokens,
     }
 
 

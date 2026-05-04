@@ -145,23 +145,30 @@ def _maybe_recover_from_cache(
             age = max(0, int(time.time() - float(cached.get("ts_epoch") or 0)))
         except Exception:  # noqa: BLE001
             age = None
-        data.update(
-            {
-                "last_known_hf": last_hf,
-                "last_known_at_iso": last_at,
-                "last_known_collateral_usd": last_collat,
-                "last_known_debt_usd": last_debt,
-                "age_seconds": age,
-                "recovered_from_cache": True,
-            }
-        )
+        updates: dict[str, Any] = {
+            "last_known_hf": last_hf,
+            "last_known_at_iso": last_at,
+            "last_known_collateral_usd": last_collat,
+            "last_known_debt_usd": last_debt,
+            "age_seconds": age,
+            "recovered_from_cache": True,
+        }
+        # R-DASH-FIX Bug 3: restore cached collateral/debt symbols+balances so
+        # the flywheel card shows "kHYPE / UETH" even on per-reserve RPC failure.
+        if cached.get("collateral_symbol"):
+            updates["collateral_symbol"] = cached["collateral_symbol"]
+            updates["collateral_balance"] = float(cached.get("collateral_balance") or 0.0)
+        if cached.get("debt_symbol"):
+            updates["debt_symbol"] = cached["debt_symbol"]
+            updates["debt_balance"] = float(cached.get("debt_balance") or 0.0)
+        data.update(updates)
     out["data"] = data
     out["hf_status"] = "UNKNOWN"
     return out
 
 
 def _persist_ok(entry: dict[str, Any], cache: dict[str, Any]) -> None:
-    """If entry is OK, write its HF + balances into the cache."""
+    """If entry is OK, write its HF + balances + symbols into the cache."""
     if entry.get("status") != "ok":
         return
     data = entry.get("data") or {}
@@ -169,6 +176,12 @@ def _persist_ok(entry: dict[str, Any], cache: dict[str, Any]) -> None:
     if not addr:
         return
     hf = data.get("health_factor")
+    # R-DASH-FIX Bug 3: also cache collateral/debt symbol and balance so the
+    # flywheel card can show "kHYPE" / "UETH" even when per-reserve RPC fails.
+    coll_sym = data.get("collateral_symbol")
+    coll_bal = float(data.get("collateral_balance") or 0.0)
+    debt_sym = data.get("debt_symbol")
+    debt_bal = float(data.get("debt_balance") or 0.0)
     if not _is_finite_hf(hf):
         # Skip writing infinite HF (it carries no signal for recovery).
         # But preserve a marker so we know the wallet was last seen healthy.
@@ -176,6 +189,10 @@ def _persist_ok(entry: dict[str, Any], cache: dict[str, Any]) -> None:
             "hf": "inf",
             "collateral_usd": float(data.get("total_collateral_usd") or 0.0),
             "debt_usd": float(data.get("total_debt_usd") or 0.0),
+            "collateral_symbol": coll_sym,
+            "collateral_balance": coll_bal,
+            "debt_symbol": debt_sym,
+            "debt_balance": debt_bal,
             "ts_epoch": time.time(),
             "ts_utc": _utc_now_iso(),
         }
@@ -184,6 +201,10 @@ def _persist_ok(entry: dict[str, Any], cache: dict[str, Any]) -> None:
         "hf": float(hf),
         "collateral_usd": float(data.get("total_collateral_usd") or 0.0),
         "debt_usd": float(data.get("total_debt_usd") or 0.0),
+        "collateral_symbol": coll_sym,
+        "collateral_balance": coll_bal,
+        "debt_symbol": debt_sym,
+        "debt_balance": debt_bal,
         "ts_epoch": time.time(),
         "ts_utc": _utc_now_iso(),
     }
@@ -332,10 +353,12 @@ def _entries_from_cache_only(cache: dict[str, Any]) -> list[dict[str, Any]]:
                     "debt_assets": [],
                     "primary_collateral": None,
                     "primary_debt": None,
-                    "collateral_symbol": None,
-                    "collateral_balance": 0.0,
-                    "debt_symbol": None,
-                    "debt_balance": 0.0,
+                    # R-DASH-FIX Bug 3: restore cached symbols so flywheel shows
+                    # "kHYPE / UETH" when live per-reserve fetch failed completely.
+                    "collateral_symbol": c.get("collateral_symbol"),
+                    "collateral_balance": float(c.get("collateral_balance") or 0.0),
+                    "debt_symbol": c.get("debt_symbol"),
+                    "debt_balance": float(c.get("debt_balance") or 0.0),
                 },
             }
         )

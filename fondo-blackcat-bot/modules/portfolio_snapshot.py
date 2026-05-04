@@ -118,6 +118,8 @@ class WalletSnapshot:
     debt_balance: float = 0.0
     short_positions: list[dict[str, Any]] = field(default_factory=list)
     raw_positions: list[dict[str, Any]] = field(default_factory=list)
+    # R-DASH-FIX Bug 1: raw spot balances for per-token display in dashboard
+    spot_balances: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -451,12 +453,15 @@ async def proactive_refresh() -> bool:
 
 async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
     """Inner uncached path — does the actual fetch + aggregate work."""
-    from modules.hyperlend import fetch_all_hyperlend
+    # R-DASH-FIX Bug 3: use cache-aware reader so collateral/debt symbols
+    # survive per-reserve RPC failures (last-known cache falls back to
+    # cached "kHYPE" / "UETH" instead of returning None).
+    from auto.hyperlend_reader import read_all_with_cache as _hl_read
     from modules.market import fetch_market_data
     from modules.portfolio import fetch_all_wallets
 
     hl, market, wallets = await asyncio.gather(
-        _safe(fetch_all_hyperlend(), "hyperlend"),
+        _safe(_hl_read(), "hyperlend"),
         _safe(fetch_market_data(), "market"),
         _safe(fetch_all_wallets(), "wallets"),
     )
@@ -563,6 +568,8 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
                 debt_balance=float(hl_data.get("debt_balance") or 0.0),
                 short_positions=short_positions,
                 raw_positions=list(d.get("positions") or []),
+                # R-DASH-FIX Bug 1: preserve raw spot_balances for per-token display
+                spot_balances=list(d.get("spot_balances") or []),
             ))
 
     # Some HyperLend wallets may not be listed in FUND_WALLETS (e.g. legacy

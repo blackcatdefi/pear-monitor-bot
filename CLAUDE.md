@@ -95,6 +95,13 @@ Reglas:
 - Mantener este manual actualizado cuando el usuario agregue nuevas preferencias de flujo.
 
 ## Historial de interacciones
+- **2026-05-03** — **R-DASHBOARD-FIX (Python)** — 5 bugs corregidos en `fondo-blackcat-bot/modules/dashboard.py` + `portfolio_snapshot.py` + `auto/hyperlend_reader.py`:
+  - **BUG 1 (Spot tokens ausentes):** Added `spot_balances` field to `WalletSnapshot`; `_build_state()` aggregates spot balances per coin from fresh wallet data; Spot Tokens HTML card added to dashboard grid.
+  - **BUG 2 (UPnL discrepancy):** `_build_state()` fetches wallets once, computes UPnL directly from `unrealized_pnl_total` fields — same source as `/posiciones`. No more stale snapshot UPnL.
+  - **BUG 3 (Main flywheel "Collateral: — ?"):** `portfolio_snapshot.py` now uses `read_all_with_cache()` from `hyperlend_reader`; cache extended to persist/restore `collateral_symbol`, `collateral_balance`, `debt_symbol`, `debt_balance` alongside HF.
+  - **BUG 4 (Secondary flywheel "0.0000 ?"):** Secondary flywheel balance display uses conditional `"—"` when balance is zero/missing, matching main flywheel pattern.
+  - **BUG 5 (Basket label hardcoded "v4"):** `basket_display` built from `basket_id_inferido` + leg count: e.g. "Basket v6 (20 legs)".
+  - **Tests:** `tests/test_dashboard_fixes.py` — 9/9 green.
 - **2026-05-02** — **R-EN verified** (Node.js public bot). All user-facing strings confirmed English: `src/i18n/en.js` is the single source of truth. `/start` recurring dashboard shows "Welcome back 👋", "Your setup:", "Tracked wallets: N/M", "Bot status: active". Keyboard buttons: "Track wallet", "My wallets", "Copy Trading", "Status", "My TZ", "Learn", "Open Pear Protocol". Zero Spanish strings in src/. CLAUDE.md architecture section updated. Pushed to master to trigger Railway redeploy.
 - **2026-04-13** — Feature "HyperLend Borrow Available" agregada (PR #2, merge `299c6fc`).
 - **2026-04-13** — Umbral de borrow subido de $10 a $50 por pedido del usuario. Se agregó manual de procedimientos y regla de auto-update de memoria en cada mensaje.
