@@ -35,6 +35,14 @@ const _healthCounters = (() => {
 // because Hyperliquid surfaces TWAP fills across multiple snapshots).
 const basketDedup = require('./basketDedup');
 
+// R-PUBLIC-BASKET-UNIFY (4 may 2026) — wallet-level absolute lockout.
+// Gate-0 (strictest gate): once a wallet has emitted BASKET_OPEN, NO
+// further BASKET_OPEN may emit from that wallet until the basket fully
+// closes (caller invokes lockout.markClosed) and the close-grace window
+// elapses. Independent of and stricter than the 60s debounce — survives
+// the 14-min Pear TWAP windows that broke R-PUBLIC-BASKET-SPAM-NUCLEAR.
+const lockout = require('./walletBasketLockout');
+
 const BASKET_WINDOW_MS = 5 * 60 * 1000;
 const BASKET_MIN_COUNT = 3;
 
@@ -195,6 +203,38 @@ async function emitAlerts({ chatId, wallet, label, newPositions, notify }) {
   if (ev.type === 'NONE') return { dispatched: 0, type: 'NONE' };
 
   if (ev.type === 'BASKET_OPEN') {
+    // Gate 0 (R-PUBLIC-BASKET-UNIFY) — wallet-level ABSOLUTE lockout.
+    // The strictest gate: if this wallet already has an OPEN basket in
+    // the persistent state machine, refuse to emit. The lockout only
+    // releases when the caller invokes lockout.markClosed (i.e. when the
+    // basket fully closes) and the close-grace window elapses.
+    //
+    // This is the canonical fix for the 4-may-2026 14-min TWAP regression
+    // where Pear basket legs surfaced across 6 polls and each poll emitted
+    // a fresh BASKET_OPEN with a different leg subset (different hash =
+    // bypassed SHA-256 dedup; >60s after first emit = bypassed wallet
+    // debounce).
+    let lockoutResult = { allowed: true };
+    try {
+      lockoutResult = lockout.tryAcquireOpen(wallet);
+    } catch (_) {
+      /* lockout failure must not block alerts — fail-open */
+    }
+    if (!lockoutResult.allowed) {
+      try {
+        _healthCounters.recordEventDeduplicated(
+          `openAlerts.${lockoutResult.reason || 'wallet_lockout'}:${String(wallet).slice(0, 10)}`
+        );
+      } catch (_) {
+        /* ignore */
+      }
+      return {
+        dispatched: 0,
+        type: 'BASKET_OPEN_WALLET_LOCKED',
+        reason: lockoutResult.reason || 'wallet_already_has_open_basket',
+      };
+    }
+
     // Gate 1 — fast in-memory wallet-level debounce. Even if SHA-256 hash
     // differs (split basket on Bug C), 60s after the first emit blocks
     // the second.
@@ -207,6 +247,9 @@ async function emitAlerts({ chatId, wallet, label, newPositions, notify }) {
       } catch (_) {
         /* ignore */
       }
+      // Roll back the Gate-0 acquire so it doesn't lock the wallet on a
+      // path that ultimately doesn't emit.
+      try { lockout.release(wallet); } catch (_) { /* ignore */ }
       return { dispatched: 0, type: 'BASKET_OPEN_WALLET_DEBOUNCED' };
     }
 
@@ -221,6 +264,7 @@ async function emitAlerts({ chatId, wallet, label, newPositions, notify }) {
     }
     if (dedupResult.wasAlerted) {
       // counter already incremented inside basketDedup — return early
+      try { lockout.release(wallet); } catch (_) { /* ignore */ }
       return { dispatched: 0, type: 'BASKET_OPEN_DEDUPED' };
     }
 
@@ -234,10 +278,11 @@ async function emitAlerts({ chatId, wallet, label, newPositions, notify }) {
       } catch (_) {
         /* ignore */
       }
+      try { lockout.release(wallet); } catch (_) { /* ignore */ }
       return { dispatched: 0, type: 'BASKET_OPEN_DEDUPED' };
     }
 
-    // All three gates clear — emit and mark.
+    // All four gates clear — emit and mark.
     const msg = formatBasketOpenAlert(label, ev.positions);
     const keyboard = pearUrlBuilder.buildInlineKeyboard(
       _enrichWithNotional(ev.positions)

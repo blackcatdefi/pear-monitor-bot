@@ -121,6 +121,18 @@ function _formatDurationMs(ms) {
   return `${minutes}m`;
 }
 
+// R-PUBLIC-BASKET-UNIFY — tap walletBasketLockout for /health visibility.
+// We require lazily so a missing/broken module doesn't take healthServer
+// down with it.
+function _lockoutSnapshot() {
+  try {
+    const lockout = require('./walletBasketLockout');
+    return lockout.snapshot({ verbose: false });
+  } catch (e) {
+    return { error: e && e.message ? e.message : String(e) };
+  }
+}
+
 function getStatus() {
   const now = Date.now();
   const errors24h = _state.errors.filter(
@@ -175,6 +187,11 @@ function getStatus() {
         ? new Date(_state.lastPhantomSuppressedAt).toISOString()
         : null,
       last_phantom_reason: _state.lastPhantomReason,
+      // R-PUBLIC-BASKET-UNIFY — Gate-0 wallet-level absolute lockout.
+      // open_count = wallets currently holding an OPEN basket (cannot
+      // emit another BASKET_OPEN until they close). open_wallets is
+      // truncated to 10 to keep /health small.
+      wallet_lockout: _lockoutSnapshot(),
     },
   };
 }

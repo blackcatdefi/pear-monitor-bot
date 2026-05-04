@@ -32,6 +32,8 @@ process.env.DEDUP_DB_PATH = path.join(
 
 const openAlerts = require('../src/openAlerts');
 const basketDedup = require('../src/basketDedup');
+const lockout = require('../src/walletBasketLockout');
+const closeAlerts = require('../src/closeAlerts');
 
 function makeBasket(coins, side = 'SHORT') {
   return coins.map((coin, i) => ({
@@ -46,6 +48,8 @@ function makeBasket(coins, side = 'SHORT') {
 test('emitAlerts: first BASKET_OPEN dispatches', async () => {
   basketDedup._resetForTests();
   openAlerts._resetWalletDebounceForTests();
+  lockout._resetForTests({ persist: false });
+  closeAlerts._resetCachesForTests();
 
   const calls = [];
   const notify = async (chatId, msg) => {
@@ -69,6 +73,8 @@ test('emitAlerts: first BASKET_OPEN dispatches', async () => {
 test('emitAlerts: second BASKET_OPEN within debounce is suppressed (different SHA hash)', async () => {
   basketDedup._resetForTests();
   openAlerts._resetWalletDebounceForTests();
+  lockout._resetForTests({ persist: false });
+  closeAlerts._resetCachesForTests();
 
   const wallet = '0xBBBB000000000000000000000000000000000002';
   const notify = async () => {};
@@ -82,6 +88,11 @@ test('emitAlerts: second BASKET_OPEN within debounce is suppressed (different SH
     notify,
   });
   assert.strictEqual(r1.type, 'BASKET_OPEN');
+
+  // R-PUBLIC-BASKET-UNIFY — Gate-0 (wallet-absolute lockout) fires first
+  // and returns BASKET_OPEN_WALLET_LOCKED. To exercise the legacy 60s
+  // debounce in isolation, release the lockout so Gate-1 fires.
+  lockout.release(wallet);
 
   // Immediately after — DIFFERENT 3-leg basket (different SHA hash) but
   // SAME wallet within debounce window. Must be suppressed by wallet-level
@@ -104,6 +115,8 @@ test('emitAlerts: second BASKET_OPEN within debounce is suppressed (different SH
 test('emitAlerts: identical basket within debounce is dedup-suppressed', async () => {
   basketDedup._resetForTests();
   openAlerts._resetWalletDebounceForTests();
+  lockout._resetForTests({ persist: false });
+  closeAlerts._resetCachesForTests();
 
   const wallet = '0xCCCC000000000000000000000000000000000003';
   const notify = async () => {};
@@ -118,8 +131,10 @@ test('emitAlerts: identical basket within debounce is dedup-suppressed', async (
   });
   assert.strictEqual(r1.type, 'BASKET_OPEN');
 
-  // Manually expire the wallet debounce so we're testing the SHA-256 gate.
+  // Manually expire the wallet debounce + release the new Gate-0 lockout
+  // so we're testing the SHA-256 gate (Gate-2) in isolation.
   openAlerts._resetWalletDebounceForTests();
+  lockout.release(wallet);
 
   const r2 = await openAlerts.emitAlerts({
     chatId: 1,
@@ -138,6 +153,8 @@ test('emitAlerts: identical basket within debounce is dedup-suppressed', async (
 test('emitAlerts: different wallet bypasses debounce', async () => {
   basketDedup._resetForTests();
   openAlerts._resetWalletDebounceForTests();
+  lockout._resetForTests({ persist: false });
+  closeAlerts._resetCachesForTests();
 
   const notify = async () => {};
 

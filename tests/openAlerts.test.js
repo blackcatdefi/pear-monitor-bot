@@ -28,11 +28,17 @@ const {
 
 const { _resetCachesForTests } = require('../src/closeAlerts');
 const basketDedup = require('../src/basketDedup');
+const lockout = require('../src/walletBasketLockout');
 
 function _resetAllOpenAlertGates() {
   _resetCachesForTests();
   basketDedup._resetForTests();
   openAlerts._resetWalletDebounceForTests();
+  // R-PUBLIC-BASKET-UNIFY — reset wallet-level absolute lockout so each
+  // test starts with a clean slate. Tests that exercise downstream gates
+  // (SHA-256 dedup, shouldSendAlert) explicitly release the lockout
+  // between calls — see comments in those tests.
+  lockout._resetForTests({ persist: false });
 }
 
 test('findNewPositions returns [] when both lists empty', () => {
@@ -126,11 +132,13 @@ test('emitAlerts: BASKET_OPEN second call within dedupe window suppressed', asyn
     chatId: 'cid', wallet: '0xabc', label: 'W', newPositions: positions,
     notify: async (cid, msg) => { sent.push(msg); },
   });
-  // Second call: identical basket. The wallet-debounce gate fires first
-  // (returns BASKET_OPEN_WALLET_DEBOUNCED). After clearing the in-memory
-  // debounce, the SHA-256 dedup gate fires (returns BASKET_OPEN_DEDUPED).
-  // Either suppression is acceptable for the spam-prevention spec.
+  // Second call: identical basket. With R-PUBLIC-BASKET-UNIFY the
+  // wallet-level absolute lockout (Gate-0) fires first → returns
+  // BASKET_OPEN_WALLET_LOCKED. To verify the downstream SHA-256 dedup
+  // gate still works in isolation, release the lockout + clear the
+  // in-memory debounce, then expect BASKET_OPEN_DEDUPED.
   openAlerts._resetWalletDebounceForTests();
+  lockout.release('0xabc');
   const r2 = await emitAlerts({
     chatId: 'cid', wallet: '0xabc', label: 'W', newPositions: positions,
     notify: async (cid, msg) => { sent.push(msg); },

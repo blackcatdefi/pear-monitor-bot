@@ -38,6 +38,11 @@ const { withTimestamp } = require('./timestampHelper');
 // the apr-30 duplicate "NUEVA BASKET ABIERTA" was lastSeenSnapshots being
 // in-memory only — every redeploy re-classified active positions as new.
 const basketDedup = require('./basketDedup');
+// R-PUBLIC-BASKET-UNIFY (4 may 2026) — wallet-level absolute lockout. We
+// notify the lockout when a wallet's basket fully closes (prev legs ≥ 1
+// → curr legs = 0) so the next basket can acquire OPEN after the grace
+// window.
+const lockout = require('./walletBasketLockout');
 // R-PUBLIC — public wallet tracker UI + scheduler + per-user timezone.
 const commandsTrack = require('./commandsTrack');
 const commandsTimezone = require('./commandsTimezone');
@@ -345,6 +350,24 @@ function buildHooks({ notify, primaryChatId }) {
         );
         healthServer.recordError(e);
       }
+    }
+
+    // R-PUBLIC-BASKET-UNIFY — release the wallet lockout when the wallet's
+    // basket fully closes. We detect "fully closed" as the prev→curr
+    // transition (prev had ≥1 active position, curr has 0). The next
+    // BASKET_OPEN can acquire the lockout slot after the close-grace
+    // window elapses (default 60s) inside walletBasketLockout.
+    try {
+      const prevLen = Array.isArray(prev) ? prev.length : 0;
+      const currLen = Array.isArray(allPositions) ? allPositions.length : 0;
+      if (prevLen > 0 && currLen === 0) {
+        lockout.markClosed(wallet);
+      }
+    } catch (e) {
+      console.error(
+        '[extensions] lockout.markClosed failed:',
+        e && e.message ? e.message : e
+      );
     }
 
     lastSeenSnapshots.set(key, allPositions);
