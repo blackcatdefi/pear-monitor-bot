@@ -51,17 +51,12 @@ async function main() {
   });
   monitor.notify = rv2.notify;
 
-  await monitor.start(POLL_INTERVAL);
-
-  console.log(`Bot running. Polling every ${POLL_INTERVAL}s. Public mode - any user can add wallets.`);
-  console.log(`HyperLend enabled via ${HYPEREVM_RPC_URL} (Pool ${HYPERLEND_POOL_ADDRESS})`);
-  console.log(`R(v2) extensions active. Health on :${process.env.HEALTH_PORT || 8080}`);
-
-  // R-PUBLIC-START-FIX: handle SIGTERM (Railway sends this when stopping the
-  // old container during a deploy). Without this, the old instance keeps its
-  // Telegram polling connection open for up to 30 s, causing 409 Conflict for
-  // the new instance — which means the new bot never receives any updates
-  // (including /start) until the OS finally kills the old process.
+  // R-PUBLIC-START-FIX-V2: register SIGTERM/SIGINT handlers BEFORE the long
+  // `await monitor.start()` first-poll. Without this, if Railway sends SIGTERM
+  // to the old container while the new container is mid-startup-poll (which
+  // can take seconds per wallet), the old instance exits without calling
+  // stopPolling() and its Telegram getUpdates connection stays open, causing
+  // 409 Conflict for the new instance.
   function _shutdown(signal) {
     console.log(`[index] ${signal} received — stopping polling gracefully`);
     try { bot.stopPolling(); } catch (_) {}
@@ -70,6 +65,37 @@ async function main() {
   }
   process.once('SIGTERM', () => _shutdown('SIGTERM'));
   process.once('SIGINT',  () => _shutdown('SIGINT'));
+
+  // R-PUBLIC-START-FIX-V2: delete any stale webhook BEFORE starting polling.
+  //
+  // Root cause of the "bot mudo" production bug after 0571161:
+  //   If a webhook was ever set on this token (e.g. during development or a
+  //   previous test with a different framework), Telegram rejects ALL
+  //   getUpdates calls with 409 "Can not getUpdates when webhook is active".
+  //   The polling_error handler logs the 409 but the library keeps retrying —
+  //   so the process stays alive, Railway health-checks pass, but the bot
+  //   never receives a single update including /start. Tests pass because they
+  //   mock TelegramBot and never hit the real API.
+  //
+  // Fix: deleteWebhook() is idempotent and safe. Cost: one extra API call at
+  // startup. If it fails (network hiccup) we log and continue — worst case
+  // the webhook is already absent and polling works anyway.
+  try {
+    await bot.deleteWebhook();
+    console.log('[index] deleteWebhook OK (webhook cleared or was already absent)');
+  } catch (err) {
+    console.error('[index] deleteWebhook failed (non-fatal, continuing):', err && err.message ? err.message : err);
+  }
+
+  // Start polling NOW — webhook is confirmed absent.
+  bot.startPolling();
+  console.log('[index] polling started');
+
+  await monitor.start(POLL_INTERVAL);
+
+  console.log(`Bot running. Polling every ${POLL_INTERVAL}s. Public mode - any user can add wallets.`);
+  console.log(`HyperLend enabled via ${HYPEREVM_RPC_URL} (Pool ${HYPERLEND_POOL_ADDRESS})`);
+  console.log(`R(v2) extensions active. Health on :${process.env.HEALTH_PORT || 8080}`);
 }
 
 main().catch(err => {

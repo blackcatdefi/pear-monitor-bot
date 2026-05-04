@@ -590,8 +590,14 @@ function bootstrap({
   }
 
   // 6. Telegram commands (/history /pnl /status /export /summary)
+  // R-PUBLIC-START-FIX-V2: wrap in try/catch — if attachCommands throws
+  // (e.g. bot in an unexpected state), bootstrap() must not crash, otherwise
+  // commandsStart.attach() never runs and /start stays silent.
   if (commands.isEnabled() && bot) {
-    commands.attachCommands(bot);
+    try { commands.attachCommands(bot); }
+    catch (e) {
+      console.error('[extensions] commands.attachCommands failed:', e && e.message ? e.message : e);
+    }
   }
 
   // 6b. R-PUBLIC — /track UI + /timezone command
