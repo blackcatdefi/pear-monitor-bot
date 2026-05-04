@@ -45,6 +45,15 @@ const _state = {
   lastDedupReason: null,
   lastPhantomSuppressedAt: null,
   lastPhantomReason: null,
+  // R-PUBLIC-SPAM-FINAL (4 may 2026) — per-leg INDIVIDUAL_OPEN kill switch
+  // counter. Increments every time openAlerts.emitAlerts refuses to dispatch
+  // an INDIVIDUAL_OPEN because PER_LEG_ALERTS_DISABLED=true (default). One
+  // increment per *leg* (so a 2-leg INDIVIDUAL_OPEN snapshot artifact yields
+  // perLegAlertsBlockedLifetime += 2). If this counter grows while
+  // events_deduplicated_lifetime stays flat, snapshot churn is happening.
+  perLegAlertsBlockedLifetime: 0,
+  lastPerLegBlockedAt: null,
+  lastPerLegBlockedReason: null,
 };
 
 const ERRORS_BUFFER_MAX = 200;
@@ -109,6 +118,15 @@ function recordPhantomSuppressed(reason) {
   _state.phantomEventsSuppressedLifetime += 1;
   _state.lastPhantomSuppressedAt = Date.now();
   _state.lastPhantomReason = reason ? String(reason).slice(0, 200) : null;
+}
+
+// R-PUBLIC-SPAM-FINAL — invoked from src/openAlerts.js whenever the
+// INDIVIDUAL_OPEN path is refused by the PER_LEG_ALERTS_DISABLED kill
+// switch. One increment per leg refused.
+function recordPerLegBlocked(reason) {
+  _state.perLegAlertsBlockedLifetime += 1;
+  _state.lastPerLegBlockedAt = Date.now();
+  _state.lastPerLegBlockedReason = reason ? String(reason).slice(0, 200) : null;
 }
 
 function _formatDurationMs(ms) {
@@ -192,6 +210,15 @@ function getStatus() {
       // emit another BASKET_OPEN until they close). open_wallets is
       // truncated to 10 to keep /health small.
       wallet_lockout: _lockoutSnapshot(),
+      // R-PUBLIC-SPAM-FINAL — per-leg INDIVIDUAL_OPEN kill switch. If
+      // per_leg_alerts_blocked_lifetime grows while
+      // events_deduplicated_lifetime stays flat, the snapshot diff is
+      // churning (legs flickering in/out of allPositions across polls).
+      per_leg_alerts_blocked_lifetime: _state.perLegAlertsBlockedLifetime,
+      last_per_leg_blocked_at: _state.lastPerLegBlockedAt
+        ? new Date(_state.lastPerLegBlockedAt).toISOString()
+        : null,
+      last_per_leg_blocked_reason: _state.lastPerLegBlockedReason,
     },
   };
 }
@@ -241,6 +268,10 @@ function start(port) {
         `# HELP pear_alerts_phantom_events_suppressed_lifetime Phantom $0/$0 events refused by isCloseEmittable + monitor.js + 60s wallet debounce`,
         `# TYPE pear_alerts_phantom_events_suppressed_lifetime counter`,
         `pear_alerts_phantom_events_suppressed_lifetime ${s.spam_guard.phantom_events_suppressed_lifetime}`,
+        // R-PUBLIC-SPAM-FINAL
+        `# HELP pear_alerts_per_leg_alerts_blocked_lifetime INDIVIDUAL_OPEN legs refused by PER_LEG_ALERTS_DISABLED kill switch`,
+        `# TYPE pear_alerts_per_leg_alerts_blocked_lifetime counter`,
+        `pear_alerts_per_leg_alerts_blocked_lifetime ${s.spam_guard.per_leg_alerts_blocked_lifetime}`,
       ];
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end(lines.join('\n'));
@@ -271,6 +302,9 @@ function _resetForTests() {
   _state.lastDedupReason = null;
   _state.lastPhantomSuppressedAt = null;
   _state.lastPhantomReason = null;
+  _state.perLegAlertsBlockedLifetime = 0;
+  _state.lastPerLegBlockedAt = null;
+  _state.lastPerLegBlockedReason = null;
 }
 
 module.exports = {
@@ -283,6 +317,7 @@ module.exports = {
   registerHandler,
   recordEventDeduplicated,
   recordPhantomSuppressed,
+  recordPerLegBlocked,
   getStatus,
   isHealthy,
   _resetForTests,

@@ -181,3 +181,58 @@ fix is not "tune the threshold." The fix is:
 5. Update this doc with the new rule (if a new pattern was uncovered).
 
 R-NOSPAM is a permanent reference for this process.
+
+---
+
+## R-PUBLIC-SPAM-FINAL — per-leg INDIVIDUAL_OPEN is forbidden by default
+
+**Date:** 4 may 2026
+**Trigger:** 21 identical "🟢 NEW POSITION OPENED — vntl:ANTHROPIC" messages
+between 13:07-15:41 UTC for wallet 0xc7AE. Same entry $1114.80, same size
+1.401, same notional $1,562. BCD did not touch the position.
+
+**Root cause:** `openAlerts.emitAlerts` had two execution paths:
+1. `BASKET_OPEN` — protected by 4 stacked gates (Gate-0 wallet lockout +
+   60s wallet debounce + SHA-256 dedup + shouldSendAlert). Working perfectly.
+2. `INDIVIDUAL_OPEN` (1-2 legs) — only protected by `shouldSendAlert(wallet,
+   OPEN_${coin})`, a 60s per-coin window. When `findNewPositions` keeps
+   re-flagging the same leg as new every 2-7 minutes (snapshot churn —
+   the leg's `dex` field flips between `pear`/`Native`/undefined across
+   polls, OR Hyperliquid surfaces the leg intermittently), shouldSendAlert
+   lets each one through after the 60s window elapses. 21 emits in 2.5h.
+
+**Fix:** Per-leg `INDIVIDUAL_OPEN` path is now killed by default.
+
+```javascript
+function isPerLegDisabled() {
+  const v = (process.env.PER_LEG_ALERTS_DISABLED || 'true').toLowerCase();
+  return v !== 'false';
+}
+```
+
+When `isPerLegDisabled()` is true (the default), `emitAlerts` returns
+`{type: 'INDIVIDUAL_OPEN_BLOCKED', dispatched: 0}` and increments
+`healthServer.perLegAlertsBlockedLifetime`.
+
+**Why this is safe:** Pear basket trading places 3+ legs in a TWAP burst,
+so any *real* new-leg event for the BCD fund is `BASKET_OPEN`.
+`INDIVIDUAL_OPEN` in this flow is by definition a snapshot artifact, not
+real trading activity.
+
+**Forensic mode:** Set `PER_LEG_ALERTS_DISABLED=false` in Railway env to
+restore the legacy per-leg path (e.g. while diagnosing snapshot churn).
+
+**Telemetry:** `GET /health` exposes `spam_guard.per_leg_alerts_blocked_lifetime`.
+If it grows but `events_deduplicated_lifetime` stays flat, the snapshot diff
+is churning — investigate the underlying `lastSeenSnapshots` instability.
+
+**Permanent rule for future rounds:**
+- Any new "open"-type alert path MUST go through the same 4-gate stack as
+  `BASKET_OPEN`, OR be gated by an explicit kill switch defaulting to OFF.
+- "60s per-coin shouldSendAlert" is NOT sufficient on its own — snapshot
+  churn periods are minutes, not seconds.
+- New code paths must increment a `healthServer` counter on suppression so
+  /health remains the single forensic source of truth.
+- Tests in `tests/regression_per_leg_kill_switch.test.js` are the canonical
+  regression for this rule.
+

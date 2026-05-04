@@ -25,6 +25,7 @@ const _healthCounters = (() => {
     return {
       recordPhantomSuppressed: () => {},
       recordEventDeduplicated: () => {},
+      recordPerLegBlocked: () => {},
     };
   }
 })();
@@ -87,6 +88,28 @@ function _resetWalletDebounceForTests() {
 
 function isEnabled() {
   return (process.env.OPEN_ALERTS_ENABLED || 'true').toLowerCase() !== 'false';
+}
+
+// R-PUBLIC-SPAM-FINAL (4 may 2026) — per-leg INDIVIDUAL_OPEN kill switch.
+//
+// The 21-msg vntl:ANTHROPIC spam (13:07-15:41 UTC, identical entry/size/notional)
+// arrived via the INDIVIDUAL_OPEN path: classifyOpenEvent returns INDIVIDUAL_OPEN
+// when newPositions.length < BASKET_MIN_COUNT (=3). That path goes through
+// shouldSendAlert(wallet, `OPEN_${coin}`) only — a 60s per-coin window. When
+// a single leg keeps re-appearing in findNewPositions every 2-7 minutes
+// (because the wallet's snapshot dex/coin key is unstable across polls or
+// because Hyperliquid surfaces the leg intermittently), shouldSendAlert lets
+// each one through.
+//
+// Pear basket trading places 3+ legs in a TWAP burst, so a true new-leg event
+// for our fund is always BASKET_OPEN. INDIVIDUAL_OPEN in our flow is by
+// definition a snapshot artifact, not real trading activity. Kill it.
+//
+// Default: DISABLED (per-leg never emits). Set PER_LEG_ALERTS_DISABLED=false
+// in env to re-enable for forensic debugging.
+function isPerLegDisabled() {
+  const v = (process.env.PER_LEG_ALERTS_DISABLED || 'true').toLowerCase();
+  return v !== 'false';
 }
 
 /**
@@ -297,6 +320,29 @@ async function emitAlerts({ chatId, wallet, label, newPositions, notify }) {
     return { dispatched: 1, type: 'BASKET_OPEN' };
   }
 
+  // R-PUBLIC-SPAM-FINAL — kill switch for INDIVIDUAL_OPEN. Default disabled.
+  // The per-leg path was the unprotected leak (only shouldSendAlert 60s gate;
+  // bypassed Gate-0 wallet lockout because that gate only protects BASKET_OPEN).
+  // Pear baskets always have ≥3 legs, so any true new-leg event for our fund
+  // is BASKET_OPEN. INDIVIDUAL_OPEN in this flow is a snapshot artifact.
+  if (isPerLegDisabled()) {
+    for (const pos of ev.positions) {
+      try {
+        _healthCounters.recordPerLegBlocked(
+          `openAlerts.per_leg_disabled:${String(wallet).slice(0, 10)}:${pos && pos.coin ? pos.coin : 'UNKNOWN'}`
+        );
+      } catch (_) {
+        /* counter must not block flow */
+      }
+    }
+    return {
+      dispatched: 0,
+      type: 'INDIVIDUAL_OPEN_BLOCKED',
+      reason: 'per_leg_alerts_disabled',
+      blocked_count: ev.positions.length,
+    };
+  }
+
   let count = 0;
   for (const pos of ev.positions) {
     if (!shouldSendAlert(wallet, `OPEN_${pos.coin}`)) continue;
@@ -312,6 +358,7 @@ async function emitAlerts({ chatId, wallet, label, newPositions, notify }) {
 
 module.exports = {
   isEnabled,
+  isPerLegDisabled,
   findNewPositions,
   classifyOpenEvent,
   formatBasketOpenAlert,
