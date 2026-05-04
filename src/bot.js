@@ -14,8 +14,20 @@ function createBot(token, hlApi, monitor, hlendApi = null) {
 
   // R-PUBLIC-START-FIX: log polling errors so they're visible in Railway logs
   // and don't silently kill the update stream.
+  // R-PUBLIC-START-FIX-V3: also log HTTP status code so 409 (webhook active /
+  // duplicate instance) is distinguishable from 401 (revoked token) or 5xx
+  // (Telegram outage) in Railway log search.
   bot.on('polling_error', (err) => {
-    console.error('[bot] polling_error:', err && err.message ? err.message : err);
+    const code = err && (
+      err.code ||
+      (err.response && (err.response.status || err.response.statusCode))
+    );
+    console.error(`[bot] polling_error (code=${code != null ? code : '?'}):`, err && err.message ? err.message : err);
+    if (code === 409) {
+      console.error('[bot] 409 Conflict — another getUpdates is active (rolling deploy overlap; self-resolves in ~2s after old container stops)');
+    } else if (code === 401) {
+      console.error('[bot] 401 Unauthorized — TELEGRAM_BOT_TOKEN is invalid or revoked');
+    }
   });
 
   // Register bot commands menu (R-AUTOCOPY: 14 user cmds + 11 operator cmds)
