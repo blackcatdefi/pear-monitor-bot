@@ -54,6 +54,32 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 ENABLED = os.getenv("HYPERLEND_AUTOREADER", "true").strip().lower() != "false"
+
+# R-DASHBOARD-DEBT-SYMBOL: authoritative asset-address → symbol map for the
+# most common HyperLend reserves. Mirrors modules/hyperlend.py
+# KNOWN_RESERVE_ADDRESSES (lowercase keys; no import to avoid circular deps).
+# Used to recover debt_symbol when per-reserve balanceOf() calls fail or
+# return 0, leaving primary_debt=None and debt_symbol=None in the live fetch.
+_KNOWN_RESERVE_SYMBOLS: dict[str, str] = {
+    "0x5555555555555555555555555555555555555555": "WHYPE",
+    "0x94e8396e0869c9f2200760af0621afd240e1cf38": "wstHYPE",
+    "0x9fdbda0a5e284c32744d2f17ee5c74b284993463": "UBTC",
+    "0xbe6727b535545c67d5caa73dea54865b92cf7907": "UETH",
+    "0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34": "USDe",
+    "0xb8ce59fc3717ada4c02eadf9682a9e934f625ebb": "USDT0",
+    "0xb88339cb7199b77e23db6e890353e22632ba630f": "USDC",
+    "0x111111a1a0667d36bd57c0a9f569b98057111111": "USDH",
+    "0xfd739d4e423301ce9385c1fb8850539d657c296d": "kHYPE",
+    "0xd8fc8f0b03eba61f64d08b0bef69d80916e5dda9": "beHYPE",
+    "0x068f321fa8fb9f0d135f290ef6a3e2813e1c8a29": "USOL",
+}
+
+
+def _sym_from_asset(asset: str | None) -> str | None:
+    """Return canonical symbol for a reserve asset address, or None."""
+    if not asset:
+        return None
+    return _KNOWN_RESERVE_SYMBOLS.get(asset.lower())
 RETRY_MAX = max(1, int(os.getenv("HYPERLEND_RETRY_MAX", "3") or 3))
 RETRY_BASE_SEC = float(os.getenv("HYPERLEND_RETRY_BASE_SEC", "2") or 2)
 CACHE_TTL_SEC = int(os.getenv("HYPERLEND_CACHE_TTL_SEC", "3600") or 3600)
@@ -171,7 +197,9 @@ def _persist_ok(entry: dict[str, Any], cache: dict[str, Any]) -> None:
     """If entry is OK, write its HF + balances + symbols into the cache."""
     if entry.get("status") != "ok":
         return
-    data = entry.get("data") or {}
+    data = entry.get("data")
+    if not isinstance(data, dict):
+        return
     addr = (data.get("wallet") or "").lower()
     if not addr:
         return
@@ -182,6 +210,31 @@ def _persist_ok(entry: dict[str, Any], cache: dict[str, Any]) -> None:
     coll_bal = float(data.get("collateral_balance") or 0.0)
     debt_sym = data.get("debt_symbol")
     debt_bal = float(data.get("debt_balance") or 0.0)
+
+    # R-DASHBOARD-DEBT-SYMBOL: when per-reserve RPC failed, primary_debt may
+    # be None → debt_symbol=None even though total_debt_usd > 0. Try to
+    # recover via the known-reserve address map first.
+    if not debt_sym:
+        primary_debt = data.get("primary_debt")
+        if isinstance(primary_debt, dict):
+            debt_sym = _sym_from_asset(primary_debt.get("asset"))
+
+    # Protect the cache from null-overwrite: if the newly-fetched data still
+    # has no symbol (total enumeration failure), preserve the previously-known
+    # good value so future UNKNOWN recoveries can still show "UETH" / "USDH".
+    existing = cache.get(addr) or {}
+    if not debt_sym and existing.get("debt_symbol"):
+        debt_sym = existing["debt_symbol"]
+        if not debt_bal:
+            debt_bal = float(existing.get("debt_balance") or 0.0)
+
+    # Write the resolved values back into the live entry so that downstream
+    # consumers (portfolio_snapshot → dashboard) see the correct symbol/balance
+    # without requiring another fetch round-trip.
+    if debt_sym and not data.get("debt_symbol"):
+        data["debt_symbol"] = debt_sym
+    if debt_bal and not data.get("debt_balance"):
+        data["debt_balance"] = debt_bal
     if not _is_finite_hf(hf):
         # Skip writing infinite HF (it carries no signal for recovery).
         # But preserve a marker so we know the wallet was last seen healthy.

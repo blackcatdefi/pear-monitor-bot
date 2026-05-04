@@ -101,7 +101,12 @@ def render_dashboard_telegram(state: dict[str, Any]) -> str:
             _fmt_token(main.get("debt_balance"), dec=4)
             if main.get("debt_balance") else "—"
         )
-        debt_sym = main.get("debt_symbol") or "?"
+        _debt_sym_raw = main.get("debt_symbol")
+        _debt_asset = main.get("debt_asset") or ""
+        debt_sym = _debt_sym_raw or (
+            _debt_asset[:6] + "…" + _debt_asset[-4:]
+            if len(_debt_asset) >= 10 else "?"
+        )
         lines.append(f"Wallet: {main.get('short', '—')}")
         lines.append(f"HF: {hf_str}")
         lines.append(
@@ -133,7 +138,12 @@ def render_dashboard_telegram(state: dict[str, Any]) -> str:
             _fmt_token(sec.get("debt_balance"), dec=4)
             if sec.get("debt_balance") else "—"
         )
-        sec_debt_sym = sec.get("debt_symbol") or "?"
+        _sec_debt_sym_raw = sec.get("debt_symbol")
+        _sec_debt_asset = sec.get("debt_asset") or ""
+        sec_debt_sym = _sec_debt_sym_raw or (
+            _sec_debt_asset[:6] + "…" + _sec_debt_asset[-4:]
+            if len(_sec_debt_asset) >= 10 else "?"
+        )
         lines.append(f"Wallet: {sec.get('short', '—')}")
         lines.append(f"HF: {hf_str2}")
         lines.append(

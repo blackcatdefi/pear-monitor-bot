@@ -281,3 +281,116 @@ def test_classify_entry_paths():
     # error status
     e4 = {"status": "error", "data": {}}
     assert hyperlend_reader._classify_entry(e4) == "UNKNOWN"
+
+
+# ---------------------------------------------------------------------------
+# R-DASHBOARD-DEBT-SYMBOL — reader-level tests
+# ---------------------------------------------------------------------------
+
+def _ok_entry_with_debt_detail(
+    addr: str,
+    hf: float,
+    coll: float,
+    debt: float,
+    debt_sym: str | None,
+    debt_bal: float,
+    debt_asset: str | None = None,
+) -> dict:
+    """Build an OK entry that includes primary_debt metadata (as hyperlend.py produces)."""
+    entry = _ok_entry(addr, hf, coll, debt)
+    entry["data"]["debt_symbol"] = debt_sym
+    entry["data"]["debt_balance"] = debt_bal
+    if debt_asset:
+        entry["data"]["primary_debt"] = {"asset": debt_asset, "balance": debt_bal, "symbol": debt_sym}
+    return entry
+
+
+def test_ok_entry_with_none_debt_symbol_resolved_from_cache():
+    """R-DASHBOARD-DEBT-SYMBOL: OK entry with debt_symbol=None and debt>0
+    must be enriched from the JSON cache when cache has a prior good symbol."""
+    # Seed the cache with a known-good debt_symbol.
+    with open(hyperlend_reader._cache_path(), "w") as f:
+        json.dump(
+            {
+                WALLET_FLY: {
+                    "hf": 1.214,
+                    "collateral_usd": 4018.0,
+                    "debt_usd": 881.0,
+                    "collateral_symbol": "WHYPE",
+                    "collateral_balance": 1750.0,
+                    "debt_symbol": "UETH",
+                    "debt_balance": 19.27,
+                    "ts_epoch": time.time() - 30,
+                    "ts_utc": "2026-04-30T14:30:00+00:00",
+                }
+            },
+            f,
+        )
+
+    # Live fetch returns OK but per-reserve RPC failed → debt_symbol=None.
+    live_entry = _ok_entry_with_debt_detail(
+        WALLET_FLY, 1.214, 4018.0, 881.0,
+        debt_sym=None, debt_bal=0.0,
+    )
+
+    async def _ok_fetch():
+        return [live_entry]
+
+    out = asyncio.run(hyperlend_reader.read_all_with_cache(_ok_fetch))
+
+    assert len(out) == 1
+    assert out[0]["hf_status"] == "OK"
+    data = out[0]["data"]
+    # The reader must have filled in the symbol from cache.
+    assert data["debt_symbol"] == "UETH", (
+        f"Expected debt_symbol='UETH' (from cache), got {data['debt_symbol']!r}"
+    )
+    assert data["debt_balance"] == pytest.approx(19.27), (
+        f"Expected debt_balance=19.27 (from cache), got {data['debt_balance']}"
+    )
+
+
+def test_persist_ok_does_not_overwrite_cached_debt_symbol_with_none():
+    """R-DASHBOARD-DEBT-SYMBOL: _persist_ok must not poison the cache with
+    debt_symbol=null when a prior successful read stored 'UETH'."""
+    # Write a good cache entry.
+    cache: dict = {
+        WALLET_FLY: {
+            "hf": 1.214,
+            "collateral_usd": 4018.0,
+            "debt_usd": 881.0,
+            "collateral_symbol": "WHYPE",
+            "collateral_balance": 1750.0,
+            "debt_symbol": "UETH",
+            "debt_balance": 19.27,
+            "ts_epoch": time.time() - 30,
+            "ts_utc": "2026-04-30T14:30:00+00:00",
+        }
+    }
+
+    # New OK entry where per-reserve failed → debt_symbol=None.
+    entry = _ok_entry_with_debt_detail(
+        WALLET_FLY, 1.214, 4018.0, 881.0,
+        debt_sym=None, debt_bal=0.0,
+    )
+
+    hyperlend_reader._persist_ok(entry, cache)
+
+    # Cache must still have "UETH" — not overwritten with None.
+    assert cache[WALLET_FLY]["debt_symbol"] == "UETH", (
+        f"Cache debt_symbol was overwritten with {cache[WALLET_FLY]['debt_symbol']!r}"
+    )
+    # The live entry itself must also have been patched with the resolved symbol.
+    assert entry["data"]["debt_symbol"] == "UETH", (
+        f"Entry data debt_symbol not written back: {entry['data']['debt_symbol']!r}"
+    )
+
+
+def test_sym_from_asset_resolves_known_addresses():
+    """R-DASHBOARD-DEBT-SYMBOL: _sym_from_asset resolves all major debt assets."""
+    assert hyperlend_reader._sym_from_asset("0xBe6727B535545C67d5cAa73dEa54865B92CF7907") == "UETH"
+    assert hyperlend_reader._sym_from_asset("0xbe6727b535545c67d5caa73dea54865b92cf7907") == "UETH"
+    assert hyperlend_reader._sym_from_asset("0x111111a1a0667d36bD57c0A9f569b98057111111") == "USDH"
+    assert hyperlend_reader._sym_from_asset("0xb88339CB7199b77E23DB6E890353E22632Ba630f") == "USDC"
+    assert hyperlend_reader._sym_from_asset(None) is None
+    assert hyperlend_reader._sym_from_asset("") is None

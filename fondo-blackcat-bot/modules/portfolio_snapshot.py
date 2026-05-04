@@ -116,6 +116,10 @@ class WalletSnapshot:
     collateral_balance: float = 0.0
     debt_symbol: str | None = None
     debt_balance: float = 0.0
+    # R-DASHBOARD-DEBT-SYMBOL: underlying reserve asset address for the
+    # primary debt position. Used as short-form fallback in the dashboard
+    # when debt_symbol cannot be resolved (e.g. unknown new reserve).
+    debt_asset: str | None = None
     short_positions: list[dict[str, Any]] = field(default_factory=list)
     raw_positions: list[dict[str, Any]] = field(default_factory=list)
     # R-DASH-FIX Bug 1: raw spot balances for per-token display in dashboard
@@ -551,6 +555,7 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
                         "wallet_label": label,
                     })
 
+            _pd = hl_data.get("primary_debt")
             wallet_snaps.append(WalletSnapshot(
                 address=addr,
                 label=label,
@@ -566,6 +571,7 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
                 collateral_balance=float(hl_data.get("collateral_balance") or 0.0),
                 debt_symbol=hl_data.get("debt_symbol"),
                 debt_balance=float(hl_data.get("debt_balance") or 0.0),
+                debt_asset=(_pd.get("asset") if isinstance(_pd, dict) else None),
                 short_positions=short_positions,
                 raw_positions=list(d.get("positions") or []),
                 # R-DASH-FIX Bug 1: preserve raw spot_balances for per-token display
@@ -583,6 +589,7 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
         debt = float(hl_data.get("total_debt_usd") or 0.0)
         if coll < 0.01 and debt < 0.01:
             continue
+        _pd2 = hl_data.get("primary_debt")
         wallet_snaps.append(WalletSnapshot(
             address=addr,
             label=hl_data.get("label") or "HyperLend",
@@ -598,6 +605,7 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
             collateral_balance=float(hl_data.get("collateral_balance") or 0.0),
             debt_symbol=hl_data.get("debt_symbol"),
             debt_balance=float(hl_data.get("debt_balance") or 0.0),
+            debt_asset=(_pd2.get("asset") if isinstance(_pd2, dict) else None),
         ))
 
     # Sort wallets by capital descending (matches /reporte ordering)

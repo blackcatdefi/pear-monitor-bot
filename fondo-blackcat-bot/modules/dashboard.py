@@ -181,7 +181,12 @@ def _render_html(state: dict[str, Any]) -> str:
         coll_sym = main.get("collateral_symbol") or "?"
         debt_amt = _fmt_token_amount(main.get("debt_balance"), dec=4) \
             if main.get("debt_balance") else "—"
-        debt_sym = main.get("debt_symbol") or "?"
+        _debt_sym_raw = main.get("debt_symbol")
+        _debt_asset = main.get("debt_asset") or ""
+        debt_sym = _debt_sym_raw or (
+            _debt_asset[:6] + "…" + _debt_asset[-4:]
+            if len(_debt_asset) >= 10 else "?"
+        )
         flywheel_html = (
             f"<p>Wallet: <span class='dim'>{_esc(main.get('short'))}</span></p>"
             f"<p>HF: <strong>{_esc(hf_str)}</strong></p>"
@@ -212,7 +217,12 @@ def _render_html(state: dict[str, Any]) -> str:
             _fmt_token_amount(sec.get("debt_balance"), dec=4)
             if sec.get("debt_balance") else "—"
         )
-        sec_debt_sym = sec.get("debt_symbol") or "?"
+        _sec_debt_sym_raw = sec.get("debt_symbol")
+        _sec_debt_asset = sec.get("debt_asset") or ""
+        sec_debt_sym = _sec_debt_sym_raw or (
+            _sec_debt_asset[:6] + "…" + _sec_debt_asset[-4:]
+            if len(_sec_debt_asset) >= 10 else "?"
+        )
         secondary_html = (
             "<div class='card'>"
             "<h2>Secondary flywheel</h2>"
@@ -608,6 +618,9 @@ async def _build_state() -> dict[str, Any]:
             "debt_symbol": ws.debt_symbol,
             "debt_balance": ws.debt_balance,
             "debt_usd": ws.hl_debt_usd,
+            # R-DASHBOARD-DEBT-SYMBOL: underlying asset address used as
+            # short-form fallback when debt_symbol is still None (unknown reserve).
+            "debt_asset": ws.debt_asset,
         }
 
     return {

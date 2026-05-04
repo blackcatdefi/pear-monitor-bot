@@ -192,3 +192,91 @@ def test_dashboard_renders_all_blocks():
     # Footer
     assert "Read-only" in text, "Missing footer"
     assert "SSoT" in text or "reporte" in text, "Missing SSoT reference in footer"
+
+
+# ---------------------------------------------------------------------------
+# R-DASHBOARD-DEBT-SYMBOL tests
+# ---------------------------------------------------------------------------
+
+def test_dashboard_debt_shows_symbol():
+    """R-DASHBOARD-DEBT-SYMBOL: debt_symbol must render, never '— ?'.
+
+    Scenario A — symbol present: renders 'UETH' in the debt line.
+    Scenario B — symbol=None, debt_asset known: shows short address, not '?'.
+    Scenario C — symbol=None, no asset: falls back to '?' (not '— ?').
+    """
+    from modules.dashboard_telegram import render_dashboard_telegram
+
+    # A: known symbol — must appear in output.
+    state_a = _make_state()
+    state_a["main_flywheel"]["debt_symbol"] = "UETH"
+    state_a["main_flywheel"]["debt_balance"] = 19.27
+    text_a = render_dashboard_telegram(state_a)
+    assert "UETH" in text_a, "debt_symbol='UETH' should appear in debt line"
+    assert "19.27" in text_a, "debt_balance should appear when symbol is present"
+    # Make sure we're not showing '— ?' at all
+    assert "— ?" not in text_a, "Should not show '— ?' when symbol is known"
+
+    # B: symbol=None but debt_asset address available → short address fallback.
+    state_b = _make_state()
+    state_b["main_flywheel"]["debt_symbol"] = None
+    state_b["main_flywheel"]["debt_balance"] = 0.0
+    state_b["main_flywheel"]["debt_asset"] = "0xBe6727B535545C67d5cAa73dEa54865B92CF7907"
+    text_b = render_dashboard_telegram(state_b)
+    assert "— ?" not in text_b, "Should not show '— ?' when debt_asset is available"
+    # Short-form address fallback: first 6 chars + … + last 4 chars
+    assert "0xBe67" in text_b, "Should show short address prefix when symbol is None"
+
+    # C: symbol=None, no asset — graceful '?' (no crash, no '— ?').
+    state_c = _make_state()
+    state_c["main_flywheel"]["debt_symbol"] = None
+    state_c["main_flywheel"]["debt_balance"] = 0.0
+    state_c["main_flywheel"]["debt_asset"] = None
+    text_c = render_dashboard_telegram(state_c)
+    # Just ensure it doesn't blow up and the USD value still shows
+    assert "45.0K" in text_c or "45K" in text_c, "USD value must still appear"
+
+
+def test_dashboard_collateral_and_debt_symmetric():
+    """R-DASHBOARD-DEBT-SYMBOL: collateral and debt rendering must be symmetric.
+
+    If collateral_symbol is shown via the 'or "?"' fallback, debt must follow
+    the same pattern — neither should use a different fallback strategy.
+    """
+    from modules.dashboard_telegram import render_dashboard_telegram
+
+    # Both known — both must appear.
+    state = _make_state()
+    state["main_flywheel"]["collateral_symbol"] = "WHYPE"
+    state["main_flywheel"]["collateral_balance"] = 1750.0
+    state["main_flywheel"]["debt_symbol"] = "UETH"
+    state["main_flywheel"]["debt_balance"] = 19.27
+    text = render_dashboard_telegram(state)
+    assert "WHYPE" in text, "collateral_symbol must appear"
+    assert "UETH" in text, "debt_symbol must appear"
+    assert "1,750.00" in text or "1750" in text, "collateral_balance must appear"
+    assert "19.27" in text, "debt_balance must appear"
+
+    # Both None + asset address — both should resolve to short address.
+    state2 = _make_state()
+    state2["main_flywheel"]["collateral_symbol"] = None
+    state2["main_flywheel"]["collateral_balance"] = 0.0
+    state2["main_flywheel"]["debt_symbol"] = None
+    state2["main_flywheel"]["debt_balance"] = 0.0
+    state2["main_flywheel"]["debt_asset"] = "0xBe6727B535545C67d5cAa73dEa54865B92CF7907"
+    text2 = render_dashboard_telegram(state2)
+    # Neither collateral nor debt should make the renderer crash.
+    assert "MAIN FLYWHEEL" in text2, "Flywheel section must still render"
+    # Debt falls back to short address; collateral still uses '?'.
+    # The critical invariant: the DEBT line must not show '— ?' when
+    # debt_asset is set (even though collateral line may still show '?').
+    debt_line = next(
+        (ln for ln in text2.splitlines() if ln.startswith("Debt:")), None
+    )
+    assert debt_line is not None, "Debt: line must be present"
+    assert "— ?" not in debt_line, (
+        f"Debt line must not show '— ?' when debt_asset is set, got: {debt_line!r}"
+    )
+    assert "0xBe67" in debt_line, (
+        f"Short address prefix must appear in debt line, got: {debt_line!r}"
+    )
