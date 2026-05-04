@@ -6,7 +6,11 @@ const {
 } = require('./store');
 
 function createBot(token, hlApi, monitor, hlendApi = null) {
-  const bot = new TelegramBot(token, { polling: true });
+  // R-PUBLIC-START-FIX-V2: polling: false — index.js calls deleteWebhook()
+  // then bot.startPolling() explicitly, so we never start polling while a
+  // webhook is still registered (which would make Telegram return 409 on
+  // every getUpdates call and the bot stays mute indefinitely).
+  const bot = new TelegramBot(token, { polling: false });
 
   // R-PUBLIC-START-FIX: log polling errors so they're visible in Railway logs
   // and don't silently kill the update stream.
