@@ -4,7 +4,26 @@ Builds one structured snapshot using the SAME formulas as
 ``templates/formatters.format_quick_positions`` (which is what /reporte ends
 up showing under the hood):
 
-    capital_total_per_wallet = perp_account_value + spot_non_usdc_usd + hl_collateral_usd
+    capital_total_per_wallet = perp_account_value + spot_non_stable_usd + hl_collateral_usd
+
+R-DASHBOARD-SPOT-FIX (2026-05-05)
+---------------------------------
+The legacy code carried two stable-coin handling rules side-by-side:
+
+* ``USDC`` was correctly conditional on perp activity (Unified Account
+  double-count).
+* ``USDH``/``USDT``/``USDT0``/``DAI`` were unconditionally added 1:1.
+
+That meant the dashboard's "Spot non-USDC" line included USDT0/USDH —
+classic stablecoins — inflating the figure (5 may 2026 12:13 UTC: live
+fund had USDT0 $1,245 + USDH $360, dashboard showed "Spot non-USDC $1.7K"
+when real non-stable spot was $43.59 USOL+HYPE dust).
+
+Fix: a single ``STABLECOINS`` set covers all USD-pegged coins, and the
+spot total is split into ``non_stable`` (real exposure) and ``stables``
+(cash equivalent, displayed separately). NET CAPITAL = HL_net + perp +
+spot_non_stable. Stable spot balances are surfaced for transparency but
+NOT folded into "exposure".
 
 (Debt is reported as a separate line — it is **not** subtracted from capital,
 matching the way /reporte displays the consolidated portfolio.)
@@ -59,6 +78,16 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+# R-DASHBOARD-SPOT-FIX (2026-05-05): canonical stablecoin set.
+# Anything NOT in this set is "non-stable" → real market exposure.
+# USDC is handled specially: under HyperLiquid Unified Account the spot
+# USDC bucket is the SAME as ``marginSummary.accountValue`` when there is
+# an active perp, so it's skipped entirely in that branch. When idle
+# (no perp), it is summed into the stables bucket as cash equivalent.
+STABLECOINS = frozenset({
+    "USDC", "USDT", "USDT0", "USDH", "USDE", "USDHL", "USR", "SUSDE", "DAI",
+})
+
 # Module-level cache so /reporte and /dashboard share work and we don't
 # hammer the HyperEVM RPC with 200+ parallel calls on every dashboard hit.
 # Browser refresh cadence vs RPC rate-limits (-32005) was the root cause of
@@ -106,7 +135,13 @@ class WalletSnapshot:
     label: str
     short: str
     perp_equity: float = 0.0
+    # R-DASHBOARD-SPOT-FIX: spot_usd is now NON-STABLE only (real exposure).
+    # spot_stables_usd is the cash-equivalent stablecoin bucket (USDT0/USDH/etc.).
+    # Field name kept as ``spot_usd`` for backward-compat with /reporte
+    # callers; semantics are now strictly "non-stable" — see the module
+    # docstring R-DASHBOARD-SPOT-FIX block.
     spot_usd: float = 0.0
+    spot_stables_usd: float = 0.0
     hl_collateral_usd: float = 0.0
     hl_debt_usd: float = 0.0
     capital_total: float = 0.0
@@ -142,6 +177,9 @@ class PortfolioSnapshot:
     hl_collateral_total: float
     hl_debt_total: float
     perp_equity_total: float
+    # R-DASHBOARD-SPOT-FIX: spot_usd_total now means NON-STABLE only.
+    # spot_stables_total (declared with default below) is the cash-equivalent
+    # bucket. NET capital uses spot_usd_total only.
     spot_usd_total: float
     upnl_perp_total: float
     main_flywheel: WalletSnapshot | None
@@ -159,6 +197,10 @@ class PortfolioSnapshot:
     is_fresh: bool = True
     fetch_attempts: int = 1
     last_error: str | None = None
+    # R-DASHBOARD-SPOT-FIX (2026-05-05): cash-equivalent stable spot total
+    # across all fund wallets. Defaults to 0.0 to keep the existing kwargs
+    # construction sites compatible with older callers.
+    spot_stables_total: float = 0.0
 
 
 # ─── Aggregator ─────────────────────────────────────────────────────────────
@@ -178,52 +220,75 @@ def _short(addr: str) -> str:
     return addr[:6] + "…" + addr[-4:]
 
 
-def _spot_usd_value(spot_balances: list[dict[str, Any]],
-                    prices: dict[str, Any],
-                    perp_account_value: float = 0.0) -> float:
-    """Sum spot USD value, conditionally excluding USDC.
+def _spot_split_value(spot_balances: list[dict[str, Any]],
+                       prices: dict[str, Any],
+                       perp_account_value: float = 0.0) -> tuple[float, float]:
+    """Split spot USD value into ``(non_stable_usd, stables_usd)``.
 
-    Decision rule per BCD's directive (2026-04-28):
-      * IF the wallet has ACTIVE perp positions (perp_account_value > 0.01):
-        the USDC sitting in spot is the SAME bucket already reported by
-        ``clearinghouseState.marginSummary.accountValue`` under HyperLiquid
-        Unified Account. Skip it from the spot sum to avoid double-counting.
-      * IF there is NO active perp (perp_account_value <= 0.01):
-        the USDC in spot is real free capital (e.g., basket just closed,
-        funds idle). Sum it 1:1.
+    R-DASHBOARD-SPOT-FIX (2026-05-05): replaces the legacy
+    ``_spot_usd_value`` which lumped USDH/USDT0/USDT/DAI into the
+    "non-USDC" bucket. The split lets the dashboard label exposure
+    accurately ("Spot non-stable") and keep stables as cash-equivalent.
 
-    Other stablecoins (USDH, USDT, USDT0, DAI) are independent on-chain spot
-    tokens — NOT part of the unified-account USDC collateral — so they are
-    always summed 1:1.
+    Rules
+    -----
+    * ``USDC``: under HyperLiquid Unified Account, the spot USDC balance
+      and ``marginSummary.accountValue`` are the SAME pool. If
+      ``perp_account_value > 0.01`` we skip it entirely (already counted in
+      perp_equity). If idle, USDC is added to ``stables_usd`` (1:1 cash).
+    * Other ``STABLECOINS`` (USDT0/USDH/USDT/USDE/USDHL/USR/sUSDe/DAI):
+      always added to ``stables_usd`` 1:1 — they are cash equivalent, not
+      market exposure.
+    * Anything else (HYPE, kHYPE→HYPE proxy, USOL, PEAR, etc.): added to
+      ``non_stable_usd``, valued at live price with entry-notional cost
+      basis as last-resort proxy.
 
-    Non-stable coins use live price from ``market.data.prices`` with
-    entry-notional cost basis as last-resort proxy.
+    The two halves are returned separately so callers can pick which
+    they need (NET=non_stable; "Cash equivalents" line=stables).
     """
     has_active_perp = perp_account_value > 0.01
-    total = 0.0
+    non_stable = 0.0
+    stables = 0.0
     for sb in spot_balances or []:
         coin = (sb.get("coin") or "").upper()
         amount = float(sb.get("total") or 0)
         entry_ntl = float(sb.get("entry_ntl") or 0)
-        # CRITICAL: only skip USDC if wallet has an active perp position
-        # (then it's already inside accountValue under Unified Account).
+        # USDC: special-case for Unified Account double-count.
         if coin == "USDC":
             if has_active_perp:
                 continue
-            total += amount
+            stables += amount
             continue
-        if coin in {"USDH", "USDT", "USDT0", "DAI"}:
-            total += amount
+        # Any other stablecoin → cash equivalent bucket (1:1).
+        if coin in STABLECOINS:
+            stables += amount
             continue
-        # kHYPE → HYPE proxy
+        # Non-stable: price-based valuation, kHYPE→HYPE proxy, entry_ntl fallback.
         lookup = coin.removeprefix("K") if coin.startswith("K") else coin
         entry = (prices.get(lookup) or prices.get(coin) or {}) if prices else {}
         px = entry.get("price_usd") if isinstance(entry, dict) else None
         if px and amount:
-            total += amount * float(px)
+            non_stable += amount * float(px)
         else:
-            total += entry_ntl
-    return total
+            non_stable += entry_ntl
+    return non_stable, stables
+
+
+def _spot_usd_value(spot_balances: list[dict[str, Any]],
+                    prices: dict[str, Any],
+                    perp_account_value: float = 0.0) -> float:
+    """Backward-compatible wrapper — returns the NON-STABLE half only.
+
+    Pre-R-DASHBOARD-SPOT-FIX this function returned non-stable +
+    USDH/USDT0/USDT/DAI lumped together. After the fix it returns ONLY
+    non-stable (real exposure). Legacy callers still see a single float
+    but with the bug closed: stablecoins are no longer counted as
+    "non-USDC" exposure.
+
+    Use ``_spot_split_value`` directly when you need both halves.
+    """
+    non_stable, _stables = _spot_split_value(spot_balances, prices, perp_account_value)
+    return non_stable
 
 
 def _is_regression(new_snap: PortfolioSnapshot,
@@ -431,6 +496,8 @@ def _make_loading_placeholder(error: str = "") -> PortfolioSnapshot:
         is_fresh=False,
         fetch_attempts=1,
         last_error=error or "cold-start failed",
+        # R-DASHBOARD-SPOT-FIX: stables defaults to 0 in the placeholder.
+        spot_stables_total=0.0,
     )
 
 
@@ -524,10 +591,18 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
             addr = (d.get("wallet") or "").lower()
             label = d.get("label") or w.get("label") or "?"
             perp_equity = float(d.get("account_value") or 0.0)
-            spot_usd = _spot_usd_value(d.get("spot_balances") or [], prices, perp_equity)
+            # R-DASHBOARD-SPOT-FIX: split into non-stable (real exposure)
+            # and stables (cash equivalent). spot_usd preserves the legacy
+            # name but now carries non-stable only — see module docstring.
+            spot_usd, spot_stables = _spot_split_value(
+                d.get("spot_balances") or [], prices, perp_equity
+            )
             hl_data = hl_by_wallet.get(addr, {})
             hl_coll = float(hl_data.get("total_collateral_usd") or 0.0)
             hl_debt = float(hl_data.get("total_debt_usd") or 0.0)
+            # capital_total still adds spot_usd (now non-stable only); stables
+            # are surfaced separately so the dashboard can show them as
+            # cash-equivalent without inflating "exposure".
             cap = perp_equity + spot_usd + hl_coll
             upnl = float(d.get("unrealized_pnl_total") or 0.0)
 
@@ -562,6 +637,7 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
                 short=_short(addr),
                 perp_equity=perp_equity,
                 spot_usd=spot_usd,
+                spot_stables_usd=spot_stables,
                 hl_collateral_usd=hl_coll,
                 hl_debt_usd=hl_debt,
                 capital_total=cap,
@@ -639,6 +715,8 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
     hl_debt_total = sum(ws.hl_debt_usd for ws in wallet_snaps)
     perp_equity_total = sum(ws.perp_equity for ws in wallet_snaps)
     spot_usd_total = sum(ws.spot_usd for ws in wallet_snaps)
+    # R-DASHBOARD-SPOT-FIX: aggregate stable-spot bucket across all wallets.
+    spot_stables_total = sum(ws.spot_stables_usd for ws in wallet_snaps)
     upnl_perp_total = sum(ws.upnl_perp for ws in wallet_snaps)
 
     return PortfolioSnapshot(
@@ -648,6 +726,7 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
         hl_debt_total=hl_debt_total,
         perp_equity_total=perp_equity_total,
         spot_usd_total=spot_usd_total,
+        spot_stables_total=spot_stables_total,
         upnl_perp_total=upnl_perp_total,
         main_flywheel=main_flywheel,
         secondary_flywheel=secondary_flywheel,

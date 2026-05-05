@@ -629,7 +629,12 @@ async def _build_state() -> dict[str, Any]:
         "hl_collateral_total": snap.hl_collateral_total,
         "hl_debt_total": snap.hl_debt_total,
         "perp_equity_total": snap.perp_equity_total,
+        # R-DASHBOARD-SPOT-FIX: spot_usd_total now means NON-STABLE only
+        # (real exposure). spot_stables_total is the cash-equivalent bucket
+        # surfaced separately so the Capital card no longer inflates the
+        # "Spot non-USDC" line by counting USDT0/USDH/etc.
         "spot_usd_total": snap.spot_usd_total,
+        "spot_stables_total": getattr(snap, "spot_stables_total", 0.0),
         # R-DASH-FIX Bug 2: use fresh UPnL — same source as /posiciones.
         "upnl_perp_total": upnl_fresh if fresh_wallets else snap.upnl_perp_total,
         "main_flywheel": _ws_to_dict(snap.main_flywheel),
@@ -652,7 +657,9 @@ async def _build_state() -> dict[str, Any]:
                 "label": ws.label,
                 "capital": ws.capital_total,
                 "perp": ws.perp_equity,
+                # R-DASHBOARD-SPOT-FIX: ``spot`` carries non-stable only.
                 "spot": ws.spot_usd,
+                "spot_stables": getattr(ws, "spot_stables_usd", 0.0),
                 "hl_coll": ws.hl_collateral_usd,
                 "hl_debt": ws.hl_debt_usd,
             }

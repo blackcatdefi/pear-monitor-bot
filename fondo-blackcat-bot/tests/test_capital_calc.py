@@ -161,7 +161,9 @@ def test_telegram_block_contains_breakdown_lines():
     assert "NET CAPITAL" in tg
     assert "HL net (col-debt)" in tg
     assert "Perp account" in tg
-    assert "Spot non-USDC" in tg
+    # R-DASHBOARD-SPOT-FIX: label renamed Spot non-USDC → Spot non-stable.
+    assert "Spot non-stable" in tg
+    assert "Spot non-USDC" not in tg
     assert "Gross exposure" in tg
     assert "HL collateral" in tg
     assert "HL debt" in tg
@@ -203,3 +205,170 @@ def test_perp_only_fund_net_equals_perp():
     # NET = 0 + 8000 + 0 = 8000. UPnL is NOT re-added.
     assert net.net_total_usd == 8_000.0
     assert net.gross_exposure_usd == 8_000.0
+
+
+# ---------------------------------------------------------------------------
+# R-DASHBOARD-SPOT-FIX (2026-05-05) — stablecoin exclusion regression suite
+# ---------------------------------------------------------------------------
+import pytest
+
+# Live snapshot 5 may 2026 12:13 UTC (BCD audit):
+#   USDC 1,478.81 + USDT0 1,245.17 + USDH 360.28 + USOL 26.67 + HYPE 16.92
+# Real non-stable bag = USOL + HYPE = $43.59 (dust). Pre-fix the dashboard
+# rendered "Spot non-USDC: $1.7K" because USDT0+USDH were lumped in.
+RDASHBOARD_LIVE_USDC = 1_478.81
+RDASHBOARD_LIVE_USDT0 = 1_245.17
+RDASHBOARD_LIVE_USDH = 360.28
+RDASHBOARD_LIVE_USOL = 26.67
+RDASHBOARD_LIVE_HYPE = 16.92
+RDASHBOARD_REAL_NON_STABLE = RDASHBOARD_LIVE_USOL + RDASHBOARD_LIVE_HYPE  # $43.59
+RDASHBOARD_REAL_STABLES_IDLE = (
+    RDASHBOARD_LIVE_USDC + RDASHBOARD_LIVE_USDT0 + RDASHBOARD_LIVE_USDH
+)
+
+
+def test_spot_non_stable_excludes_usdt0_usdh():
+    """The split helper must not lump USDT0/USDH into the non-stable bucket.
+
+    Verifies the root-cause fix: pre-fix the function returned $1,648.86 for
+    these balances; post-fix it must return $43.59 (dust only)."""
+    from modules.portfolio_snapshot import _spot_split_value
+
+    # No active perp → USDC also goes to stables (idle wallet).
+    spot_balances = [
+        {"coin": "USDC", "total": RDASHBOARD_LIVE_USDC, "entry_ntl": 0},
+        {"coin": "USDT0", "total": RDASHBOARD_LIVE_USDT0, "entry_ntl": 0},
+        {"coin": "USDH", "total": RDASHBOARD_LIVE_USDH, "entry_ntl": 0},
+        # Non-stable: only entry_ntl is used (cost basis) — match snapshot.
+        {"coin": "USOL", "total": 0.3162, "entry_ntl": RDASHBOARD_LIVE_USOL},
+        {"coin": "HYPE", "total": 0.3863, "entry_ntl": RDASHBOARD_LIVE_HYPE},
+    ]
+    non_stable, stables = _spot_split_value(
+        spot_balances, prices={}, perp_account_value=0.0,
+    )
+    assert non_stable == pytest.approx(RDASHBOARD_REAL_NON_STABLE, abs=0.01)
+    assert non_stable < 100.0, (
+        "Non-stable bag must be dust-only ($43.59), not the inflated $1,648 "
+        "that included USDT0+USDH+USDC."
+    )
+    assert stables == pytest.approx(RDASHBOARD_REAL_STABLES_IDLE, abs=0.01)
+
+
+def test_spot_non_stable_with_active_perp_drops_usdc_only():
+    """When perp is active, USDC is skipped (Unified Account) but USDT0/USDH
+    still go to stables — they are independent on-chain spots."""
+    from modules.portfolio_snapshot import _spot_split_value
+
+    spot_balances = [
+        {"coin": "USDC", "total": RDASHBOARD_LIVE_USDC, "entry_ntl": 0},
+        {"coin": "USDT0", "total": RDASHBOARD_LIVE_USDT0, "entry_ntl": 0},
+        {"coin": "USDH", "total": RDASHBOARD_LIVE_USDH, "entry_ntl": 0},
+        {"coin": "HYPE", "total": 0.3863, "entry_ntl": RDASHBOARD_LIVE_HYPE},
+    ]
+    non_stable, stables = _spot_split_value(
+        spot_balances, prices={}, perp_account_value=2_900.0,
+    )
+    # Non-stable still excludes ALL stablecoins.
+    assert non_stable == pytest.approx(RDASHBOARD_LIVE_HYPE, abs=0.01)
+    # Stables exclude USDC (already in marginSummary.accountValue) but keep
+    # USDT0 + USDH — those are independent on-chain spot tokens.
+    assert stables == pytest.approx(
+        RDASHBOARD_LIVE_USDT0 + RDASHBOARD_LIVE_USDH, abs=0.01,
+    )
+
+
+def test_dashboard_capital_block_no_double_count():
+    """The Capital block must show "Spot non-stable: $43" (real dust) — NOT
+    "Spot non-USDC: $1.7K" (the pre-fix inflated string)."""
+    net = compute_net_capital({
+        "hl_collateral_total": 76_500.0,  # includes UETH/USDH-borrow flywheel
+        "hl_debt_total": 44_900.0,
+        "perp_equity_total": 2_900.0,
+        # spot_usd_total now means non-stable only — feed dust value.
+        "spot_usd_total": RDASHBOARD_REAL_NON_STABLE,
+        "spot_stables_total": (
+            RDASHBOARD_LIVE_USDT0 + RDASHBOARD_LIVE_USDH
+        ),
+        "upnl_perp_total": 0.0,
+    })
+
+    tg = format_net_capital_telegram(net)
+    html = render_net_capital_html(net, _fmt_compact_usd, _signed)
+
+    # Telegram render: real dust value, NOT the inflated $1.7K. The
+    # compact-USD formatter rounds $43.59 → "$44" at the integer step,
+    # so we anchor the assertion on the leading "$4" prefix and on the
+    # ABSENCE of the buggy "$1.7K" string under the non-stable line.
+    assert "Spot non-stable:" in tg, tg
+    assert "Spot non-stable: $1.7K" not in tg, "Pre-fix bug string still present"
+    assert "Spot non-stable: $1,7" not in tg
+    # The figure must be a sub-$50 dust number — never the inflated $1.6K
+    # USDT0+USDH that used to be lumped in.
+    import re
+    m = re.search(r"Spot non-stable: \$(\d+(?:\.\d+)?)", tg)
+    assert m is not None, f"No Spot non-stable line found:\n{tg}"
+    rendered_non_stable = float(m.group(1))
+    assert rendered_non_stable < 100.0, (
+        f"Spot non-stable rendered as ${rendered_non_stable} — should be "
+        f"<$100 dust, indicates stables are still being lumped in."
+    )
+
+    # HTML render: same — dust only, no $1.7K under the non-stable line.
+    assert "Spot non-stable" in html
+    # Stables get their own informative line.
+    assert "Spot stables (cash equiv)" in tg
+    assert "Spot stables (cash equiv)" in html
+
+
+def test_net_excludes_stables_per_bcd_directive():
+    """BCD directive: stables son cash equivalente, NO exposure. NET must
+    equal HL_net + perp + non_stable, with stables surfaced separately."""
+    n = compute_net_capital({
+        "hl_collateral_total": 76_500.0,
+        "hl_debt_total": 44_900.0,
+        "perp_equity_total": 2_900.0,
+        "spot_usd_total": 43.59,
+        "spot_stables_total": 1_605.45,  # USDT0 + USDH idle
+        "upnl_perp_total": 0.0,
+    })
+    expected_net = (76_500.0 - 44_900.0) + 2_900.0 + 43.59  # 34,543.59
+    assert n.net_total_usd == pytest.approx(expected_net, abs=0.01)
+    # Stables surfaced separately — NOT folded into net_total_usd.
+    assert n.spot_stables_usd == pytest.approx(1_605.45, abs=0.01)
+    assert n.spot_non_stable_usd == pytest.approx(43.59, abs=0.01)
+
+
+def test_backward_compat_spot_non_usdc_alias():
+    """Legacy callers / tests that still reach for ``spot_non_usdc_usd``
+    transparently get the corrected non-stable value."""
+    n = compute_net_capital({
+        "hl_collateral_total": 0.0,
+        "hl_debt_total": 0.0,
+        "perp_equity_total": 0.0,
+        "spot_usd_total": 99.99,
+        "spot_stables_total": 1_000.0,
+        "upnl_perp_total": 0.0,
+    })
+    assert n.spot_non_usdc_usd == n.spot_non_stable_usd
+    assert n.spot_non_usdc_usd == pytest.approx(99.99, abs=0.01)
+
+
+def test_estimate_spot_split_in_formatters():
+    """Mirror of the snapshot helper for the /reporte banner builder.
+    Bug surface was wider than just portfolio_snapshot — formatters had
+    an independent ``_estimate_spot_usd`` with the same bug."""
+    from templates.formatters import _estimate_spot_split, _estimate_spot_usd
+
+    spot_balances = [
+        {"coin": "USDC", "total": 1_500.0, "entry_ntl": 0},
+        {"coin": "USDT0", "total": 1_245.0, "entry_ntl": 0},
+        {"coin": "USDH", "total": 360.0, "entry_ntl": 0},
+        {"coin": "HYPE", "total": 0.4, "entry_ntl": 16.92},
+    ]
+    non_stable, stables = _estimate_spot_split(spot_balances, perp_account_value=2_900.0)
+    assert non_stable == pytest.approx(16.92, abs=0.01)
+    assert stables == pytest.approx(1_245.0 + 360.0, abs=0.01)  # USDC dropped (active perp)
+    # Backward-compat wrapper returns non-stable only — bug is closed.
+    assert _estimate_spot_usd(spot_balances, perp_account_value=2_900.0) == pytest.approx(
+        16.92, abs=0.01,
+    )
