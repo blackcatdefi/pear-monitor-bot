@@ -36,7 +36,7 @@ function createBot(token, hlApi, monitor, hlendApi = null) {
   bot.setMyCommands([
     { command: 'start',         description: '🍐 Start' },
     { command: 'track',         description: '🎯 Track external wallets' },
-    { command: 'signals',       description: '📡 Official signals channel' },
+    { command: 'copy_trading',  description: '🤖 Copy trading menu' },
     { command: 'copy_auto',     description: '🤖 Copy auto (MANUAL/AUTO)' },
     { command: 'capital',       description: '💰 Capital per signal' },
     { command: 'timezone',      description: '🌐 Timezone' },

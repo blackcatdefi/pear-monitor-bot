@@ -4,9 +4,9 @@ const test = require('node:test');
 const assert = require('node:assert');
 const builder = require('../src/copyAlertBuilder');
 
+// R-PUBLIC-V4-COPYMENU — BCD_SIGNALS removed; only BCD_WALLET + CUSTOM_WALLET.
 test('source label maps types to human names', () => {
   assert.equal(builder._sourceLabel('BCD_WALLET'), 'BCD Wallet');
-  assert.equal(builder._sourceLabel('BCD_SIGNALS'), 'BCD Signals');
   assert.equal(builder._sourceLabel('CUSTOM_WALLET'), 'Custom');
   assert.equal(builder._sourceLabel('XYZ'), 'XYZ');
 });
@@ -40,7 +40,8 @@ test('OPEN alert renders source + composition + capital + risk', () => {
 
 test('CLOSE alert renders close text and no Pear button', () => {
   const { text, keyboard } = builder.buildAlert({
-    source: 'BCD_SIGNALS',
+    source: 'CUSTOM_WALLET',
+    sourceLabel: 'Whale 1',
     userId: 2,
     capital: 100,
     sl_pct: 50,
@@ -49,7 +50,7 @@ test('CLOSE alert renders close text and no Pear button', () => {
     positions: [{ coin: 'ENA', side: 'SHORT' }],
     event: 'CLOSE',
   });
-  assert.match(text, /BASKET CLOSED — BCD Signals/);
+  assert.match(text, /BASKET CLOSED — Whale 1/);
   const allButtons = keyboard.inline_keyboard.flat();
   // No Pear hero button on close
   assert.ok(!allButtons.find((b) => b.url && /pear\.garden/.test(b.url)));
@@ -70,11 +71,13 @@ test('AUTO mode adds the AUTO wording', () => {
   assert.match(text, /AUTO mode/i);
 });
 
-test('uses provided pearUrl when given (signals path)', () => {
+test('uses provided pearUrl when given (fallback path: empty positions)', () => {
+  // V4: when no positions can be parsed (mixed-side string passthrough),
+  // builder must fall through to spec.pearUrl as the hero URL.
   const url =
     'https://app.pear.garden/trade/hl/USDC-WLD+STRK?referral=BlackCatDeFi';
   const { keyboard } = builder.buildAlert({
-    source: 'BCD_SIGNALS',
+    source: 'BCD_WALLET',
     userId: 1,
     capital: 200,
     sl_pct: 50,

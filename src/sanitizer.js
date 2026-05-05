@@ -60,17 +60,24 @@ function isAllowedBlackCat(line) {
   if (/BCD_PEAR_REFERRAL_LINK/.test(line)) return true;
   // Allow the bare literal referral-code value (default fallback in modules)
   if (/^\s*BlackCatDeFi\s*$/.test(line)) return true;
-  // R-AUTOCOPY — public Telegram channel handle is allowed (it's the
-  // canonical signals channel, not a persona reference).
+  // R-AUTOCOPY — public Telegram channel handles are allowed (canonical
+  // community-link channels, not persona references).
   if (/@BlackCatDeFiSignals/i.test(line)) return true;
+  if (/@BlackCatDeFiThesis/i.test(line)) return true;
   if (/SIGNALS_CHANNEL/i.test(line)) return true;
+  if (/THESIS_CHANNEL/i.test(line)) return true;
   if (/blackcatdefisignals/i.test(line)) return true;
+  if (/blackcatdefithesis/i.test(line)) return true;
+  // R-PUBLIC-V4-COPYMENU — community-link URL buttons in /start.
+  // t.me/BlackCatDeFi{Signals,Thesis} — informational only, NOT copy sources.
+  if (/t\.me\/BlackCatDeFi(?:Signals|Thesis)/i.test(line)) return true;
   // R-AUTOCOPY-MENU env-var keys + source-label callsigns rendered to
   // public users (same flavor as the @BlackCatDeFiSignals handle — public
-  // identifier of a wallet/signal feed, not persona reference).
+  // identifier of a wallet/channel feed, not persona reference).
   if (/BCD_SIGNALS_CHANNEL/i.test(line)) return true;
+  if (/BCD_THESIS_CHANNEL/i.test(line)) return true;
   if (/BCD_WALLET\b/.test(line)) return true;
-  if (/\bBCD\s+(?:Wallet|Signals)\b/i.test(line)) return true;
+  if (/\bBCD\s+(?:Wallet|Signals|Thesis)\b/i.test(line)) return true;
   // R-PUBLIC-SIMPLIFY — brand-as-trader-attribution allowed ONLY for the
   // copy-trading hero + live-performance titles. Conversion lever: public
   // users won't copy unknown signals, they need to know who trades them.
@@ -81,6 +88,17 @@ function isAllowedBlackCat(line) {
   ) {
     return true;
   }
+  // R-PUBLIC-V4-COPYMENU — copy-trading menu uses "Black Cat Wallet" /
+  // "Copy Black Cat Wallet" as the auto-mirror source label. Same flavor
+  // as SIMPLIFY: brand-as-trader-attribution, kept conversion-critical.
+  // Allow only the menu-shape phrases.
+  if (/Copy\s+Black\s*Cat\s+Wallet/i.test(line)) return true;
+  if (/Black\s*Cat\s+Wallet/i.test(line)) return true;
+  // /copy_trading submenu summary line: "🐈‍⬛ Black Cat: …"
+  if (/Black\s*Cat\s*:\s*\$\{/i.test(line)) return true;
+  // /copy_trading boot log message — not user-facing per se, but the
+  // sanitizer scans all source literals.
+  if (/V4 attached:.*Black\s*Cat/i.test(line)) return true;
   return false;
 }
 

@@ -31,6 +31,13 @@ const STATES = {
   // no persistent subscription unless the user explicitly /track-s the
   // wallet first.
   AWAITING_HF_ADDRESS: 'AWAITING_HF_ADDRESS',
+  // R-PUBLIC-V4-COPYMENU — 3-step add flow for the custom-wallet copy-trading
+  // submenu. User pastes 0x address → optional label → optional per-wallet
+  // capital override. All three steps share the same userStateMachine
+  // timeout so an abandoned add flow self-clears.
+  COPY_TRADE_AWAIT_ADDRESS: 'COPY_TRADE_AWAIT_ADDRESS',
+  COPY_TRADE_AWAIT_LABEL: 'COPY_TRADE_AWAIT_LABEL',
+  COPY_TRADE_AWAIT_CAPITAL: 'COPY_TRADE_AWAIT_CAPITAL',
 };
 
 function _timeoutMs() {

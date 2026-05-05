@@ -1,27 +1,31 @@
 'use strict';
 
 /**
- * R-AUTOCOPY-MENU — /copy_trading unified menu.
+ * R-PUBLIC-V4-COPYMENU — /copy_trading + Copy Trading submenu.
  *
- *   /copy_trading             → top-level menu (3 modes)
- *   callback copytrade:bcd    → BCD wallet sub-menu
- *   callback copytrade:sig    → BCD signals sub-menu
- *   callback copytrade:custom → custom wallets sub-menu
+ *   /copy_trading                  → top-level menu (Black Cat / Custom / Settings)
+ *   callback copytrade:bcd         → BCD wallet sub-menu
+ *   callback copytrade:custom      → custom wallets sub-menu
+ *   callback copytrade:settings    → user settings sub-menu
+ *   callback copytrade:menu        → back to top
+ *   callback copytrade:back_start  → back to /start (deletes current msg)
  *
- * Each sub-menu lets the user toggle ON/OFF, change capital, change mode
- * (MANUAL/AUTO), and (for custom) add/remove addresses. Capital changes
- * happen via /capital <amount> (already wired) — the sub-menu shows a
- * quick-help message linking to /capital.
+ * V4 changes vs V3 (R-AUTOCOPY-MENU):
+ *   • BCD_SIGNALS source REMOVED — only on-chain wallet polling.
+ *   • Custom wallets cap reduced 10 → 3.
+ *   • New ⚙️ Settings sub-menu (basket-level only / pause all / wallet list).
+ *   • Single back button always returns to top-level menu.
+ *   • Top-level menu is the ONLY entry point invoked from /start.
  *
- * State for the "add custom wallet" two-step flow lives in userStateMachine
- * (already used by R-PUBLIC's /track flow).
+ * State for the "add custom wallet" three-step flow lives in
+ * userStateMachine (already used by R-PUBLIC's /track flow). We monkey-patch
+ * 3 V4 states into the state machine's allow-list because userStateMachine
+ * validates set-states against `Object.values(STATES).includes`.
  */
 
 const store = require('./copyTradingStore');
 const sm = require('./userStateMachine');
 
-// R-AUTOCOPY-MENU — monkey-patch our 3-step add-flow states into the state
-// machine's allowed-list (it validates with `Object.values(STATES).includes`).
 sm.STATES.COPY_TRADE_AWAIT_ADDRESS =
   sm.STATES.COPY_TRADE_AWAIT_ADDRESS || 'COPY_TRADE_AWAIT_ADDRESS';
 sm.STATES.COPY_TRADE_AWAIT_LABEL =
@@ -48,42 +52,43 @@ function _shortAddr(a) {
 function _renderTopMenu(userId) {
   const t = store.getTargets(userId);
   const bcd = t[store.TYPE_BCD_WALLET];
-  const sig = t[store.TYPE_BCD_SIGNALS];
   const customs = t[store.TYPE_CUSTOM_WALLET] || [];
   const customsActive = customs.filter((x) => x.enabled).length;
-  const customsTotalCap = customs
-    .filter((x) => x.enabled)
-    .reduce((s, x) => s + (Number(x.capital_usdc) || 0), 0);
+  const settings = t.settings || {};
+  const paused = !!settings.paused;
 
   const lines = [
-    '🤖 *Copy Trading*',
+    '🤖 *Copy Trading Menu*',
     '',
-    'Pick what to copy:',
+    'Choose what to copy automatically:',
     '',
-    `🐈‍⬛ *BCD Wallet*  ${bcd && bcd.enabled ? HF_HEADER_OK : HF_HEADER_OFF}`,
+    `🐈‍⬛ *Black Cat Wallet*  ${bcd && bcd.enabled ? HF_HEADER_OK : HF_HEADER_OFF}`,
     `   Capital: ${_fmtMoney(bcd ? bcd.capital_usdc : 0)} · Wallet: \`${_shortAddr(store.BCD_WALLET)}\``,
     '',
-    `📡 *BCD Signals*  ${sig && sig.enabled ? HF_HEADER_OK : HF_HEADER_OFF}`,
-    `   Capital: ${_fmtMoney(sig ? sig.capital_usdc : 0)} · @${store.BCD_SIGNALS_CHANNEL}`,
+    `👁 *Custom Wallets*  ${customsActive > 0 ? HF_HEADER_OK : HF_HEADER_OFF}`,
+    `   ${customsActive}/${customs.length} active · Cap: ${customs.length}/${store.MAX_CUSTOM_PER_USER}`,
     '',
-    `👥 *Custom Wallets*  ${customsActive > 0 ? HF_HEADER_OK : HF_HEADER_OFF}`,
-    `   ${customsActive}/${customs.length} active · Total: ${_fmtMoney(customsTotalCap)}`,
-    '',
-    '─────────────',
-    '*Global risk preset:* SL 50% / Trailing 10% activation 30%',
   ];
+  if (paused) {
+    lines.push('⏸️ _All copy notifications paused (toggle in Settings)._');
+    lines.push('');
+  }
+  lines.push('─────────────');
+  lines.push('Source: on-chain wallet polling only.');
+  lines.push('_Per-leg alerts disabled by default — basket-level events only._');
+
   const keyboard = {
     inline_keyboard: [
-      [{ text: '🐈‍⬛ BCD Wallet', callback_data: 'copytrade:bcd' }],
-      [{ text: '📡 BCD Signals Channel', callback_data: 'copytrade:sig' }],
-      [{ text: '👥 Custom Wallets', callback_data: 'copytrade:custom' }],
-      [{ text: 'ℹ️ How it works', callback_data: 'copytrade:howto' }],
+      [{ text: '🐈‍⬛ COPY BLACK CAT WALLET — auto-mirror', callback_data: 'copytrade:bcd' }],
+      [{ text: '👁 COPY CUSTOM WALLET — paste address', callback_data: 'copytrade:custom' }],
+      [{ text: '⚙️ MY COPY SETTINGS', callback_data: 'copytrade:settings' }],
+      [{ text: '← BACK', callback_data: 'copytrade:back_start' }],
     ],
   };
   return { text: lines.join('\n'), keyboard };
 }
 
-// --- Sub-menus -----------------------------------------------------------
+// --- Sub-menu: Black Cat wallet ------------------------------------------
 
 function _renderBcdMenu(userId) {
   const cfg = store.getTarget(userId, store.TYPE_BCD_WALLET);
@@ -91,21 +96,30 @@ function _renderBcdMenu(userId) {
   const cap = cfg ? cfg.capital_usdc : store.DEFAULT_CAPITAL;
   const mode = cfg ? cfg.mode : 'MANUAL';
   const lines = [
-    '🐈‍⬛ *Copy BCD Wallet*',
+    '🐈‍⬛ *Copy Black Cat Wallet*',
     '',
-    `Auto-tracking wallet \`${_shortAddr(store.BCD_WALLET)}\`.`,
-    'When it opens/closes a basket, you get an alert with a pre-configured Pear link.',
+    `Auto-mirror of wallet \`${_shortAddr(store.BCD_WALLET)}\`.`,
+    'Polled every 60s. When this wallet opens or closes a basket, you',
+    'receive a DM with a 1-tap copy URL pre-filled with your size.',
     '',
-    `Your capital: ${_fmtMoney(cap)}`,
+    `Your size multiplier: ${(cap / store.DEFAULT_CAPITAL).toFixed(2)}x ` +
+      `(≈ ${_fmtMoney(cap)} per basket of ${_fmtMoney(store.DEFAULT_CAPITAL)})`,
     `Status: ${enabled ? '🟢 ENABLED' : '⚪ DISABLED'}`,
     `Mode: ${mode}`,
   ];
   const keyboard = {
     inline_keyboard: [
-      [{ text: '💰 Change capital', callback_data: 'copytrade:bcd:cap_help' }],
+      [
+        { text: '💰 0.5x', callback_data: 'copytrade:bcd:size:0.5' },
+        { text: '💰 1x',   callback_data: 'copytrade:bcd:size:1'   },
+        { text: '💰 2x',   callback_data: 'copytrade:bcd:size:2'   },
+      ],
+      [{ text: '💵 Custom capital ($)', callback_data: 'copytrade:bcd:cap_help' }],
       [
         {
-          text: mode === 'AUTO' ? '🔄 Mode: AUTO (switch to MANUAL)' : '🔄 Mode: MANUAL (switch to AUTO)',
+          text: mode === 'AUTO'
+            ? '🔄 Mode: AUTO (switch to MANUAL)'
+            : '🔄 Mode: MANUAL (switch to AUTO)',
           callback_data: 'copytrade:bcd:toggle_mode',
         },
       ],
@@ -121,60 +135,19 @@ function _renderBcdMenu(userId) {
   return { text: lines.join('\n'), keyboard };
 }
 
-function _renderSigMenu(userId) {
-  const cfg = store.getTarget(userId, store.TYPE_BCD_SIGNALS);
-  const enabled = cfg && cfg.enabled;
-  const cap = cfg ? cfg.capital_usdc : store.DEFAULT_CAPITAL;
-  const mode = cfg ? cfg.mode : 'MANUAL';
-  const lines = [
-    '📡 *Copy BCD Signals Channel*',
-    '',
-    `Auto-reading @${store.BCD_SIGNALS_CHANNEL}.`,
-    'When a signal with a Pear link is posted,',
-    'you get an instant alert with the copied link and your capital.',
-    '',
-    `Your capital: ${_fmtMoney(cap)}`,
-    `Status: ${enabled ? '🟢 ENABLED' : '⚪ DISABLED'}`,
-    `Mode: ${mode}`,
-  ];
-  const keyboard = {
-    inline_keyboard: [
-      [
-        {
-          text: '📲 Open channel',
-          url: `https://t.me/${store.BCD_SIGNALS_CHANNEL}`,
-        },
-      ],
-      [{ text: '💰 Change capital', callback_data: 'copytrade:sig:cap_help' }],
-      [
-        {
-          text: mode === 'AUTO' ? '🔄 Mode: AUTO (switch to MANUAL)' : '🔄 Mode: MANUAL (switch to AUTO)',
-          callback_data: 'copytrade:sig:toggle_mode',
-        },
-      ],
-      [
-        {
-          text: enabled ? '🚦 Disable' : '🚦 Enable',
-          callback_data: 'copytrade:sig:toggle_enabled',
-        },
-      ],
-      [{ text: '← Back', callback_data: 'copytrade:menu' }],
-    ],
-  };
-  return { text: lines.join('\n'), keyboard };
-}
+// --- Sub-menu: Custom wallets --------------------------------------------
 
 function _renderCustomMenu(userId) {
   const slot = store.getTargets(userId);
   const customs = slot[store.TYPE_CUSTOM_WALLET] || [];
   const lines = [
-    '👥 *Copy Custom Wallets*',
+    '👁 *Copy Custom Wallets*',
     '',
     `Wallets you're copying: ${customs.length}/${store.MAX_CUSTOM_PER_USER}`,
     '',
   ];
   if (customs.length === 0) {
-    lines.push('_You haven\'t added any yet._');
+    lines.push('_None yet. Tap *➕ Add wallet* and paste a Hyperliquid address._');
   } else {
     customs.forEach((entry, idx) => {
       const tag = entry.enabled ? '🟢 ON' : '⚪ OFF';
@@ -186,6 +159,8 @@ function _renderCustomMenu(userId) {
   const rows = [];
   if (customs.length < store.MAX_CUSTOM_PER_USER) {
     rows.push([{ text: '➕ Add wallet', callback_data: 'copytrade:custom:add' }]);
+  } else {
+    rows.push([{ text: `⚠️ Limit ${store.MAX_CUSTOM_PER_USER}/${store.MAX_CUSTOM_PER_USER} — remove one to add another`, callback_data: 'copytrade:custom' }]);
   }
   for (const entry of customs) {
     const short = _shortAddr(entry.ref);
@@ -204,35 +179,52 @@ function _renderCustomMenu(userId) {
   return { text: lines.join('\n'), keyboard: { inline_keyboard: rows } };
 }
 
-function _renderHowto() {
+// --- Sub-menu: Settings --------------------------------------------------
+
+function _renderSettingsMenu(userId) {
+  const settings = store.getSettings(userId);
+  const t = store.getTargets(userId);
+  const bcd = t[store.TYPE_BCD_WALLET];
+  const customs = t[store.TYPE_CUSTOM_WALLET] || [];
+
   const lines = [
-    'ℹ️ *How Copy Trading works*',
+    '⚙️ *My Copy Settings*',
     '',
-    '*3 modes:*',
+    '*Active subscriptions*',
+    `  🐈‍⬛ Black Cat: ${bcd && bcd.enabled ? '🟢 ON' : '⚪ OFF'}`,
+    `  👁 Custom wallets: ${customs.filter((x) => x.enabled).length}/${customs.length}`,
     '',
-    '🐈‍⬛ *BCD Wallet* — the bot watches BCD\'s on-chain wallet (HyperLiquid) every 60s. When it opens/closes a basket, you get an alert.',
+    `Default capital: ${_fmtMoney(store.DEFAULT_CAPITAL)} (env COPY_AUTO_DEFAULT_CAPITAL)`,
     '',
-    '📡 *BCD Signals* — the bot reads the public channel @BlackCatDeFiSignals every 30s. When there\'s a signal with a Pear link, you get it.',
+    `*Basket-level only*: ${settings.basket_level_only ? '🟢 ON' : '⚪ OFF'}`,
+    '_(when ON, you only get one alert per basket OPEN/CLOSE — never per leg)_',
     '',
-    '👥 *Custom Wallets* — add any 0x... wallet and the bot tracks it every 60s with your configured capital.',
-    '',
-    '*Modes (MANUAL vs AUTO):*',
-    '  • MANUAL — standard "Copy on Pear" button.',
-    '  • AUTO — pre-armed alert with "everything\'s ready, you sign" wording.',
-    '',
-    '*Global risk preset:* SL 50% basket / Trailing 10% activation 30%.',
-    '',
-    '⚠️ Pear has no public execution API → you always sign from your wallet.',
+    `*Paused*: ${settings.paused ? '⏸️ YES' : '▶️ NO'}`,
+    '_(silences all copy DMs without losing your config)_',
   ];
-  return {
-    text: lines.join('\n'),
-    keyboard: {
-      inline_keyboard: [[{ text: '← Back', callback_data: 'copytrade:menu' }]],
-    },
+  const keyboard = {
+    inline_keyboard: [
+      [
+        {
+          text: settings.basket_level_only
+            ? '🚦 Per-leg alerts (currently OFF — turn ON)'
+            : '🚦 Basket-level only (currently OFF — turn ON)',
+          callback_data: 'copytrade:settings:toggle_basket_level',
+        },
+      ],
+      [
+        {
+          text: settings.paused ? '▶️ Resume copy DMs' : '⏸️ Pause copy DMs',
+          callback_data: 'copytrade:settings:toggle_paused',
+        },
+      ],
+      [{ text: '← Back', callback_data: 'copytrade:menu' }],
+    ],
   };
+  return { text: lines.join('\n'), keyboard };
 }
 
-// --- Callbacks -----------------------------------------------------------
+// --- Callback dispatch ---------------------------------------------------
 
 async function _editOrSend(bot, chatId, userId, msgId, payload) {
   const opts = {
@@ -249,16 +241,17 @@ async function _editOrSend(bot, chatId, userId, msgId, payload) {
       });
       return;
     } catch (_) {
-      // Fall through to send-new (some Telegram quirks like "message not modified").
+      // Fall through to send-new (Telegram quirks like "message not modified").
     }
   }
   await bot.sendMessage(chatId, payload.text, opts);
 }
 
 async function showTopMenu(bot, chatId, userId) {
-  await bot.sendMessage(chatId, _renderTopMenu(userId).text, {
+  const payload = _renderTopMenu(userId);
+  await bot.sendMessage(chatId, payload.text, {
     parse_mode: 'Markdown',
-    reply_markup: _renderTopMenu(userId).keyboard,
+    reply_markup: payload.keyboard,
   });
 }
 
@@ -270,7 +263,7 @@ async function _handleCallback(bot, cb) {
   try { await bot.answerCallbackQuery(cb.id); } catch (_) {}
 
   const parts = cb.data.split(':');
-  // copytrade:menu | copytrade:bcd | copytrade:sig | copytrade:custom | copytrade:skip | copytrade:howto
+  // copytrade:menu | copytrade:bcd | copytrade:custom | copytrade:settings | copytrade:skip | copytrade:back_start
   const root = parts[1] || '';
   const sub = parts[2] || '';
   const arg = parts.slice(3).join(':') || null;
@@ -278,11 +271,27 @@ async function _handleCallback(bot, cb) {
   if (root === '' || root === 'menu') {
     return _editOrSend(bot, chatId, userId, msgId, _renderTopMenu(userId));
   }
-  if (root === 'howto') {
-    return _editOrSend(bot, chatId, userId, msgId, _renderHowto());
-  }
   if (root === 'skip') {
-    return; // ack only
+    return; // ack only — used by alert keyboards
+  }
+  if (root === 'back_start') {
+    // Try to delete current menu, then return user to /start hero.
+    if (msgId) {
+      try { await bot.deleteMessage(chatId, msgId); } catch (_) {}
+    }
+    let simplified = null;
+    try { simplified = require('./simplifiedStart'); } catch (_) {}
+    if (simplified && simplified.isEnabled() && simplified.handleStartSimple) {
+      try {
+        await simplified.handleStartSimple(bot, {
+          chat: { id: chatId },
+          from: { id: userId },
+          text: '/start',
+        });
+        return;
+      } catch (_) {}
+    }
+    return;
   }
 
   if (root === 'bcd') {
@@ -297,6 +306,21 @@ async function _handleCallback(bot, cb) {
       );
       return;
     }
+    if (sub === 'size') {
+      const mult = parseFloat(arg);
+      if (Number.isFinite(mult) && mult > 0) {
+        const next = store.DEFAULT_CAPITAL * mult;
+        try {
+          store.setTarget(userId, store.TYPE_BCD_WALLET, null, {
+            capital_usdc: next,
+          });
+        } catch (e) {
+          await bot.sendMessage(chatId, `⚠️ ${e.message || 'Invalid size'}`);
+          return;
+        }
+      }
+      return _editOrSend(bot, chatId, userId, msgId, _renderBcdMenu(userId));
+    }
     if (sub === 'toggle_mode') {
       const cur = store.getTarget(userId, store.TYPE_BCD_WALLET) || {};
       const next = (cur.mode === 'AUTO') ? 'MANUAL' : 'AUTO';
@@ -310,40 +334,25 @@ async function _handleCallback(bot, cb) {
     }
   }
 
-  if (root === 'sig') {
-    if (!sub) {
-      return _editOrSend(bot, chatId, userId, msgId, _renderSigMenu(userId));
-    }
-    if (sub === 'cap_help') {
-      await bot.sendMessage(
-        chatId,
-        `💰 Set capital:\n\nUsage: \`/capital_signals <amount>\`  (e.g. \`/capital_signals 250\`)\n\nMin: $${store.MIN_CAPITAL} · Max: $${store.MAX_CAPITAL.toLocaleString()}`,
-        { parse_mode: 'Markdown' }
-      );
-      return;
-    }
-    if (sub === 'toggle_mode') {
-      const cur = store.getTarget(userId, store.TYPE_BCD_SIGNALS) || {};
-      const next = (cur.mode === 'AUTO') ? 'MANUAL' : 'AUTO';
-      store.setTarget(userId, store.TYPE_BCD_SIGNALS, null, { mode: next });
-      return _editOrSend(bot, chatId, userId, msgId, _renderSigMenu(userId));
-    }
-    if (sub === 'toggle_enabled') {
-      const cur = store.getTarget(userId, store.TYPE_BCD_SIGNALS) || {};
-      store.setTarget(userId, store.TYPE_BCD_SIGNALS, null, { enabled: !cur.enabled });
-      return _editOrSend(bot, chatId, userId, msgId, _renderSigMenu(userId));
-    }
-  }
-
   if (root === 'custom') {
     if (!sub) {
       return _editOrSend(bot, chatId, userId, msgId, _renderCustomMenu(userId));
     }
     if (sub === 'add') {
+      const slot = store.getTargets(userId);
+      const customs = slot[store.TYPE_CUSTOM_WALLET] || [];
+      if (customs.length >= store.MAX_CUSTOM_PER_USER) {
+        await bot.sendMessage(
+          chatId,
+          `⚠️ You hit the ${store.MAX_CUSTOM_PER_USER}-wallet limit. Remove one before adding another.`,
+          { parse_mode: 'Markdown' }
+        );
+        return;
+      }
       sm.setState(userId, sm.STATES.COPY_TRADE_AWAIT_ADDRESS, { msgId });
       await bot.sendMessage(
         chatId,
-        '👥 Send the wallet address to copy (must start with `0x` and be 40 hex chars):',
+        '👁 Send the wallet address to copy (must start with `0x` and be 40 hex chars):',
         { parse_mode: 'Markdown' }
       );
       return;
@@ -358,9 +367,25 @@ async function _handleCallback(bot, cb) {
       return _editOrSend(bot, chatId, userId, msgId, _renderCustomMenu(userId));
     }
   }
+
+  if (root === 'settings') {
+    if (!sub) {
+      return _editOrSend(bot, chatId, userId, msgId, _renderSettingsMenu(userId));
+    }
+    if (sub === 'toggle_basket_level') {
+      const cur = store.getSettings(userId);
+      store.setSetting(userId, 'basket_level_only', !cur.basket_level_only);
+      return _editOrSend(bot, chatId, userId, msgId, _renderSettingsMenu(userId));
+    }
+    if (sub === 'toggle_paused') {
+      const cur = store.getSettings(userId);
+      store.setSetting(userId, 'paused', !cur.paused);
+      return _editOrSend(bot, chatId, userId, msgId, _renderSettingsMenu(userId));
+    }
+  }
 }
 
-// --- Address-input two-step state machine -------------------------------
+// --- Address-input three-step state machine ------------------------------
 
 async function _handleTextInput(bot, msg) {
   const userId = msg.from && msg.from.id ? msg.from.id : msg.chat.id;
@@ -369,8 +394,6 @@ async function _handleTextInput(bot, msg) {
   if (!text || text.startsWith('/')) return false; // commands handled elsewhere
   const state = sm.getState(userId);
   if (!state || !state.state || state.state === sm.STATES.IDLE) return false;
-  // Only intercept our copy-trade conversational states; other modules own
-  // the rest (e.g. AWAITING_WALLET_ADDRESS / AWAITING_PORTFOLIO_ADDRESS).
   const ours = new Set([
     sm.STATES.COPY_TRADE_AWAIT_ADDRESS,
     sm.STATES.COPY_TRADE_AWAIT_LABEL,
@@ -450,7 +473,7 @@ async function _handleTextInput(bot, msg) {
   return false;
 }
 
-// --- /capital_bcd /capital_signals (alias) -------------------------------
+// --- /capital_bcd command ------------------------------------------------
 
 function _handleCapitalCmd(type, bot, msg) {
   const chatId = msg.chat.id;
@@ -491,10 +514,6 @@ function attach(bot) {
     try { _handleCapitalCmd(store.TYPE_BCD_WALLET, bot, msg); }
     catch (e) { console.error('[commandsCopyTrading] /capital_bcd failed:', e && e.message ? e.message : e); }
   });
-  bot.onText(/^\/capital_signals(?:@\w+)?(?:\s|$)/i, (msg) => {
-    try { _handleCapitalCmd(store.TYPE_BCD_SIGNALS, bot, msg); }
-    catch (e) { console.error('[commandsCopyTrading] /capital_signals failed:', e && e.message ? e.message : e); }
-  });
 
   bot.on('callback_query', async (cb) => {
     if (!cb.data || !cb.data.startsWith('copytrade:')) return;
@@ -512,7 +531,7 @@ function attach(bot) {
     }
   });
 
-  console.log('[commandsCopyTrading] attached: /copy_trading + sub-menus');
+  console.log('[commandsCopyTrading] V4 attached: /copy_trading + Black Cat / Custom / Settings');
 }
 
 module.exports = {
@@ -520,9 +539,8 @@ module.exports = {
   showTopMenu,
   _renderTopMenu,
   _renderBcdMenu,
-  _renderSigMenu,
   _renderCustomMenu,
-  _renderHowto,
+  _renderSettingsMenu,
   _handleCallback,
   _handleTextInput,
   _handleCapitalCmd,

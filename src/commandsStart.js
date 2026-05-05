@@ -261,15 +261,18 @@ async function _handleCallback(bot, cb) {
   }
 
   if (action === 'signals_menu') {
+    // R-PUBLIC-V4-COPYMENU — signals scraping was removed; this legacy
+    // start:signals_menu callback now redirects to the V4 copy-trading
+    // menu (the user's actual intent: "show me what's tradeable").
     try {
-      const cmdSignals = require('./commandsSignals');
-      await bot.sendMessage(chatId, cmdSignals._bodyText(), {
-        parse_mode: 'Markdown',
-        reply_markup: cmdSignals._menuKeyboard(),
-        disable_web_page_preview: true,
-      });
+      const cmdCT = require('./commandsCopyTrading');
+      await cmdCT.showTopMenu(bot, chatId, userId);
     } catch (_) {
-      await bot.sendMessage(chatId, t('start.tap_signals'), { parse_mode: 'Markdown' });
+      await bot.sendMessage(
+        chatId,
+        'Open the copy trading menu with /copy_trading.',
+        { parse_mode: 'Markdown' }
+      );
     }
     return true;
   }

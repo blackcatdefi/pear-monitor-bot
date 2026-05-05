@@ -54,13 +54,12 @@ test('Runtime user-facing strings have zero Spanish leaks', () => {
 
 test('Source files (excluding legacy/comment/regex/test) have no Spanish characters in user-facing literals', () => {
   // We scan source-level string LITERALS (single, double, template-tick).
-  // Comment lines are stripped first. legacy_es.js + i18n.js (shim) +
-  // signalsParser.js (bilingual regex by design) excluded.
+  // Comment lines are stripped first. legacy_es.js + i18n.js (shim) excluded.
+  // R-PUBLIC-V4-COPYMENU — signalsParser.js was deleted (signals scraper killed).
   const SRC_DIR = path.join(__dirname, '..', 'src');
   const EXCLUDE_FILES = new Set([
     'legacy_es.js',
     'i18n.js',
-    'signalsParser.js', // bilingual regex literal "activaci[oó]n" is intentional
     'sanitizer.js',     // contains spanish in BlackCat detection comments
   ]);
   const files = fs

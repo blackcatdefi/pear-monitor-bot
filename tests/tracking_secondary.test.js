@@ -85,28 +85,48 @@ test.beforeEach(() => {
   process.env.SIMPLIFY_START_ENABLED = 'true';
 });
 
+// Helper — locate the secondary tracking row regardless of layout drift.
+function _findTrackingRow(kb) {
+  return kb.inline_keyboard.find(
+    (row) =>
+      row.some((b) => b.callback_data === 'simple:track') &&
+      row.some((b) => b.callback_data === 'simple:hf')
+  );
+}
+
 // 1. Hero rows render BEFORE the tracking row (order matters for conversion).
 test('keyboard order: hero/size/perf/alerts come BEFORE the tracking row', async () => {
   const kb = await simplifiedStart._buildKeyboard(9101);
   assert.ok(kb && Array.isArray(kb.inline_keyboard));
-  // With basket live: hero + size + perf + alerts + tracking = 5 rows.
-  assert.strictEqual(kb.inline_keyboard.length, 5);
+  // R-PUBLIC-V4-COPYMENU layout: hero + size + perf + alerts + tracking +
+  // copy_trading + community = 7 rows.
+  assert.strictEqual(kb.inline_keyboard.length, 7);
   // Row 0 must be the hero (URL button, not a tracking callback).
   assert.match(kb.inline_keyboard[0][0].text, /COPY MY BASKET/i);
   assert.ok(kb.inline_keyboard[0][0].url);
-  // Tracking row must be LAST.
+  // Tracking row must come AFTER hero/size/perf/alerts.
+  const trackingIdx = kb.inline_keyboard.findIndex(
+    (row) => row.some((b) => b.callback_data === 'simple:track')
+  );
+  assert.ok(trackingIdx >= 4, 'tracking row must be at index >= 4');
+  const trackRow = kb.inline_keyboard[trackingIdx];
+  assert.ok(trackRow.some((b) => /TRACK/i.test(b.text)));
+  assert.ok(trackRow.some((b) => /HEALTH FACTOR/i.test(b.text)));
+  // V4 last row must be the community-links URL row.
   const last = kb.inline_keyboard[kb.inline_keyboard.length - 1];
-  assert.ok(last.some(b => /TRACK/i.test(b.text)));
-  assert.ok(last.some(b => /HEALTH FACTOR/i.test(b.text)));
+  assert.ok(last.every((b) => b.url));
+  assert.ok(last.some((b) => /Signals Channel/i.test(b.text)));
+  assert.ok(last.some((b) => /Thesis Channel/i.test(b.text)));
 });
 
 // 2. Secondary row has exactly 2 buttons.
 test('secondary row contains exactly 2 buttons (track + HF)', async () => {
   const kb = await simplifiedStart._buildKeyboard(9101);
-  const last = kb.inline_keyboard[kb.inline_keyboard.length - 1];
-  assert.strictEqual(last.length, 2);
-  assert.strictEqual(last[0].callback_data, 'simple:track');
-  assert.strictEqual(last[1].callback_data, 'simple:hf');
+  const trackRow = _findTrackingRow(kb);
+  assert.ok(trackRow, 'tracking row must exist');
+  assert.strictEqual(trackRow.length, 2);
+  assert.strictEqual(trackRow[0].callback_data, 'simple:track');
+  assert.strictEqual(trackRow[1].callback_data, 'simple:hf');
 });
 
 // 3. Even when there is NO live basket, the tracking row still appears.
@@ -116,12 +136,14 @@ test('tracking row renders even on empty basket fallback', async () => {
   bcdBasketCache.getActiveBasket = async () => [];
   try {
     const kb = await simplifiedStart._buildKeyboard(9101);
-    // No size selector when basket is empty: hero + perf + alerts + tracking = 4 rows.
-    assert.strictEqual(kb.inline_keyboard.length, 4);
-    const last = kb.inline_keyboard[kb.inline_keyboard.length - 1];
-    assert.strictEqual(last.length, 2);
-    assert.strictEqual(last[0].callback_data, 'simple:track');
-    assert.strictEqual(last[1].callback_data, 'simple:hf');
+    // R-PUBLIC-V4-COPYMENU empty-basket layout: hero + perf + alerts +
+    // tracking + copy_trading + community = 6 rows.
+    assert.strictEqual(kb.inline_keyboard.length, 6);
+    const trackRow = _findTrackingRow(kb);
+    assert.ok(trackRow, 'tracking row must exist on empty basket fallback');
+    assert.strictEqual(trackRow.length, 2);
+    assert.strictEqual(trackRow[0].callback_data, 'simple:track');
+    assert.strictEqual(trackRow[1].callback_data, 'simple:hf');
   } finally {
     bcdBasketCache.getActiveBasket = original;
   }

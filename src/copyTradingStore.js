@@ -1,42 +1,37 @@
 'use strict';
 
 /**
- * R-AUTOCOPY-MENU — Unified Copy Trading store (3 modes).
+ * R-PUBLIC-V4-COPYMENU — Unified Copy Trading store (2 modes).
  *
- * Persists per-user copy targets across three modes:
+ * Persists per-user copy targets across two modes:
  *   • BCD_WALLET       — auto-track BCD trading wallet 0xc7ae...1505
- *   • BCD_SIGNALS      — listen to @BlackCatDeFiSignals via t.me/s scraping
- *   • CUSTOM_WALLET    — any address the user adds (max 10 per user)
+ *   • CUSTOM_WALLET    — any address the user adds (max 3 per user)
  *
- * Storage shape (JSON on Railway Volume — no SQLite to keep Alpine builds
- * trivial; the spec mentioned SQLite but JSON gives us the same semantics
- * with zero native deps):
+ * NOTE — V4: BCD_SIGNALS has been removed. Signals scraping (channel
+ * polling for #signal posts) was killed because it produced too much noise
+ * for too little conversion lift. The only copy source now is on-chain
+ * wallet polling: either BCD's public wallet, or a custom address the user
+ * provides. The community signals/thesis Telegram channels remain available
+ * as URL buttons in /start (informational, NOT a copy source).
+ *
+ * Storage shape (JSON on Railway Volume `copy_trading_state.json`):
  *
  *   {
  *     "{userId}": {
  *       "BCD_WALLET":  { ...config, address: '0xc7ae...' } | null,
- *       "BCD_SIGNALS": { ...config } | null,
  *       "CUSTOM_WALLET": [
  *         { ref: '0xabc...', label, ...config },
  *         ...
- *       ]
+ *       ],
+ *       "settings": {
+ *         "basket_level_only": 1,   // suppress per-leg fan-out
+ *         "paused": 0               // global pause for this user
+ *       }
  *     }
  *   }
  *
  * Each config: { capital_usdc, mode, enabled, sl_pct, trailing_pct,
  *                trailing_activation_pct, created_at, updated_at }.
- *
- * Public API:
- *   getTargets(userId)            → returns full per-user object
- *   getTarget(userId, type, ref?) → returns single target or null
- *   setTarget(userId, type, ref?, partial) → upsert + persist
- *   removeTarget(userId, type, ref?)
- *   listEnabledByType(type)       → [{ userId, target }] across all users
- *   listAllCustomAddresses()      → unique [{address, subscribers:[userId,...]}]
- *
- *   markSignalSeen(messageId, payload) / hasSignalBeenSeen(messageId)
- *
- * Constants: BCD_WALLET, BCD_SIGNALS_CHANNEL, REFERRAL_CODE.
  */
 
 const fs = require('fs');
@@ -44,8 +39,6 @@ const path = require('path');
 
 const BCD_WALLET = (process.env.BCD_WALLET ||
   '0xc7ae23316b47f7e75f455f53ad37873a18351505').toLowerCase();
-const BCD_SIGNALS_CHANNEL =
-  process.env.BCD_SIGNALS_CHANNEL || 'BlackCatDeFiSignals';
 const REFERRAL_CODE = process.env.PEAR_REFERRAL_CODE || 'BlackCatDeFi';
 
 const MIN_CAPITAL = parseFloat(process.env.COPY_AUTO_MIN_CAPITAL || '10');
@@ -53,8 +46,10 @@ const MAX_CAPITAL = parseFloat(process.env.COPY_AUTO_MAX_CAPITAL || '50000');
 const DEFAULT_CAPITAL = parseFloat(
   process.env.COPY_AUTO_DEFAULT_CAPITAL || '100'
 );
+// V4: cap reduced from 10 → 3. Custom-wallet copy is *separate* from /track
+// (max 10) — users who want to monitor more wallets can still use /track.
 const MAX_CUSTOM_PER_USER = parseInt(
-  process.env.COPY_AUTO_MAX_TARGETS_PER_USER || '10',
+  process.env.COPY_TRADING_MAX_CUSTOM_PER_USER || '3',
   10
 );
 const DEFAULT_SL = 50;
@@ -62,9 +57,8 @@ const DEFAULT_TRAILING = 10;
 const DEFAULT_TRAILING_ACTIVATION = 30;
 
 const TYPE_BCD_WALLET = 'BCD_WALLET';
-const TYPE_BCD_SIGNALS = 'BCD_SIGNALS';
 const TYPE_CUSTOM_WALLET = 'CUSTOM_WALLET';
-const VALID_TYPES = [TYPE_BCD_WALLET, TYPE_BCD_SIGNALS, TYPE_CUSTOM_WALLET];
+const VALID_TYPES = [TYPE_BCD_WALLET, TYPE_CUSTOM_WALLET];
 
 const ADDRESS_RX = /^0x[a-fA-F0-9]{40}$/;
 
@@ -76,11 +70,9 @@ function _resolveDbPath(filename) {
   return path.join(root, filename);
 }
 
-const DB_PATH = _resolveDbPath('copy_trading.json');
-const SEEN_PATH = _resolveDbPath('signal_channel_seen.json');
+const DB_PATH = _resolveDbPath('copy_trading_state.json');
 
 let _store = null;
-let _seen = null;
 
 function _ensureDir(p) {
   try {
@@ -128,39 +120,6 @@ function _saveStore() {
   }
 }
 
-function _loadSeen() {
-  if (_seen !== null) return _seen;
-  try {
-    if (fs.existsSync(SEEN_PATH)) {
-      const raw = JSON.parse(fs.readFileSync(SEEN_PATH, 'utf-8'));
-      _seen = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
-    } else {
-      _seen = {};
-    }
-  } catch (e) {
-    console.error(
-      '[copyTradingStore] seen load failed:',
-      e && e.message ? e.message : e
-    );
-    _seen = {};
-  }
-  return _seen;
-}
-
-function _saveSeen() {
-  try {
-    _ensureDir(SEEN_PATH);
-    const tmp = SEEN_PATH + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(_loadSeen(), null, 2));
-    fs.renameSync(tmp, SEEN_PATH);
-  } catch (e) {
-    console.error(
-      '[copyTradingStore] seen save failed:',
-      e && e.message ? e.message : e
-    );
-  }
-}
-
 function _now() {
   return Math.floor(Date.now() / 1000);
 }
@@ -179,20 +138,35 @@ function _defaultConfig() {
   };
 }
 
+function _defaultSettings() {
+  return {
+    basket_level_only: 1, // default ON — avoids per-leg spam
+    paused: 0,
+  };
+}
+
 function _ensureUserSlot(userId) {
   const s = _loadStore();
   const key = String(userId);
   if (!s[key]) {
     s[key] = {
       [TYPE_BCD_WALLET]: null,
-      [TYPE_BCD_SIGNALS]: null,
       [TYPE_CUSTOM_WALLET]: [],
+      settings: _defaultSettings(),
     };
   } else {
     if (s[key][TYPE_BCD_WALLET] === undefined) s[key][TYPE_BCD_WALLET] = null;
-    if (s[key][TYPE_BCD_SIGNALS] === undefined) s[key][TYPE_BCD_SIGNALS] = null;
     if (!Array.isArray(s[key][TYPE_CUSTOM_WALLET]))
       s[key][TYPE_CUSTOM_WALLET] = [];
+    if (!s[key].settings || typeof s[key].settings !== 'object') {
+      s[key].settings = _defaultSettings();
+    } else {
+      // Backfill missing keys
+      const def = _defaultSettings();
+      for (const k of Object.keys(def)) {
+        if (s[key].settings[k] === undefined) s[key].settings[k] = def[k];
+      }
+    }
   }
   return s[key];
 }
@@ -207,10 +181,6 @@ function getTarget(userId, type, ref) {
   if (type === TYPE_BCD_WALLET) {
     if (!slot[type]) return null;
     return { ...slot[type], target_type: type, target_ref: BCD_WALLET };
-  }
-  if (type === TYPE_BCD_SIGNALS) {
-    if (!slot[type]) return null;
-    return { ...slot[type], target_type: type, target_ref: null };
   }
   // CUSTOM_WALLET
   const lc = String(ref || '').toLowerCase();
@@ -267,23 +237,6 @@ function setTarget(userId, type, ref, partial) {
     return { ...next, target_type: type, target_ref: BCD_WALLET };
   }
 
-  if (type === TYPE_BCD_SIGNALS) {
-    const cur = slot[type] || _defaultConfig();
-    const next = { ...cur, ...partial, updated_at: t };
-    if (partial && Object.prototype.hasOwnProperty.call(partial, 'capital_usdc')) {
-      next.capital_usdc = _validateCapital(partial.capital_usdc);
-    }
-    if (partial && Object.prototype.hasOwnProperty.call(partial, 'mode')) {
-      next.mode = _validateMode(partial.mode);
-    }
-    if (partial && Object.prototype.hasOwnProperty.call(partial, 'enabled')) {
-      next.enabled = partial.enabled ? 1 : 0;
-    }
-    slot[type] = next;
-    _saveStore();
-    return { ...next, target_type: type, target_ref: null };
-  }
-
   // CUSTOM_WALLET
   const lc = String(ref || '').toLowerCase();
   if (!ADDRESS_RX.test(lc)) {
@@ -328,7 +281,7 @@ function setTarget(userId, type, ref, partial) {
 
 function removeTarget(userId, type, ref) {
   const slot = _ensureUserSlot(userId);
-  if (type === TYPE_BCD_WALLET || type === TYPE_BCD_SIGNALS) {
+  if (type === TYPE_BCD_WALLET) {
     slot[type] = null;
     _saveStore();
     return true;
@@ -349,7 +302,7 @@ function removeTarget(userId, type, ref) {
 
 /**
  * Returns [{ userId, config, ref }] across all users for the requested
- * type, filtering enabled=1 only.
+ * type, filtering enabled=1 only. Users with `paused=1` are excluded.
  */
 function listEnabledByType(type) {
   const out = [];
@@ -357,13 +310,14 @@ function listEnabledByType(type) {
   for (const userId of Object.keys(s)) {
     const slot = s[userId];
     if (!slot) continue;
-    if (type === TYPE_BCD_WALLET || type === TYPE_BCD_SIGNALS) {
+    if (slot.settings && slot.settings.paused) continue;
+    if (type === TYPE_BCD_WALLET) {
       const cfg = slot[type];
       if (cfg && cfg.enabled) {
         out.push({
           userId,
           config: cfg,
-          ref: type === TYPE_BCD_WALLET ? BCD_WALLET : null,
+          ref: BCD_WALLET,
         });
       }
     } else if (type === TYPE_CUSTOM_WALLET) {
@@ -382,6 +336,7 @@ function listEnabledByType(type) {
  *   [{ address: '0x...', subscribers: [{userId, label, capital_usdc, mode}, ...] }]
  *
  * Scheduler uses this to do 1 HL fetch per address × fan-out to N users.
+ * Paused users are excluded.
  */
 function listAllCustomAddresses() {
   const map = new Map();
@@ -389,6 +344,7 @@ function listAllCustomAddresses() {
   for (const userId of Object.keys(s)) {
     const slot = s[userId];
     if (!slot || !Array.isArray(slot[TYPE_CUSTOM_WALLET])) continue;
+    if (slot.settings && slot.settings.paused) continue;
     for (const entry of slot[TYPE_CUSTOM_WALLET]) {
       if (!entry.enabled) continue;
       const addr = String(entry.ref || '').toLowerCase();
@@ -411,37 +367,26 @@ function listAllCustomAddresses() {
   }));
 }
 
-/**
- * Channel signal seen-tracker. Keyed by `${channel}/${message_id}`.
- */
-function hasSignalBeenSeen(channel, messageId) {
-  const seen = _loadSeen();
-  return Boolean(seen[`${channel}/${messageId}`]);
+// ---- Per-user settings (V4) ---------------------------------------------
+
+function getSettings(userId) {
+  const slot = _ensureUserSlot(userId);
+  return { ...slot.settings };
 }
 
-function markSignalSeen(channel, messageId, payload) {
-  const seen = _loadSeen();
-  const key = `${channel}/${messageId}`;
-  seen[key] = { ...payload, seen_at: _now() };
-  // Cap to last 1000 entries to avoid unbounded growth.
-  const keys = Object.keys(seen);
-  if (keys.length > 1000) {
-    keys
-      .sort((a, b) => (seen[a].seen_at || 0) - (seen[b].seen_at || 0))
-      .slice(0, keys.length - 1000)
-      .forEach((k) => delete seen[k]);
+function setSetting(userId, key, value) {
+  const slot = _ensureUserSlot(userId);
+  if (!Object.prototype.hasOwnProperty.call(_defaultSettings(), key)) {
+    throw new Error(`Unknown setting: ${key}`);
   }
-  _saveSeen();
-}
-
-function listSignalSeen() {
-  return { ..._loadSeen() };
+  slot.settings[key] = value ? 1 : 0;
+  _saveStore();
+  return { ...slot.settings };
 }
 
 // --- test hooks -----------------------------------------------------------
 function _resetForTests() {
   _store = _emptyStore();
-  _seen = {};
 }
 
 function _setStoreForTests(s) {
@@ -451,14 +396,12 @@ function _setStoreForTests(s) {
 module.exports = {
   // constants
   BCD_WALLET,
-  BCD_SIGNALS_CHANNEL,
   REFERRAL_CODE,
   MIN_CAPITAL,
   MAX_CAPITAL,
   DEFAULT_CAPITAL,
   MAX_CUSTOM_PER_USER,
   TYPE_BCD_WALLET,
-  TYPE_BCD_SIGNALS,
   TYPE_CUSTOM_WALLET,
   VALID_TYPES,
   // crud
@@ -468,13 +411,11 @@ module.exports = {
   removeTarget,
   listEnabledByType,
   listAllCustomAddresses,
-  // seen
-  hasSignalBeenSeen,
-  markSignalSeen,
-  listSignalSeen,
+  // settings
+  getSettings,
+  setSetting,
   // test
   _resetForTests,
   _setStoreForTests,
   _DB_PATH: DB_PATH,
-  _SEEN_PATH: SEEN_PATH,
 };

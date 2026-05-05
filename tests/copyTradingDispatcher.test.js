@@ -102,22 +102,16 @@ test('BCD wallet poller fans out to multiple subscribers', async () => {
   assert.ok(notify.sent.find((m) => /\$200/.test(m.text)));
 });
 
-test('signal dispatcher fans out only to enabled BCD_SIGNALS subscribers', async () => {
-  const notify = _makeNotify();
-  copyTrading.attach(notify);
-  store.setTarget(20, store.TYPE_BCD_SIGNALS, null, { enabled: true, capital_usdc: 300 });
-  store.setTarget(21, store.TYPE_BCD_WALLET, null, { enabled: true }); // wrong type
-  store.setTarget(22, store.TYPE_BCD_SIGNALS, null, { enabled: false });
-  const sig = {
-    messageId: 5,
-    pearUrl: 'https://app.pear.garden/trade/hl/USDC-ENA?referral=BlackCatDeFi',
-    longTokens: [],
-    shortTokens: ['ENA'],
-  };
-  const n = await copyTrading.dispatchSignalToSubscribers(sig);
-  assert.equal(n, 1);
-  assert.equal(notify.sent.length, 1);
-  assert.equal(notify.sent[0].chatId, 20);
+// R-PUBLIC-V4-COPYMENU — signals dispatcher REMOVED. The previous test
+// asserted dispatchSignalToSubscribers fan-out to BCD_SIGNALS subscribers;
+// V4 has no signals path (dispatcher does not exist, BCD_SIGNALS type does
+// not exist, scraper deleted). Replaced with a regression that proves the
+// surface is gone.
+test('R-PUBLIC-V4 — signals dispatcher + BCD_SIGNALS type are gone', () => {
+  assert.equal(typeof copyTrading.dispatchSignalToSubscribers, 'undefined');
+  assert.equal(store.TYPE_BCD_SIGNALS, undefined);
+  // VALID_TYPES contains only the 2 V4 sources
+  assert.deepEqual(store.VALID_TYPES.slice().sort(), ['BCD_WALLET', 'CUSTOM_WALLET']);
 });
 
 test('custom wallets poller does 1 fetch + fan-out to multiple subscribers', async () => {

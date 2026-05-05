@@ -1,15 +1,18 @@
 'use strict';
 
 /**
- * R-AUTOCOPY-MENU + R-CTAOPTIMIZE — Unified alert template for the 3
+ * R-PUBLIC-V4-COPYMENU + R-CTAOPTIMIZE — Unified alert template for the 2
  * copy-trading sources.
  *
  * Builds the message body + inline keyboard for copy-trading alerts. The
  * template is shared across:
  *
  *   • BCD_WALLET   — when 0xc7ae...1505 opens a basket (HL poller)
- *   • BCD_SIGNALS  — when @BlackCatDeFiSignals publishes a Pear URL
  *   • CUSTOM_WALLET — any user-added wallet that opens a basket
+ *
+ * V4: BCD_SIGNALS source was removed. Signals scraping (Telegram channel
+ * polling for #signal posts) was killed; the only copy source is on-chain
+ * wallet polling now.
  *
  * The {source} label tells the user where the signal came from.
  *
@@ -25,6 +28,9 @@
  */
 
 const tzMgr = require('./timezoneManager');
+// signalsChannelParser is the Pear URL parser (despite the legacy name); it
+// remained after V4 because the channel scraper was deleted but the URL
+// builder lives on as a Pear utility used here.
 const { buildPearUrlFromSides } = require('./signalsChannelParser');
 const store = require('./copyTradingStore');
 const pearUrl = require('./pearUrlBuilder');
@@ -45,8 +51,6 @@ function _sourceLabel(source) {
   switch (source) {
     case 'BCD_WALLET':
       return 'BCD Wallet';
-    case 'BCD_SIGNALS':
-      return 'BCD Signals';
     case 'CUSTOM_WALLET':
       return 'Custom';
     default:
@@ -75,8 +79,6 @@ function _utmSource(source) {
   switch (source) {
     case 'BCD_WALLET':
       return 'tg-alert-bcd-wallet';
-    case 'BCD_SIGNALS':
-      return 'tg-signal-channel';
     case 'CUSTOM_WALLET':
       return 'tg-alert-custom';
     default:
@@ -107,7 +109,7 @@ function _ctaUrlForSide(positions, side, opts) {
 /**
  * buildAlert(spec)
  *   spec: {
- *     source:       'BCD_WALLET' | 'BCD_SIGNALS' | 'CUSTOM_WALLET',
+ *     source:       'BCD_WALLET' | 'CUSTOM_WALLET',
  *     userId:       number,
  *     capital:      number,            // user-configured capital_usdc
  *     mode:         'MANUAL' | 'AUTO',

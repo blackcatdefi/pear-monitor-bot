@@ -25,6 +25,13 @@
  * These sit BELOW the conversion-critical hero rows so they never compete
  * with the 1-tap copy flow. Both are off-by-default for new users.
  *
+ * R-PUBLIC-V4-COPYMENU — adds:
+ *   🤖 COPY TRADING            (full-row callback opening the V4 sub-menu
+ *                              with Black Cat / Custom / Settings options)
+ *   📡 Signals Channel  📚 Thesis Channel
+ *                              (LAST row — community URL buttons; pure
+ *                              informational links, NOT a copy source).
+ *
  * Activated via env SIMPLIFY_START_ENABLED (default 'true' — set to 'false'
  * for instant rollback to commandsStart.handleStart legacy flow).
  *
@@ -72,6 +79,14 @@ const FUND_REBATE_LINE =
 const PERFORMANCE_DASHBOARD_URL =
   process.env.PERFORMANCE_DASHBOARD_URL ||
   `https://hyperdash.info/trader/${bcdBasketCache.BCD_WALLET}`;
+
+// R-PUBLIC-V4-COPYMENU — community Telegram channels rendered as the LAST
+// row of the /start keyboard. Override the URLs via env vars without a
+// redeploy if the channels are renamed.
+const SIGNALS_CHANNEL_URL =
+  process.env.SIGNALS_CHANNEL_URL || 'https://t.me/BlackCatDeFiSignals';
+const THESIS_CHANNEL_URL =
+  process.env.THESIS_CHANNEL_URL || 'https://t.me/BlackCatDeFiThesis';
 
 function isEnabled() {
   return (
@@ -176,6 +191,23 @@ async function _buildKeyboard(userId) {
   rows.push([
     { text: '👁 TRACK MY OWN WALLET', callback_data: 'simple:track' },
     { text: '🛡 MY HEALTH FACTOR', callback_data: 'simple:hf' },
+  ]);
+
+  // R-PUBLIC-V4-COPYMENU — Row 6: Copy Trading entry point. Full-width row,
+  // distinct from the 1-tap hero (which copies the *current* basket once).
+  // This opens the V4 sub-menu with Black Cat auto-mirror / Custom wallet
+  // / Settings.
+  rows.push([
+    { text: '🤖 COPY TRADING', callback_data: 'simple:copy_trading' },
+  ]);
+
+  // R-PUBLIC-V4-COPYMENU — Row 7 (LAST): community URL buttons. These are
+  // *informational* — the bot does not scrape these channels; they are
+  // simply where the user can read more in the team's own voice. Sanitizer
+  // explicitly allow-lists "Signals Channel" / "Thesis Channel" labels.
+  rows.push([
+    { text: '📡 Signals Channel', url: SIGNALS_CHANNEL_URL },
+    { text: '📚 Thesis Channel',  url: THESIS_CHANNEL_URL  },
   ]);
 
   return { inline_keyboard: rows };
@@ -449,6 +481,29 @@ async function handleSimpleCallback(bot, cb) {
   }
   if (action === 'hf') {
     await _onHealthFactorCallback(bot, chatId, userId);
+    return true;
+  }
+  // R-PUBLIC-V4-COPYMENU — open the Copy Trading top-level menu. This is
+  // the entry point for the auto-mirror / custom-wallet / settings flow.
+  if (action === 'copy_trading') {
+    let cmd = null;
+    try { cmd = require('./commandsCopyTrading'); } catch (_) {}
+    if (cmd && typeof cmd.showTopMenu === 'function') {
+      try { await cmd.showTopMenu(bot, chatId, userId); }
+      catch (_) {
+        await bot.sendMessage(
+          chatId,
+          'Copy Trading is temporarily unavailable. Try /copy_trading.',
+          { parse_mode: 'Markdown' }
+        );
+      }
+    } else {
+      await bot.sendMessage(
+        chatId,
+        'Copy Trading menu is not available — please run /copy_trading.',
+        { parse_mode: 'Markdown' }
+      );
+    }
     return true;
   }
   return true; // unknown sub-action; we still claim ownership of simple:*

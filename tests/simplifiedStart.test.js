@@ -119,14 +119,16 @@ test('hero text mentions real money + YTD PnL + 1 tap + fee rebate', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. Keyboard layout when basket live = 5 rows
-//    (hero + size + perf + alerts + tracking [R-PUBLIC-V3-TRACKING])
+// 3. Keyboard layout when basket live = 7 rows
+//    (hero + size + perf + alerts + tracking [V3] + copy_trading [V4]
+//     + community-links [V4])
 // ─────────────────────────────────────────────────────────────────────────────
 test('keyboard has 4 rows when basket is live', async () => {
   const kb = await simplifiedStart._buildKeyboard(9001);
   assert.ok(kb && kb.inline_keyboard);
-  // R-PUBLIC-V3-TRACKING added a 5th secondary row (track + HF buttons).
-  assert.strictEqual(kb.inline_keyboard.length, 5);
+  // R-PUBLIC-V4-COPYMENU added 2 rows: copy_trading (full-width) and the
+  // community-links row (Signals + Thesis URL buttons).
+  assert.strictEqual(kb.inline_keyboard.length, 7);
   // Row 0 = hero, single button.
   assert.strictEqual(kb.inline_keyboard[0].length, 1);
   assert.match(kb.inline_keyboard[0][0].text, /COPY MY BASKET/i);
@@ -141,6 +143,18 @@ test('keyboard has 4 rows when basket is live', async () => {
   // Row 3 = alerts (callback).
   assert.match(kb.inline_keyboard[3][0].text, /ALERT ME/i);
   assert.strictEqual(kb.inline_keyboard[3][0].callback_data, 'simple:alerts');
+  // Row 5 = COPY TRADING entry point (V4).
+  assert.match(kb.inline_keyboard[5][0].text, /COPY TRADING/i);
+  assert.strictEqual(
+    kb.inline_keyboard[5][0].callback_data,
+    'simple:copy_trading'
+  );
+  // Row 6 (LAST) = community links — both URL buttons.
+  assert.strictEqual(kb.inline_keyboard[6].length, 2);
+  assert.ok(kb.inline_keyboard[6][0].url);
+  assert.ok(kb.inline_keyboard[6][1].url);
+  assert.match(kb.inline_keyboard[6][0].text, /Signals Channel/i);
+  assert.match(kb.inline_keyboard[6][1].text, /Thesis Channel/i);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -247,13 +261,20 @@ test('empty basket falls back to PEAR_HERO_URL without crashing', async () => {
 
     assert.strictEqual(bot.sent.length, 1);
     const kb = bot.sent[0].opts.reply_markup;
-    // Without a live basket: hero + perf + alerts + tracking = 4 rows
-    // (no size selector; tracking row added by R-PUBLIC-V3-TRACKING).
-    assert.strictEqual(kb.inline_keyboard.length, 4);
+    // R-PUBLIC-V4-COPYMENU — without a live basket the layout is:
+    // hero + perf + alerts + tracking + copy_trading + community = 6 rows
+    // (no size selector; tracking row added by V3, copy_trading +
+    // community-links row added by V4).
+    assert.strictEqual(kb.inline_keyboard.length, 6);
     const hero = kb.inline_keyboard[0][0];
     assert.ok(hero.url, 'fallback hero must still be URL-tappable');
     assert.ok(/referral=BlackCatDeFi/.test(hero.url));
     assert.match(hero.text, /OPEN PEAR/i);
+    // Last row must be the community-links row (URL buttons).
+    const last = kb.inline_keyboard[kb.inline_keyboard.length - 1];
+    assert.strictEqual(last.length, 2);
+    assert.ok(last[0].url);
+    assert.ok(last[1].url);
   } finally {
     bcdBasketCache.getActiveBasket = original;
   }

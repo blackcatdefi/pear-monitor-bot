@@ -1,25 +1,32 @@
 'use strict';
 
 /**
- * R-AUTOCOPY-MENU — Unified copy-trading dispatcher.
+ * R-PUBLIC-V4-COPYMENU — Unified copy-trading dispatcher.
  *
- * Coordinates the 3 schedulers and fans out alerts via the wrapped notifier:
+ * Coordinates the 2 schedulers and fans out alerts via the wrapped notifier:
  *
  *   • Scheduler A — BCD Wallet poller (60s) — calls onBCDOpen / onBCDClose
  *     → fan-out to all users with BCD_WALLET enabled.
- *   • Scheduler B — Signals channel scraper (30s) — emits "signal" events
- *     → fan-out to all users with BCD_SIGNALS enabled.
- *   • Scheduler C — Custom wallet poller (60s) per unique address
+ *   • Scheduler B — Custom wallet poller (60s) per unique address
  *     → fan-out only to that address's subscribers.
+ *
+ * V4: signals scraper (channel polling) was REMOVED — it's no longer a copy
+ * source. The community @BlackCatDeFiSignals + @BlackCatDeFiThesis channels
+ * remain available as URL buttons in /start (informational only).
  *
  * The HL fetch is centralized here so each address is queried once per poll,
  * then fanned out to N users. This module stays thin: parsing/diff lives in
  * helpers, alert formatting in copyAlertBuilder, persistence in store.
+ *
+ * Per-leg vs basket-level: when a user has `settings.basket_level_only=1`
+ * (default), we send ONE basket alert per OPEN/CLOSE diff cycle even if the
+ * basket has multiple legs. When `0`, we still emit one alert per diff but
+ * the alert lists every leg — there's no separate "per-leg" path here. This
+ * matches R-PUBLIC-SPAM-FINAL: per-leg INDIVIDUAL_OPEN is dead.
  */
 
 const store = require('./copyTradingStore');
 const builder = require('./copyAlertBuilder');
-const scraper = require('./signalsChannelScraper');
 const { fetchHyperliquidPositions } = require('./externalWalletTracker');
 
 const POLL_INTERVAL_SEC = parseInt(
@@ -30,7 +37,6 @@ const POLL_INTERVAL_SEC = parseInt(
 let _notify = null;
 let _bcdTimer = null;
 let _customTimer = null;
-let _signalsTimer = null;
 
 const _bcdLast = new Map(); // address-lc -> [{coin,side}]
 const _customLast = new Map(); // address-lc -> [{coin,side}]
@@ -162,26 +168,7 @@ async function pollBcdWalletOnce() {
   return { opens: openSent, closes: closeSent };
 }
 
-// --- Scheduler B: Signals scraper handler --------------------------------
-
-async function dispatchSignalToSubscribers(signal) {
-  const subs = store.listEnabledByType(store.TYPE_BCD_SIGNALS);
-  if (subs.length === 0) return 0;
-  const positions = [];
-  for (const t of signal.longTokens || []) positions.push({ coin: t, side: 'LONG' });
-  for (const t of signal.shortTokens || []) positions.push({ coin: t, side: 'SHORT' });
-  return _fanOut(subs, {
-    source: 'BCD_SIGNALS',
-    sourceLabel: 'BCD Signals',
-    positions,
-    pearUrl: signal.pearUrl,
-    longTokens: signal.longTokens,
-    shortTokens: signal.shortTokens,
-    event: 'OPEN',
-  });
-}
-
-// --- Scheduler C: Custom wallet poller -----------------------------------
+// --- Scheduler B: Custom wallet poller -----------------------------------
 
 async function pollCustomWalletsOnce() {
   const groups = store.listAllCustomAddresses();
@@ -260,53 +247,17 @@ function startSchedulers() {
     }, Math.max(15, POLL_INTERVAL_SEC) * 1000);
     if (_customTimer && typeof _customTimer.unref === 'function') _customTimer.unref();
   }
-  // Signals scraper
-  if (!_signalsTimer) {
-    _signalsTimer = scraper.startSchedule({
-      onSignal: dispatchSignalToSubscribers,
-      // R-SCRAPERROBUST + R-BASKET (3 may 2026) — Telegram broadcast
-      // KILLED. Scraper liveness/recovery is monitoring telemetry, not a
-      // user-facing alert (per spec §11 phase-1 "delete SIGNALS SCRAPER
-      // RECOVERED type messages — log only" and docs/PUBLIC_BOT_RULES.md
-      // "public bot must not broadcast uptime/status").
-      //
-      // The /health endpoint + Railway logs already surface this for
-      // operators. To re-enable for a single owner chat (debug only),
-      // set SCRAPER_OPS_BROADCAST=true.
-      onAlert: async ({ severity, consecutiveFailures, message }) => {
-        const optIn =
-          (process.env.SCRAPER_OPS_BROADCAST || 'false').toLowerCase() === 'true';
-        const tag = severity === 'critical' ? '[SCRAPER-DOWN]' : '[SCRAPER-OK]';
-        // Always log so the operator can grep `[SCRAPER-` in Railway logs.
-        console.log(
-          `${tag} severity=${severity} consecutive=${consecutiveFailures} msg=${message}`
-        );
-        if (!optIn) return;
-        const ownerId = process.env.BCD_TELEGRAM_CHAT_ID;
-        if (!ownerId) return;
-        const emoji = severity === 'critical' ? '🚨' : '✅';
-        const title = severity === 'critical'
-          ? 'SIGNALS SCRAPER DOWN'
-          : 'SIGNALS SCRAPER RECOVERED';
-        const body = `${emoji} *${title}*\n\nFailures: ${consecutiveFailures}\n${message}`;
-        try { await _notify(ownerId, body, { parse_mode: 'Markdown' }); }
-        catch (_) {}
-      },
-    });
-  }
   console.log(
-    `[copyTrading] schedulers started (poll ${POLL_INTERVAL_SEC}s, scraper ${scraper.SIGNALS_SCRAPER_INTERVAL_SEC}s)`
+    `[copyTrading] V4 schedulers started (poll ${POLL_INTERVAL_SEC}s, BCD wallet + custom; signals scraper REMOVED)`
   );
-  return { bcd: _bcdTimer, custom: _customTimer, signals: _signalsTimer };
+  return { bcd: _bcdTimer, custom: _customTimer };
 }
 
 function stopSchedulers() {
   if (_bcdTimer) clearInterval(_bcdTimer);
   if (_customTimer) clearInterval(_customTimer);
-  scraper.stopSchedule();
   _bcdTimer = null;
   _customTimer = null;
-  _signalsTimer = null;
 }
 
 module.exports = {
@@ -315,7 +266,6 @@ module.exports = {
   stopSchedulers,
   pollBcdWalletOnce,
   pollCustomWalletsOnce,
-  dispatchSignalToSubscribers,
   _diff,
   _splitSides,
   _normalizePos,

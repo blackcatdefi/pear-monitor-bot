@@ -282,7 +282,8 @@ test('copyAlertBuilder OPEN with capital → hero shows amount + quick row', () 
 
 test('copyAlertBuilder forwards userId → utm_id present in hero URL', () => {
   const result = builder.buildAlert({
-    source: 'BCD_SIGNALS',
+    // R-PUBLIC-V4-COPYMENU — switched away from BCD_SIGNALS (removed).
+    source: 'BCD_WALLET',
     userId: 67890,
     capital: 500,
     mode: 'MANUAL',
@@ -292,25 +293,27 @@ test('copyAlertBuilder forwards userId → utm_id present in hero URL', () => {
   const url = result.keyboard.inline_keyboard[0][0].url;
   const expected = pearUrl.hashUserId(67890);
   assert.ok(url.includes(`utm_id=${expected}`));
-  assert.ok(url.includes('utm_source=tg-signal-channel'));
+  assert.ok(url.includes('utm_source=tg-alert-bcd-wallet'));
 });
 
 test('copyAlertBuilder utm_source maps source key correctly', () => {
+  // R-PUBLIC-V4-COPYMENU — only BCD_WALLET + CUSTOM_WALLET map.
   const wallet = builder.buildAlert({
     source: 'BCD_WALLET', userId: 1, capital: 100, mode: 'MANUAL',
-    positions: shortBasket(), event: 'OPEN',
-  });
-  const signals = builder.buildAlert({
-    source: 'BCD_SIGNALS', userId: 1, capital: 100, mode: 'MANUAL',
     positions: shortBasket(), event: 'OPEN',
   });
   const custom = builder.buildAlert({
     source: 'CUSTOM_WALLET', userId: 1, capital: 100, mode: 'MANUAL',
     positions: shortBasket(), event: 'OPEN',
   });
+  // Unknown / removed sources fall back to generic 'tg-alert'
+  const fallback = builder.buildAlert({
+    source: 'UNKNOWN', userId: 1, capital: 100, mode: 'MANUAL',
+    positions: shortBasket(), event: 'OPEN',
+  });
   assert.ok(wallet.keyboard.inline_keyboard[0][0].url.includes('utm_source=tg-alert-bcd-wallet'));
-  assert.ok(signals.keyboard.inline_keyboard[0][0].url.includes('utm_source=tg-signal-channel'));
   assert.ok(custom.keyboard.inline_keyboard[0][0].url.includes('utm_source=tg-alert-custom'));
+  assert.ok(fallback.keyboard.inline_keyboard[0][0].url.includes('utm_source=tg-alert'));
 });
 
 test('copyAlertBuilder CLOSE event: no hero, no quick amounts', () => {

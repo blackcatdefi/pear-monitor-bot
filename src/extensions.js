@@ -50,10 +50,10 @@ const walletTrackerScheduler = require('./walletTrackerScheduler');
 // R-START — /start onboarding (first-time vs recurring + inline keyboard).
 const commandsStart = require('./commandsStart');
 // R-AUTOCOPY — auto copy-trading + best-bot features.
-const signalsChannel = require('./signalsChannel');
+// R-PUBLIC-V4-COPYMENU — signalsChannel + commandsSignals removed (signals
+// scraper killed; copy sources are BCD wallet + custom wallet only).
 const copyAuto = require('./copyAuto');
 const dailyDigest = require('./dailyDigest');
-const commandsSignals = require('./commandsSignals');
 const commandsCopyAuto = require('./commandsCopyAuto');
 const commandsCapital = require('./commandsCapital');
 const commandsPortfolio = require('./commandsPortfolio');
@@ -652,8 +652,7 @@ function bootstrap({
     // R-AUTOCOPY — wire all R-AUTOCOPY commands. Each attach() is wrapped so
     // a failure in one module doesn't break the rest of the bootstrap.
     const wireAutocopy = [
-      ['signalsChannel', () => signalsChannel.attach(bot)],
-      ['commandsSignals', () => commandsSignals.attach(bot)],
+      // R-PUBLIC-V4-COPYMENU — signalsChannel/commandsSignals removed
       ['commandsCopyAuto', () => commandsCopyAuto.attach(bot)],
       ['commandsCapital', () => commandsCapital.attach(bot)],
       ['commandsPortfolio', () => commandsPortfolio.attach(bot)],
@@ -726,8 +725,8 @@ function bootstrap({
     );
   }
 
-  // 10b. R-AUTOCOPY-MENU — start the 3 unified-copy-trading schedulers
-  //      (BCD wallet poller, custom-wallet poller, signals scraper).
+  // 10b. R-PUBLIC-V4-COPYMENU — start the 2 unified-copy-trading schedulers
+  //      (BCD wallet poller + custom-wallet poller). Signals scraper REMOVED.
   try {
     copyTrading.attach(wrappedNotify);
     copyTrading.startSchedulers();
