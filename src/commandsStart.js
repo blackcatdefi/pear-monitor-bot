@@ -35,6 +35,8 @@ const { t } = require('./i18n/index');
 // R-AUTOCOPY — referral capture + stats touch.
 const share = require('./share');
 const stats = require('./stats');
+// R-PUBLIC-SIMPLIFY — brutal-conversion /start (feature-flagged).
+const simplifiedStart = require('./simplifiedStart');
 
 const DEFAULT_HERO_URL =
   'https://app.pear.garden/?referral=BlackCatDeFi';
@@ -121,6 +123,23 @@ function _formatRecurringText(userId) {
 }
 
 async function handleStart(bot, msg) {
+  // R-PUBLIC-SIMPLIFY — when the simplified UX is enabled (default true),
+  // skip the legacy multi-step onboarding entirely. The simplified handler
+  // owns referral capture + stats.touch internally, so we early-return.
+  if (simplifiedStart.isEnabled()) {
+    try {
+      await simplifiedStart.handleStartSimple(bot, msg);
+      return;
+    } catch (e) {
+      // Fall through to the legacy path on any failure — guarantees /start
+      // ALWAYS sends a reply, even if the simplified module breaks.
+      console.error(
+        '[commandsStart] simplifiedStart failed, falling back to legacy:',
+        e && e.message ? e.message : e
+      );
+    }
+  }
+
   const chatId = msg.chat.id;
   const userId = msg.from && msg.from.id ? msg.from.id : chatId;
   const langCode = msg.from && msg.from.language_code;
@@ -381,11 +400,25 @@ function attach(bot) {
   });
 
   bot.on('callback_query', async (cb) => {
-    if (
-      !cb.data ||
-      (!cb.data.startsWith('start:') && !cb.data.startsWith('mute:'))
-    )
+    if (!cb || !cb.data) return;
+    // R-PUBLIC-SIMPLIFY — own simple:* (hero perf + alerts toggle).
+    if (cb.data.startsWith('simple:')) {
+      try {
+        await simplifiedStart.handleSimpleCallback(bot, cb);
+      } catch (e) {
+        console.error(
+          '[commandsStart] simple:* callback failed:',
+          e && e.message ? e.message : e
+        );
+      }
       return;
+    }
+    if (
+      !cb.data.startsWith('start:') &&
+      !cb.data.startsWith('mute:')
+    ) {
+      return;
+    }
     try {
       await _handleCallback(bot, cb);
     } catch (e) {

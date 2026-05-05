@@ -30,6 +30,9 @@ process.env.SHARE_DB_PATH        = path.join(TMP, 'share.json');
 process.env.PEAR_HERO_URL        = 'https://app.pear.garden/?referral=BlackCatDeFi';
 process.env.DEFAULT_TZ           = 'UTC';
 process.env.ONBOARDING_AUTO_TZ   = 'false'; // keep tests deterministic
+// R-PUBLIC-SIMPLIFY — this file covers the LEGACY /start path. The new
+// simplified flow has its own dedicated suite (simplifiedStart.test.js).
+process.env.SIMPLIFY_START_ENABLED = 'false';
 
 const onboarding = require('../src/onboarding');
 const commandsStart = require('../src/commandsStart');

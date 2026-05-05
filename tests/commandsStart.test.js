@@ -21,6 +21,9 @@ process.env.DEFAULT_TZ = 'UTC';
 process.env.PEAR_HERO_URL =
   'https://app.pear.garden/?referral=BlackCatDeFi';
 process.env.ONBOARDING_AUTO_TZ = 'true';
+// R-PUBLIC-SIMPLIFY — this suite covers the LEGACY /start path. The
+// simplified UX has its own dedicated suite (simplifiedStart.test.js).
+process.env.SIMPLIFY_START_ENABLED = 'false';
 
 const onboarding = require('../src/onboarding');
 const tzMgr = require('../src/timezoneManager');

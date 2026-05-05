@@ -236,3 +236,38 @@ is churning — investigate the underlying `lastSeenSnapshots` instability.
 - Tests in `tests/regression_per_leg_kill_switch.test.js` are the canonical
   regression for this rule.
 
+---
+
+## R-PUBLIC-SIMPLIFY — brand-as-trader-attribution exception (5 may 2026)
+
+**Strategic shift:** the bot is no longer fully anonymous. Conversion data
+(11M tweet impressions, 0 conversions) showed users will not copy unknown
+signals. The simplified `/start` UX (R-PUBLIC-SIMPLIFY) deliberately
+attributes the trades to "Black Cat" so users see who they're copying.
+
+**What is now allowed:**
+- The exact strings `Black Cat — Pear Copy Trading` and
+  `Black Cat — Live Performance` may appear in the `/start` hero message
+  and in the simple:perf callback message.
+- The 🐈‍⬛ emoji used as a brand mark in those titles.
+
+**What stays forbidden:**
+- "Black Cat" / "BCD" / "BlackCat" in any other context — commentary,
+  thesis, operational chatter, alert footers, error messages, etc.
+- Any reference to the persona behind the brand (real name, geographies,
+  fund-internal terms — `tesis del fondo`, `el fondo`, `modus operandi`,
+  `war trade`, etc. are still hard-banned).
+- The full list of forbidden terms in `src/sanitizer.js` is unchanged
+  except for the targeted allowlist patch.
+
+**Permanent rule for future rounds:**
+- New copy-trading UX surfaces may include the `Black Cat — <surface>`
+  attribution where it directly drives a copy-trade decision (hero CTA,
+  performance summary, signal-source label).
+- Anything else that mentions "Black Cat" remains a sanitizer violation.
+- The allowlist regex in `src/sanitizer.js` — `Black Cat — (Pear Copy
+  Trading|Live Performance)` — is the source of truth. Adding new
+  attribution surfaces requires extending the regex AND this section.
+- Tests in `tests/sanitizer.test.js` + `tests/round_autocopy.test.js`
+  guard the allowlist boundary.
+

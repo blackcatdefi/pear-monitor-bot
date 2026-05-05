@@ -68,6 +68,16 @@ function isAllowedBlackCat(line) {
   if (/BCD_SIGNALS_CHANNEL/i.test(line)) return true;
   if (/BCD_WALLET\b/.test(line)) return true;
   if (/\bBCD\s+(?:Wallet|Signals)\b/i.test(line)) return true;
+  // R-PUBLIC-SIMPLIFY — brand-as-trader-attribution allowed ONLY for the
+  // copy-trading hero + live-performance titles. Conversion lever: public
+  // users won't copy unknown signals, they need to know who trades them.
+  // Tight allowlist — does NOT cover commentary, thesis, or operational
+  // chatter. The persona ban for those remains in place.
+  if (
+    /Black\s*Cat\s*[—–-]\s*(Pear Copy Trading|Live Performance)/i.test(line)
+  ) {
+    return true;
+  }
   return false;
 }
 
