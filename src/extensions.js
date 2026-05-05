@@ -67,6 +67,8 @@ const commandsHelp = require('./commandsHelp');
 // R-AUTOCOPY-MENU — unified copy_trading menu (BCD wallet / signals / custom)
 const copyTrading = require('./copyTrading');
 const commandsCopyTrading = require('./commandsCopyTrading');
+// R-PUBLIC-V3-TRACKING — /hf command + AWAITING_HF_ADDRESS state handler.
+const commandsHealthFactor = require('./commandsHealthFactor');
 
 function _safeInt(v, d) {
   const n = parseInt(v, 10);
@@ -663,6 +665,8 @@ function bootstrap({
       ['commandsHelp', () => commandsHelp.attach(bot)],
       // R-AUTOCOPY-MENU
       ['commandsCopyTrading', () => commandsCopyTrading.attach(bot)],
+      // R-PUBLIC-V3-TRACKING — /hf + AWAITING_HF_ADDRESS handler
+      ['commandsHealthFactor', () => commandsHealthFactor.attach(bot)],
     ];
     for (const [name, fn] of wireAutocopy) {
       try { fn(); }

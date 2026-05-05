@@ -15,7 +15,15 @@
  *
  * Plus three URL-button size variants (0.5x / 1x / 2x) so users can adjust
  * notional without leaving Telegram. All Pear URLs include the
- * BlackCatDeFi referral code for the 20% fee rebate (10% Pear + 10% Pyrus).
+ * BlackCatDeFi referral code for the 10% fee rebate (Pear). Pyrus rebate is
+ * intentionally omitted from copy until the Pyrus team ships an updated
+ * referral link — promote only what is currently live.
+ *
+ * R-PUBLIC-V3-TRACKING — adds a second keyboard row with tracking helpers:
+ *   👁 TRACK MY OWN WALLET    (deep-link into the existing /track flow)
+ *   🛡 MY HEALTH FACTOR        (HyperLend HF reader for any wallet)
+ * These sit BELOW the conversion-critical hero rows so they never compete
+ * with the 1-tap copy flow. Both are off-by-default for new users.
  *
  * Activated via env SIMPLIFY_START_ENABLED (default 'true' — set to 'false'
  * for instant rollback to commandsStart.handleStart legacy flow).
@@ -54,9 +62,13 @@ const DEFAULT_CAPITAL = parseFloat(
 const FUND_YTD_PNL = process.env.FUND_YTD_PNL || '+$8.6K';
 const FUND_TRADES = process.env.FUND_TRADES || '2,687';
 const FUND_VOLUME = process.env.FUND_VOLUME || '$2M';
+// R-PUBLIC-V3-TRACKING — Pyrus rebate removed from copy. The Pyrus team has
+// not delivered an updated referral link as of 5 may 2026; we promote only
+// the rebate that is verifiably live (Pear 10%). When Pyrus ships a link,
+// extend FUND_REBATE_LINE via env var (no redeploy).
 const FUND_REBATE_LINE =
   process.env.FUND_REBATE_LINE ||
-  '20% fee rebate (10% Pear + 10% Pyrus, USDC Arbitrum bi-weekly)';
+  '10% fee rebate via Pear (referral: BlackCatDeFi)';
 const PERFORMANCE_DASHBOARD_URL =
   process.env.PERFORMANCE_DASHBOARD_URL ||
   `https://hyperdash.info/trader/${bcdBasketCache.BCD_WALLET}`;
@@ -158,6 +170,14 @@ async function _buildKeyboard(userId) {
     { text: '🔔 ALERT ME ON NEW TRADES', callback_data: 'simple:alerts' },
   ]);
 
+  // R-PUBLIC-V3-TRACKING — Row 5 (secondary): wallet self-tracking helpers.
+  // Sits BELOW the conversion-critical hero so it never competes with the
+  // 1-tap copy CTA. Both buttons enter their own state-machine flows.
+  rows.push([
+    { text: '👁 TRACK MY OWN WALLET', callback_data: 'simple:track' },
+    { text: '🛡 MY HEALTH FACTOR', callback_data: 'simple:hf' },
+  ]);
+
   return { inline_keyboard: rows };
 }
 
@@ -199,6 +219,9 @@ function _perfText() {
     `• Total trades: ${FUND_TRADES}`,
     `• Volume traded: ${FUND_VOLUME}`,
     '• Strategy: market-neutral basket SHORTs vs LONG core',
+    // R-PUBLIC-V3-TRACKING — show only the live rebate (Pear). When Pyrus
+    // delivers an updated link, extend `FUND_REBATE_LINE` via env var.
+    `• ${FUND_REBATE_LINE}`,
     '',
     `🔗 [Live trades on HyperDash →](${PERFORMANCE_DASHBOARD_URL})`,
     '',
@@ -242,6 +265,160 @@ async function _onAlertsCallback(bot, chatId, userId) {
   await bot.sendMessage(chatId, txt, { parse_mode: 'Markdown' });
 }
 
+// R-PUBLIC-V3-TRACKING — secondary row callbacks. Both rely on the existing
+// userStateMachine — same conversational pattern as /track. Required-on-
+// demand to keep /start cold-boot under 1.5s (the modules pull in fs +
+// optionally ethers; we don't want them in the boot path).
+async function _onTrackCallback(bot, chatId, userId) {
+  let sm, wt;
+  try { sm = require('./userStateMachine'); }
+  catch (_) {
+    await bot.sendMessage(
+      chatId,
+      'Tracking is temporarily unavailable. Try /track instead.',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+  try { wt = require('./walletTracker'); } catch (_) { wt = null; }
+
+  // Submenu: Add / List / Remove (same affordances as /track).
+  const wallets = wt ? wt.getUserWallets(userId) : [];
+  const max = wt ? wt.MAX_WALLETS_PER_USER : 10;
+  const lines = [
+    '👁 *Track your own wallet*',
+    '',
+    `You can add up to ${max} wallets. Currently tracking: ${wallets.length}/${max}.`,
+    '',
+    '_Alerts from your tracked wallets are ON by default once you add one._',
+  ];
+  const kb = {
+    inline_keyboard: [
+      [{ text: '➕ Add wallet', callback_data: 'simple:track_add' }],
+      [{ text: '📋 My wallets', callback_data: 'simple:track_list' }],
+      [{ text: '🔕 Stop tracking', callback_data: 'simple:track_remove' }],
+    ],
+  };
+  await bot.sendMessage(chatId, lines.join('\n'), {
+    parse_mode: 'Markdown',
+    reply_markup: kb,
+  });
+}
+
+async function _onTrackSubAction(bot, chatId, userId, sub) {
+  let sm, wt;
+  try {
+    sm = require('./userStateMachine');
+    wt = require('./walletTracker');
+  } catch (_) {
+    await bot.sendMessage(
+      chatId,
+      'Tracking is temporarily unavailable. Try /track.',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  if (sub === 'track_add') {
+    if (wt.getUserWallets(userId).length >= wt.MAX_WALLETS_PER_USER) {
+      await bot.sendMessage(
+        chatId,
+        `You hit the ${wt.MAX_WALLETS_PER_USER}-wallet limit. Remove one first.`,
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+    sm.setState(chatId, sm.STATES.AWAITING_WALLET_ADDRESS, { userId });
+    await bot.sendMessage(
+      chatId,
+      [
+        '➕ *Add a wallet to track*',
+        '',
+        'Paste a `0x...` address (40 hex chars). I will alert you when it opens or closes a basket.',
+        '',
+        'Send /cancel to abort.',
+      ].join('\n'),
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  if (sub === 'track_list') {
+    const wallets = wt.getUserWallets(userId);
+    if (wallets.length === 0) {
+      await bot.sendMessage(
+        chatId,
+        'You have no tracked wallets yet. Tap *➕ Add wallet*.',
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+    const lines = ['📋 *Your tracked wallets*', ''];
+    for (const w of wallets) {
+      const label = w.label ? ` — ${w.label}` : '';
+      lines.push(`  • \`${w.address}\`${label}`);
+    }
+    lines.push(
+      '',
+      `_${wallets.length}/${wt.MAX_WALLETS_PER_USER} slots used._`
+    );
+    await bot.sendMessage(chatId, lines.join('\n'), { parse_mode: 'Markdown' });
+    return;
+  }
+
+  if (sub === 'track_remove') {
+    const wallets = wt.getUserWallets(userId);
+    if (wallets.length === 0) {
+      await bot.sendMessage(
+        chatId,
+        'Nothing to remove — your tracking list is empty.',
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+    sm.setState(chatId, sm.STATES.AWAITING_REMOVE_ADDRESS, { userId });
+    const lines = [
+      '🔕 *Stop tracking*',
+      '',
+      'Reply with the wallet address (or label) to remove. /cancel to abort.',
+      '',
+    ];
+    for (const w of wallets) {
+      const label = w.label ? ` — ${w.label}` : '';
+      lines.push(`  • \`${w.address}\`${label}`);
+    }
+    await bot.sendMessage(chatId, lines.join('\n'), { parse_mode: 'Markdown' });
+    return;
+  }
+}
+
+async function _onHealthFactorCallback(bot, chatId, userId) {
+  let sm;
+  try { sm = require('./userStateMachine'); }
+  catch (_) {
+    await bot.sendMessage(
+      chatId,
+      'Health Factor reader is temporarily unavailable.',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+  sm.setState(chatId, sm.STATES.AWAITING_HF_ADDRESS, { userId });
+  await bot.sendMessage(
+    chatId,
+    [
+      '🛡 *Health Factor reader*',
+      '',
+      'Paste a wallet address (`0x...`, 40 hex chars). I will read its',
+      'HyperLend Health Factor live and tell you if it is healthy, watch,',
+      'or at risk of liquidation.',
+      '',
+      '_Default OFF — no alerts unless you opt in. Send /cancel to abort._',
+    ].join('\n'),
+    { parse_mode: 'Markdown' }
+  );
+}
+
 async function handleSimpleCallback(bot, cb) {
   if (!cb || !cb.data || !cb.data.startsWith('simple:')) return false;
   const action = cb.data.split(':')[1];
@@ -262,6 +439,18 @@ async function handleSimpleCallback(bot, cb) {
     await _onAlertsCallback(bot, chatId, userId);
     return true;
   }
+  if (action === 'track') {
+    await _onTrackCallback(bot, chatId, userId);
+    return true;
+  }
+  if (action === 'track_add' || action === 'track_list' || action === 'track_remove') {
+    await _onTrackSubAction(bot, chatId, userId, action);
+    return true;
+  }
+  if (action === 'hf') {
+    await _onHealthFactorCallback(bot, chatId, userId);
+    return true;
+  }
   return true; // unknown sub-action; we still claim ownership of simple:*
 }
 
@@ -276,6 +465,9 @@ module.exports = {
   _activeBasketUrl,
   _onPerformanceCallback,
   _onAlertsCallback,
+  _onTrackCallback,
+  _onTrackSubAction,
+  _onHealthFactorCallback,
   // Constants exported for test introspection.
   REFERRAL,
   DEFAULT_CAPITAL,

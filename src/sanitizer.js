@@ -52,6 +52,9 @@ function isAllowedBlackCat(line) {
   if (typeof line !== 'string') return false;
   // Allow when used as referral query param value or as referral env var/key
   if (/referral=BlackCatDeFi/i.test(line)) return true;
+  // R-PUBLIC-V3-TRACKING — allow "referral: BlackCatDeFi" attribution copy
+  // used in the Pear-only rebate line on the performance card.
+  if (/referral:\s*BlackCatDeFi/i.test(line)) return true;
   if (/PEAR_REFERRAL_CODE/.test(line)) return true;
   if (/BCD_PEAR_REFERRAL_CODE/.test(line)) return true;
   if (/BCD_PEAR_REFERRAL_LINK/.test(line)) return true;

@@ -271,3 +271,43 @@ attributes the trades to "Black Cat" so users see who they're copying.
 - Tests in `tests/sanitizer.test.js` + `tests/round_autocopy.test.js`
   guard the allowlist boundary.
 
+---
+
+## R-PUBLIC-V3-TRACKING — secondary tracking row + Pyrus copy-purge (5 may 2026)
+
+**Pyrus removed from copy.** The Pyrus team has not delivered an updated
+referral link as of 5 may 2026. Promoting a 20% rebate (10% Pear + 10%
+Pyrus) when only Pear is verifiably live is misleading. Until Pyrus ships
+a working referral, the rebate copy is **Pear-only**:
+
+```
+10% fee rebate via Pear (referral: BlackCatDeFi)
+```
+
+When Pyrus delivers, override `FUND_REBATE_LINE` env var without redeploy.
+Do NOT re-introduce the Pyrus mention in source defaults until that link
+is live.
+
+**Secondary tracking row added to /start.** Two buttons sit BELOW the
+hero / size / perf / alerts rows:
+
+- `👁 TRACK MY OWN WALLET` → opens the existing `/track` flow via a
+  callback submenu (Add / List / Remove). Reuses `walletTracker.js` —
+  10-wallet limit per user preserved. Notifications from a user's own
+  tracked wallets remain ON-by-default once they add at least one wallet.
+- `🛡 MY HEALTH FACTOR` → portable read-only HyperLend HF reader. User
+  pastes an address, bot replies with `HF + bucket + collateral + debt +
+  LTV`. Fully off-by-default, no alerts unless the user separately
+  /tracks the wallet.
+
+**Permanent rules:**
+- Secondary buttons must NEVER outrank the hero CTA. Always last in the
+  keyboard, always a single row, always 2 buttons max.
+- The HF reader is read-only. It must never write to alertsConfig or
+  walletTracker without an explicit user action.
+- Time-to-copy must remain <1.5s cold. The HF module is `require()`-d
+  lazily (only on first HF callback) so the /start cold-boot path never
+  pays the cost.
+- Tests in `tests/tracking_secondary.test.js` + `tests/health_factor.test.js`
+  guard this section.
+

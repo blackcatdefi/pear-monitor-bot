@@ -26,6 +26,11 @@ const STATES = {
   AWAITING_REMOVE_ADDRESS: 'AWAITING_REMOVE_ADDRESS',
   AWAITING_PORTFOLIO_ADDRESS: 'AWAITING_PORTFOLIO_ADDRESS',
   AWAITING_FEEDBACK: 'AWAITING_FEEDBACK',
+  // R-PUBLIC-V3-TRACKING — Health Factor reader (HyperLend) takes a wallet
+  // address from the user and queries HyperLend on-chain. One-shot read,
+  // no persistent subscription unless the user explicitly /track-s the
+  // wallet first.
+  AWAITING_HF_ADDRESS: 'AWAITING_HF_ADDRESS',
 };
 
 function _timeoutMs() {

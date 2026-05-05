@@ -119,12 +119,14 @@ test('hero text mentions real money + YTD PnL + 1 tap + fee rebate', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. Keyboard layout when basket live = 4 rows (hero + size + perf + alerts)
+// 3. Keyboard layout when basket live = 5 rows
+//    (hero + size + perf + alerts + tracking [R-PUBLIC-V3-TRACKING])
 // ─────────────────────────────────────────────────────────────────────────────
 test('keyboard has 4 rows when basket is live', async () => {
   const kb = await simplifiedStart._buildKeyboard(9001);
   assert.ok(kb && kb.inline_keyboard);
-  assert.strictEqual(kb.inline_keyboard.length, 4);
+  // R-PUBLIC-V3-TRACKING added a 5th secondary row (track + HF buttons).
+  assert.strictEqual(kb.inline_keyboard.length, 5);
   // Row 0 = hero, single button.
   assert.strictEqual(kb.inline_keyboard[0].length, 1);
   assert.match(kb.inline_keyboard[0][0].text, /COPY MY BASKET/i);
@@ -245,8 +247,9 @@ test('empty basket falls back to PEAR_HERO_URL without crashing', async () => {
 
     assert.strictEqual(bot.sent.length, 1);
     const kb = bot.sent[0].opts.reply_markup;
-    // Without a live basket: hero + perf + alerts = 3 rows (no size selector).
-    assert.strictEqual(kb.inline_keyboard.length, 3);
+    // Without a live basket: hero + perf + alerts + tracking = 4 rows
+    // (no size selector; tracking row added by R-PUBLIC-V3-TRACKING).
+    assert.strictEqual(kb.inline_keyboard.length, 4);
     const hero = kb.inline_keyboard[0][0];
     assert.ok(hero.url, 'fallback hero must still be URL-tappable');
     assert.ok(/referral=BlackCatDeFi/.test(hero.url));
