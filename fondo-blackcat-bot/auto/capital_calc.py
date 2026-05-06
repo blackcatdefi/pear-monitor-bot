@@ -77,6 +77,20 @@ class NetCapital:
     property for any older callers that still reach for the old name.
     A new ``spot_stables_usd`` field carries the cash-equivalent bucket
     (USDT0, USDH, USDC-when-idle, etc.).
+
+    R-DASHBOARD-RABBY-PARITY (2026-05-06): ``total_equity_usd`` field
+    added for the Rabby parity headline. ``net_total_usd`` (post-leverage
+    exposure) excludes stables by design — see R-DASHBOARD-SPOT-FIX —
+    but Rabby's "Total" line counts stables as fund equity (because
+    they ARE — they're cash sitting in our wallets), so the dashboard
+    needs a separate top-line that matches Rabby pixel-for-pixel.
+
+        total_equity_usd = net_total_usd + spot_stables_usd
+                         = (hl_collateral - hl_debt) + perp_equity
+                           + spot_non_stable + spot_stables
+
+    Pear Protocol staked balance is added on top via ``pear_staked_usd``
+    (env-driven static value or, in the future, on-chain reader).
     """
 
     # Top-line: what the fund effectively owns (post-leverage).
@@ -99,6 +113,10 @@ class NetCapital:
     # Raw HL gross figures — exposed for the "leverage included" footer.
     hl_collateral_usd: float
     hl_debt_usd: float
+    # R-DASHBOARD-RABBY-PARITY: external DeFi positions (Pear Protocol
+    # staked, etc.) that don't show up in HL/perp/spot endpoints. Surfaced
+    # as a separate line and folded into ``total_equity_usd``.
+    pear_staked_usd: float = 0.0
 
     @property
     def spot_non_usdc_usd(self) -> float:
@@ -109,6 +127,20 @@ class NetCapital:
         transparently. New code should use ``spot_non_stable_usd``.
         """
         return self.spot_non_stable_usd
+
+    @property
+    def total_equity_usd(self) -> float:
+        """Total fund equity — matches Rabby's "Total" headline.
+
+        Includes stables (cash equivalent) AND any external DeFi positions
+        (Pear staked) on top of the post-leverage NET. This is the number
+        BCD wants to see at the top of the dashboard.
+        """
+        return (
+            self.net_total_usd
+            + self.spot_stables_usd
+            + self.pear_staked_usd
+        )
 
 
 def _coerce_floats(d: dict[str, Any]) -> dict[str, float]:
@@ -125,6 +157,8 @@ def _coerce_floats(d: dict[str, Any]) -> dict[str, float]:
         "spot_usd_total",
         "spot_stables_total",
         "upnl_perp_total",
+        # R-DASHBOARD-RABBY-PARITY: external DeFi (Pear Protocol staked).
+        "pear_staked_total",
     ):
         try:
             out[key] = float(d.get(key) or 0.0)
@@ -156,6 +190,7 @@ def compute_net_capital(snap: Any) -> NetCapital:
         spot = f["spot_usd_total"]
         stables = f["spot_stables_total"]
         upnl = f["upnl_perp_total"]
+        pear_staked = f["pear_staked_total"]
     else:
         def _get(name: str) -> float:
             try:
@@ -171,6 +206,9 @@ def compute_net_capital(snap: Any) -> NetCapital:
         # Falls back to 0.0 when the source pre-dates the fix (Snap fixtures).
         stables = _get("spot_stables_total")
         upnl = _get("upnl_perp_total")
+        # R-DASHBOARD-RABBY-PARITY: Pear staked surfaced via env or future
+        # on-chain reader. Defaults to 0 when not present.
+        pear_staked = _get("pear_staked_total")
 
     hl_net = hl_coll - hl_debt
     # NET = post-leverage capital exposure. UPnL is NOT added separately
@@ -184,17 +222,21 @@ def compute_net_capital(snap: Any) -> NetCapital:
     # GROSS = pre-leverage view (the old "Total" line). Kept informative.
     gross = hl_coll + perp + spot
 
+    total_equity = net + stables + pear_staked
     log.info(
         "capital_calc: hl_coll=%.2f hl_debt=%.2f hl_net=%.2f perp=%.2f "
-        "spot_non_stable=%.2f spot_stables=%.2f upnl=%.2f -> net=%.2f gross=%.2f",
+        "spot_non_stable=%.2f spot_stables=%.2f pear_staked=%.2f upnl=%.2f "
+        "-> net=%.2f total_equity=%.2f gross=%.2f",
         hl_coll,
         hl_debt,
         hl_net,
         perp,
         spot,
         stables,
+        pear_staked,
         upnl,
         net,
+        total_equity,
         gross,
     )
 
@@ -208,6 +250,7 @@ def compute_net_capital(snap: Any) -> NetCapital:
         gross_exposure_usd=gross,
         hl_collateral_usd=hl_coll,
         hl_debt_usd=hl_debt,
+        pear_staked_usd=pear_staked,
     )
 
 
@@ -237,43 +280,56 @@ def _fmt_signed(v: float) -> str:
 def format_net_capital_telegram(net: NetCapital) -> str:
     """Plain-text block for ``/reporte`` (top of POSICIONES section).
 
-    R-DASHBOARD-SPOT-FIX (2026-05-05): ``Spot non-USDC`` line was
-    renamed to ``Spot non-stable`` (semantically accurate — USDT0/USDH
-    are also stablecoins) and a ``Spot stables (cash equiv)`` line is
-    appended when the bucket is non-trivial.
+    R-DASHBOARD-RABBY-PARITY (2026-05-06): top line is now
+    ``TOTAL EQUITY`` (matches Rabby) with NET as a sub-line below.
 
     Layout::
 
-        💰 NET CAPITAL: $34.5K  (post-leverage)
-        ├─ HL net (col-debt): $31.6K
-        ├─ Perp account: $2.9K
-        ├─ Spot non-stable: $43.59
-        └─ UPnL perp (en perp): +$231.59
+        💰 TOTAL EQUITY: $36.6K  (Rabby parity)
+        ├─ NET (post-leverage): $33.6K
+        │   ├─ HL net (col-debt): $30.8K
+        │   ├─ Perp account: $2.7K
+        │   └─ Spot non-stable: $44
+        ├─ Spot stables (cash equiv): $1.7K
+        └─ Pear Protocol staked: $1.2K
 
-        Spot stables (cash equiv): $1.6K
-        ├─ (USDT0, USDH, USDC-idle, etc.)
+        UPnL perp (already en perp account): +$231
 
         Gross exposure: $79.0K  (leverage incluido — informativo)
         ├─ HL collateral: $73.2K
         └─ HL debt: -$45.3K
     """
     lines: list[str] = []
+    # ── Top line: total equity (Rabby parity) ─────────────────────────────
     lines.append(
-        f"💰 NET CAPITAL: {_fmt_usd(net.net_total_usd)}  (post-leverage)"
+        f"💰 TOTAL EQUITY: {_fmt_usd(net.total_equity_usd)}  (Rabby parity)"
     )
-    lines.append(f"├─ HL net (col-debt): {_fmt_usd(net.hl_net_usd)}")
-    lines.append(f"├─ Perp account: {_fmt_usd(net.perp_equity_usd)}")
-    lines.append(f"├─ Spot non-stable: {_fmt_usd(net.spot_non_stable_usd)}")
     lines.append(
-        f"└─ UPnL perp (en perp): {_fmt_signed(net.upnl_perp_usd)}"
+        f"├─ NET (post-leverage): {_fmt_usd(net.net_total_usd)}"
+    )
+    lines.append(f"│   ├─ HL net (col-debt): {_fmt_usd(net.hl_net_usd)}")
+    lines.append(f"│   ├─ Perp account: {_fmt_usd(net.perp_equity_usd)}")
+    lines.append(
+        f"│   └─ Spot non-stable: {_fmt_usd(net.spot_non_stable_usd)}"
+    )
+    if net.spot_stables_usd > 0.01 or net.pear_staked_usd > 0.01:
+        if net.spot_stables_usd > 0.01:
+            tee = "├─" if net.pear_staked_usd > 0.01 else "└─"
+            lines.append(
+                f"{tee} Spot stables (cash equiv): "
+                f"{_fmt_usd(net.spot_stables_usd)}"
+            )
+        if net.pear_staked_usd > 0.01:
+            lines.append(
+                f"└─ Pear Protocol staked: "
+                f"{_fmt_usd(net.pear_staked_usd)}"
+            )
+    lines.append("")
+    lines.append(
+        f"UPnL perp (already en perp account): "
+        f"{_fmt_signed(net.upnl_perp_usd)}"
     )
     lines.append("")
-    # R-DASHBOARD-SPOT-FIX: stables surfaced separately (not in NET).
-    if net.spot_stables_usd > 0.01:
-        lines.append(
-            f"Spot stables (cash equiv): {_fmt_usd(net.spot_stables_usd)}"
-        )
-        lines.append("")
     lines.append(
         f"Gross exposure: {_fmt_usd(net.gross_exposure_usd)}  "
         "(leverage incluido — informativo)"
@@ -292,6 +348,12 @@ def render_net_capital_html(
 ) -> str:
     """HTML fragment for the dashboard Capital card.
 
+    R-DASHBOARD-RABBY-PARITY (2026-05-06): top line is now ``TOTAL EQUITY``
+    matching Rabby's headline. NET (post-leverage exposure) is a sub-line
+    with HL/perp/spot-non-stable breakdown. ``Spot stables`` and
+    ``Pear Protocol staked`` are sibling sub-lines folded into the headline.
+    Gross exposure stays as the informative footer (leverage view).
+
     ``fmt_compact_usd`` and ``signed`` are passed in so the auto module
     stays decoupled from the dashboard's escape/format helpers.
 
@@ -302,28 +364,41 @@ def render_net_capital_html(
     if upnl_cls is None or upnl_fmt is None:
         upnl_cls, upnl_fmt = signed(net.upnl_perp_usd)
 
-    # R-DASHBOARD-SPOT-FIX: separate "Spot stables" cash-equivalent block,
-    # rendered only when non-trivial. Keeps the Capital card visually
-    # uncluttered when the fund has no stablecoins sitting in spot.
-    stables_block = ""
+    # R-DASHBOARD-RABBY-PARITY: optional sub-lines, only shown when > $0.01
+    # so empty buckets don't pollute the card.
+    extra_lines: list[str] = []
     if net.spot_stables_usd > 0.01:
-        stables_block = (
-            f"<p>&nbsp;</p>"
-            f"<p class='dim'>Spot stables (cash equiv): "
+        extra_lines.append(
+            f"<p>&nbsp;&nbsp;Spot stables (cash equiv): "
             f"{fmt_compact_usd(net.spot_stables_usd)}</p>"
         )
+    if net.pear_staked_usd > 0.01:
+        extra_lines.append(
+            f"<p>&nbsp;&nbsp;Pear Protocol staked: "
+            f"{fmt_compact_usd(net.pear_staked_usd)}</p>"
+        )
+    extra_block = "".join(extra_lines)
 
     return (
-        f"<p>💰 <strong>NET: {fmt_compact_usd(net.net_total_usd)}</strong>"
-        f" <span class='dim'>(post-leverage)</span></p>"
-        f"<p class='dim'>Breakdown:</p>"
-        f"<p>&nbsp;&nbsp;HL net (col-debt): {fmt_compact_usd(net.hl_net_usd)}</p>"
-        f"<p>&nbsp;&nbsp;Perp account: {fmt_compact_usd(net.perp_equity_usd)}</p>"
-        f"<p>&nbsp;&nbsp;Spot non-stable: {fmt_compact_usd(net.spot_non_stable_usd)}</p>"
+        # ── Headline: TOTAL EQUITY (Rabby parity) ──────────────────────
+        f"<p>💰 <strong>TOTAL EQUITY: "
+        f"{fmt_compact_usd(net.total_equity_usd)}</strong>"
+        f" <span class='dim'>(Rabby parity)</span></p>"
+        # ── Sub: NET (post-leverage exposure) ──────────────────────────
+        f"<p>&nbsp;&nbsp;NET (post-leverage): "
+        f"{fmt_compact_usd(net.net_total_usd)}</p>"
+        f"<p>&nbsp;&nbsp;&nbsp;&nbsp;HL net (col-debt): "
+        f"{fmt_compact_usd(net.hl_net_usd)}</p>"
+        f"<p>&nbsp;&nbsp;&nbsp;&nbsp;Perp account: "
+        f"{fmt_compact_usd(net.perp_equity_usd)}</p>"
+        f"<p>&nbsp;&nbsp;&nbsp;&nbsp;Spot non-stable: "
+        f"{fmt_compact_usd(net.spot_non_stable_usd)}</p>"
+        # ── Sibling sub-lines: stables + Pear staked ───────────────────
+        f"{extra_block}"
         f"<p>&nbsp;&nbsp;UPnL perp (en perp): "
         f"<span class='{upnl_cls}'>{upnl_fmt}</span></p>"
-        f"{stables_block}"
         f"<p>&nbsp;</p>"
+        # ── Footer: gross exposure (informative leverage view) ─────────
         f"<p class='dim'>Gross exposure: {fmt_compact_usd(net.gross_exposure_usd)}"
         f" <span class='dim'>(leverage incluido — informativo)</span></p>"
         f"<p>&nbsp;&nbsp;HL collateral: {fmt_compact_usd(net.hl_collateral_usd)}</p>"

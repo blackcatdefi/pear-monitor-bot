@@ -158,7 +158,10 @@ def test_dashboard_matches_reporte_net_value():
 def test_telegram_block_contains_breakdown_lines():
     net = compute_net_capital(_live_dict())
     tg = format_net_capital_telegram(net)
-    assert "NET CAPITAL" in tg
+    # R-DASHBOARD-RABBY-PARITY (2026-05-06): top-line is TOTAL EQUITY now;
+    # NET (post-leverage) is a sub-line. Both must be present.
+    assert "TOTAL EQUITY" in tg
+    assert "NET (post-leverage)" in tg
     assert "HL net (col-debt)" in tg
     assert "Perp account" in tg
     # R-DASHBOARD-SPOT-FIX: label renamed Spot non-USDC → Spot non-stable.
@@ -169,13 +172,16 @@ def test_telegram_block_contains_breakdown_lines():
     assert "HL debt" in tg
 
 
-def test_html_block_marks_net_as_top_line():
+def test_html_block_marks_total_equity_as_top_line():
+    """R-DASHBOARD-RABBY-PARITY: TOTAL EQUITY is the headline, NET is a
+    sub-line below it, gross exposure remains the informative footer."""
     net = compute_net_capital(_live_dict())
     html = render_net_capital_html(net, _fmt_compact_usd, _signed)
-    # NET must precede gross in the rendered fragment — readers see NET first.
-    net_idx = html.index("NET:")
+    # TOTAL EQUITY must precede NET, which must precede gross.
+    total_idx = html.index("TOTAL EQUITY")
+    net_idx = html.index("NET (post-leverage)")
     gross_idx = html.index("Gross exposure")
-    assert net_idx < gross_idx
+    assert total_idx < net_idx < gross_idx
 
 
 # ---------------------------------------------------------------------------

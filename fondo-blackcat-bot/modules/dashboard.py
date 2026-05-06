@@ -170,74 +170,134 @@ def _render_html(state: dict[str, Any]) -> str:
     )
 
     # ─── Flywheel principal ───────────────────────────────────────────────
+    # R-DASHBOARD-RABBY-PARITY (2026-05-06): branch on hf_status so the
+    # card never renders literal ``nan``. The previous implementation
+    # called ``f"{float(main['hf']):.3f}"`` directly on a NaN whenever the
+    # HyperEVM RPC rate-limited the per-wallet refresh — surfaced 'nan'
+    # in both flywheels in the may 6 09:09 UTC parity audit.
+    from auto.wallet_labels import apply_wallet_label as _apply_label
+
+    def _render_hf_block(card_data: dict[str, Any]) -> str:
+        """Render a flywheel card with hf_status-aware HF fallback."""
+        status = (card_data.get("hf_status") or "OK").upper()
+        # Live HF
+        live_hf = card_data.get("hf")
+        live_hf_str = "—"
+        if live_hf is not None:
+            try:
+                if live_hf == float("inf"):
+                    live_hf_str = "∞"
+                else:
+                    f_hf = float(live_hf)
+                    import math as _math
+                    if _math.isfinite(f_hf):
+                        live_hf_str = f"{f_hf:.3f}"
+            except Exception:  # noqa: BLE001
+                live_hf_str = "—"
+
+        # Cached HF (fallback path for UNKNOWN)
+        last_hf = card_data.get("last_known_hf")
+        age_s = card_data.get("age_seconds")
+        if isinstance(age_s, (int, float)):
+            if age_s < 60:
+                age_label = f"{int(age_s)}s ago"
+            elif age_s < 3600:
+                age_label = f"{int(age_s) // 60}min ago"
+            else:
+                age_label = f"{int(age_s) // 3600}h ago"
+        else:
+            age_label = "?"
+
+        if status == "OK" and live_hf_str != "—":
+            hf_render = f"<strong>{_esc(live_hf_str)}</strong>"
+        elif status == "ZERO":
+            hf_render = "<span class='dim'>n/a (no positions)</span>"
+        else:
+            # UNKNOWN — render last-known with cache badge
+            if last_hf is None:
+                hf_render = (
+                    "<span style='color:#ffaa00;'>⚠️ rate-limited "
+                    "(no prior cache)</span>"
+                )
+            elif isinstance(last_hf, str):
+                # 'inf' sentinel
+                hf_render = (
+                    "<span style='color:#ffaa00;'>⚠️ "
+                    f"last HF ∞ (cached {_esc(age_label)})</span>"
+                )
+            else:
+                try:
+                    last_hf_str = f"{float(last_hf):.3f}"
+                except Exception:  # noqa: BLE001
+                    last_hf_str = "—"
+                hf_render = (
+                    f"<strong>{_esc(last_hf_str)}</strong>"
+                    f" <span style='color:#ffaa00;'>(cached {_esc(age_label)})</span>"
+                )
+
+        # Apply canonical wallet label
+        canonical_label = _apply_label(
+            card_data.get("address"), card_data.get("label")
+        )
+        # Collateral / debt rendering
+        coll_amt = (
+            _fmt_token_amount(card_data.get("collateral_balance"), dec=2)
+            if card_data.get("collateral_balance") else "—"
+        )
+        coll_sym = card_data.get("collateral_symbol") or "?"
+        debt_amt = (
+            _fmt_token_amount(card_data.get("debt_balance"), dec=4)
+            if card_data.get("debt_balance") else "—"
+        )
+        debt_sym_raw = card_data.get("debt_symbol")
+        debt_asset = card_data.get("debt_asset") or ""
+        debt_sym = debt_sym_raw or (
+            debt_asset[:6] + "…" + debt_asset[-4:]
+            if len(debt_asset) >= 10 else "?"
+        )
+        return (
+            f"<p><strong>{_esc(canonical_label)}</strong>"
+            f" <span class='dim'>{_esc(card_data.get('short'))}</span></p>"
+            f"<p>HF: {hf_render}</p>"
+            f"<p>Collateral: {_esc(coll_amt)} {_esc(coll_sym)}"
+            f" <span class='dim'>({_esc(_fmt_compact_usd(card_data.get('collateral_usd')))})</span></p>"
+            f"<p>Debt: {_esc(debt_amt)} {_esc(debt_sym)}"
+            f" <span class='dim'>({_esc(_fmt_compact_usd(card_data.get('debt_usd')))})</span></p>"
+        )
+
     main = state.get("main_flywheel")
     if main is not None:
-        try:
-            hf_str = f"{float(main['hf']):.3f}" if main.get("hf") is not None else "—"
-        except Exception:
-            hf_str = "—"
-        coll_amt = _fmt_token_amount(main.get("collateral_balance"), dec=2) \
-            if main.get("collateral_balance") else "—"
-        coll_sym = main.get("collateral_symbol") or "?"
-        debt_amt = _fmt_token_amount(main.get("debt_balance"), dec=4) \
-            if main.get("debt_balance") else "—"
-        _debt_sym_raw = main.get("debt_symbol")
-        _debt_asset = main.get("debt_asset") or ""
-        debt_sym = _debt_sym_raw or (
-            _debt_asset[:6] + "…" + _debt_asset[-4:]
-            if len(_debt_asset) >= 10 else "?"
-        )
-        flywheel_html = (
-            f"<p>Wallet: <span class='dim'>{_esc(main.get('short'))}</span></p>"
-            f"<p>HF: <strong>{_esc(hf_str)}</strong></p>"
-            f"<p>Collateral: {_esc(coll_amt)} {_esc(coll_sym)}"
-            f" <span class='dim'>({_esc(_fmt_compact_usd(main.get('collateral_usd')))})</span></p>"
-            f"<p>Debt: {_esc(debt_amt)} {_esc(debt_sym)}"
-            f" <span class='dim'>({_esc(_fmt_compact_usd(main.get('debt_usd')))})</span></p>"
-        )
+        flywheel_html = _render_hf_block(main)
     else:
         flywheel_html = "<p class='dim'>No active HyperLend flywheel (no debt).</p>"
 
-    # Secondary flywheel (chico) — solo si existe
+    # Secondary flywheel (chico) — solo si existe y no es dust ($50 floor).
+    # The historical secondary flywheel (0xCDDF…F22E) was closed by BCD; if
+    # only residual debris remains we hide the card to avoid clutter.
+    from auto.wallet_labels import is_dust as _is_dust
     sec = state.get("secondary_flywheel")
     secondary_html = ""
     if sec is not None:
-        try:
-            hf_str2 = f"{float(sec['hf']):.3f}" if sec.get("hf") is not None else "—"
-        except Exception:
-            hf_str2 = "—"
-        # R-DASH-FIX Bug 4: mirror the conditional-check pattern from the main
-        # flywheel so "0.0000 ?" never appears when per-reserve data is absent.
-        sec_coll_amt = (
-            _fmt_token_amount(sec.get("collateral_balance"), dec=4)
-            if sec.get("collateral_balance") else "—"
+        sec_capital = float(
+            (sec.get("collateral_usd") or 0.0)
+            + abs(sec.get("debt_usd") or 0.0)
         )
-        sec_coll_sym = sec.get("collateral_symbol") or "?"
-        sec_debt_amt = (
-            _fmt_token_amount(sec.get("debt_balance"), dec=4)
-            if sec.get("debt_balance") else "—"
-        )
-        _sec_debt_sym_raw = sec.get("debt_symbol")
-        _sec_debt_asset = sec.get("debt_asset") or ""
-        sec_debt_sym = _sec_debt_sym_raw or (
-            _sec_debt_asset[:6] + "…" + _sec_debt_asset[-4:]
-            if len(_sec_debt_asset) >= 10 else "?"
-        )
-        secondary_html = (
-            "<div class='card'>"
-            "<h2>Secondary flywheel</h2>"
-            f"<p>Wallet: <span class='dim'>{_esc(sec.get('short'))}</span></p>"
-            f"<p>HF: <strong>{_esc(hf_str2)}</strong></p>"
-            f"<p>Collateral: {_esc(sec_coll_amt)} {_esc(sec_coll_sym)}"
-            f" <span class='dim'>({_esc(_fmt_compact_usd(sec.get('collateral_usd')))})</span></p>"
-            f"<p>Debt: {_esc(sec_debt_amt)} {_esc(sec_debt_sym)}"
-            f" <span class='dim'>({_esc(_fmt_compact_usd(sec.get('debt_usd')))})</span></p>"
-            "</div>"
-        )
+        if not _is_dust(sec_capital):
+            secondary_html = (
+                "<div class='card'>"
+                "<h2>Secondary flywheel</h2>"
+                + _render_hf_block(sec)
+                + "</div>"
+            )
 
     # ─── Basket activa (R-SILENT autodetect) ─────────────────────────────
     # Datos vienen de auto.fund_state_v2.detect_active_baskets() (on-chain).
     # No hardcodeamos número de basket — eso es metadata humana, no del bot.
+    #
+    # R-DASHBOARD-RABBY-PARITY (2026-05-06): each leg now also renders the
+    # entry price, mark price, leverage and side colour so the card is
+    # actionable at-a-glance. ``leverage = ntl / margin_used`` derived from
+    # the underlying perp account state when available.
     basket_rows: list[str] = []
     basket_state = state.get("basket_state") or {}
     active_wallets = []
@@ -246,16 +306,10 @@ def _render_html(state: dict[str, Any]) -> str:
             active_wallets.append((addr, w))
 
     if active_wallets:
-        # Por wallet → mostrar posiciones ordenadas por notional desc.
-        # R-DASH-FIX: prefer ``positions`` (basket-agnostic, all sides)
-        # with fallback to legacy ``shorts`` (SHORT-only view) for older
-        # callers / cached snapshots.
         for addr, w in active_wallets:
             short_addr = addr[:6] + "…" + addr[-4:] if len(addr) >= 10 else addr
             # R-DASH-FIX Bug 5: dynamic label — show basket_id_inferido + leg
             # count so "Alt Short Bleed v4" (stale env-var label) is never shown.
-            # basket_id_inferido is derived on-chain by fund_state_v2 from the
-            # actual position coins, e.g. "v6" for DYDX/OP/ARB/PYTH/ENA basket.
             basket_id = w.get("basket_id_inferido") or ""
             all_legs = w.get("positions") or w.get("shorts") or []
             n_legs = len(all_legs)
@@ -265,8 +319,11 @@ def _render_html(state: dict[str, Any]) -> str:
                 basket_display = f"Basket {basket_id}"
             else:
                 basket_display = w.get("label", "")
+            # R-DASHBOARD-RABBY-PARITY: apply canonical wallet label
+            wallet_canonical = _apply_label(addr, w.get("label"))
             basket_rows.append(
-                f"<p>Wallet: <span class='dim'>{_esc(short_addr)}</span>"
+                f"<p><strong>{_esc(wallet_canonical)}</strong>"
+                f" <span class='dim'>{_esc(short_addr)}</span> ·"
                 f" <strong>{_esc(basket_display)}</strong></p>"
             )
             entries = w.get("positions") or w.get("shorts") or []
@@ -288,10 +345,38 @@ def _render_html(state: dict[str, Any]) -> str:
                             break
                 cls, fmt = _signed(upnl) if upnl is not None else ("dim", "—")
                 side = (s.get("side") or "SHORT").upper()
+                # R-DASHBOARD-RABBY-PARITY: side colour cue (LONG green / SHORT red).
+                side_colour = "#00ff88" if side == "LONG" else "#ff8866"
+                ntl_val = float(s.get("ntl") or 0.0)
+                # Optional enrichment: entry / mark / leverage (basket detector
+                # ships them when available; gracefully skipped when absent).
+                entry_px = s.get("entry_px") or s.get("entryPx")
+                mark_px = s.get("mark_px") or s.get("markPx")
+                leverage = s.get("leverage") or s.get("lev")
+                detail_bits: list[str] = []
+                if entry_px:
+                    try:
+                        detail_bits.append(f"entry ${float(entry_px):,.4f}")
+                    except (TypeError, ValueError):
+                        pass
+                if mark_px:
+                    try:
+                        detail_bits.append(f"mark ${float(mark_px):,.4f}")
+                    except (TypeError, ValueError):
+                        pass
+                if leverage:
+                    try:
+                        detail_bits.append(f"{float(leverage):.1f}x")
+                    except (TypeError, ValueError):
+                        pass
+                detail_str = (
+                    " · " + " · ".join(detail_bits) if detail_bits else ""
+                )
                 basket_rows.append(
-                    f"<p>&nbsp;&nbsp;{_esc(s.get('coin'))} {_esc(side)}"
+                    f"<p>&nbsp;&nbsp;{_esc(s.get('coin'))} "
+                    f"<span style='color:{side_colour};'>{_esc(side)}</span>"
                     f" <span class='{cls}'>{_esc(fmt)}</span>"
-                    f" <span class='dim'>(ntl ${float(s.get('ntl') or 0.0):,.0f})</span></p>"
+                    f" <span class='dim'>(ntl ${ntl_val:,.0f}{detail_str})</span></p>"
                 )
         # Total
         bcls, bfmt = _signed(state.get("basket_upnl") or 0.0)
@@ -303,6 +388,22 @@ def _render_html(state: dict[str, Any]) -> str:
     else:
         basket_rows.append(
             "<p class='dim'>No open positions in fund wallets.</p>"
+        )
+
+    # ─── Pear Protocol staked (R-DASHBOARD-RABBY-PARITY) ─────────────────
+    # Surface external DeFi positions that don't show up in HL / perp / spot
+    # endpoints. Today only Pear Protocol staked is exposed (env-driven);
+    # an on-chain reader will replace the env var in a future round.
+    pear_staked_total = float(state.get("pear_staked_total") or 0.0)
+    pear_card_html = ""
+    if pear_staked_total > 0.01:
+        pear_card_html = (
+            "<div class='card'>"
+            "<h2>External DeFi</h2>"
+            f"<p><strong>Pear Protocol staked</strong> · "
+            f"<strong>{_esc(_fmt_compact_usd(pear_staked_total))}</strong></p>"
+            "<p class='dim'>Folded into TOTAL EQUITY (Rabby parity).</p>"
+            "</div>"
         )
 
     # ─── Próximos catalysts (macro calendar) ──────────────────────────────
@@ -317,24 +418,52 @@ def _render_html(state: dict[str, Any]) -> str:
         upcoming_rows.append("<p class='dim'>No upcoming events in calendar.</p>")
 
     # ─── Wallets breakdown ───────────────────────────────────────────────
+    # R-DASHBOARD-RABBY-PARITY (2026-05-06): apply canonical labels + dust
+    # filter ($50 floor). Wallets carrying < $50 of capital collapse into a
+    # single "Dust: $X" footer line so the card is dominated by the wallets
+    # that actually matter for risk decisions.
+    from auto.wallet_labels import (
+        apply_wallet_label as _apply_label_w,
+        is_dust as _is_dust_w,
+    )
     wallet_rows: list[str] = []
+    dust_total = 0.0
+    dust_count = 0
     for ws in state.get("wallets") or []:
-        if ws.get("capital") < 0.01:
+        cap_val = float(ws.get("capital") or 0.0)
+        if cap_val < 0.01:
+            continue
+        # Pre-canonical: stale env-var label may say e.g. "Reserva histórica"
+        # or "Alt Short Bleed v4"; the canonical map fixes this regardless of
+        # whether Railway env vars were rotated.
+        canonical = _apply_label_w(ws.get("address"), ws.get("label"))
+        # Dust gate — every wallet below $50 collapses into the dust footer.
+        if _is_dust_w(cap_val):
+            dust_total += cap_val
+            dust_count += 1
             continue
         parts = []
         if ws.get("perp", 0) > 0.01:
             parts.append(f"Perp {_fmt_compact_usd(ws['perp'])}")
         if ws.get("spot", 0) > 0.01:
             parts.append(f"Spot {_fmt_compact_usd(ws['spot'])}")
+        if ws.get("spot_stables", 0) > 0.01:
+            parts.append(f"Stables {_fmt_compact_usd(ws['spot_stables'])}")
         if ws.get("hl_coll", 0) > 0.01:
             parts.append(f"HL {_fmt_compact_usd(ws['hl_coll'])}")
         if ws.get("hl_debt", 0) > 0.01:
             parts.append(f"Debt -{_fmt_compact_usd(ws['hl_debt'])}")
         wallet_rows.append(
-            f"<p><strong>{_esc(ws.get('label'))}</strong>"
+            f"<p><strong>{_esc(canonical)}</strong>"
             f" <span class='dim'>{_esc(ws.get('short'))}</span> ·"
-            f" <strong>{_esc(_fmt_compact_usd(ws.get('capital')))}</strong>"
+            f" <strong>{_esc(_fmt_compact_usd(cap_val))}</strong>"
             f"<br><span class='dim'>{' · '.join(parts) if parts else '—'}</span></p>"
+        )
+    if dust_count > 0:
+        wallet_rows.append(
+            f"<p class='dim'>Dust ({dust_count} wallet"
+            f"{'s' if dust_count != 1 else ''}): "
+            f"{_fmt_compact_usd(dust_total)}</p>"
         )
     if not wallet_rows:
         wallet_rows.append("<p class='dim'>No wallets reported.</p>")
@@ -454,6 +583,8 @@ def _render_html(state: dict[str, Any]) -> str:
         </div>
 
         {secondary_html}
+
+        {pear_card_html}
 
         <div class="card">
             <h2>Active basket (autodetect)</h2>
@@ -621,6 +752,18 @@ async def _build_state() -> dict[str, Any]:
             # R-DASHBOARD-DEBT-SYMBOL: underlying asset address used as
             # short-form fallback when debt_symbol is still None (unknown reserve).
             "debt_asset": ws.debt_asset,
+            # R-DASHBOARD-RABBY-PARITY (2026-05-06): HF cache-fallback fields
+            # propagated to the renderer so it can branch UNKNOWN / OK / ZERO
+            # and never emit literal NaN.
+            "hf_status": getattr(ws, "hf_status", "OK"),
+            "last_known_hf": getattr(ws, "last_known_hf", None),
+            "age_seconds": getattr(ws, "age_seconds", None),
+            "last_known_at_iso": getattr(ws, "last_known_at_iso", None),
+            "last_known_collateral_usd": getattr(
+                ws, "last_known_collateral_usd", 0.0
+            ),
+            "last_known_debt_usd": getattr(ws, "last_known_debt_usd", 0.0),
+            "recovered_from_cache": getattr(ws, "recovered_from_cache", False),
         }
 
     return {
@@ -635,6 +778,10 @@ async def _build_state() -> dict[str, Any]:
         # "Spot non-USDC" line by counting USDT0/USDH/etc.
         "spot_usd_total": snap.spot_usd_total,
         "spot_stables_total": getattr(snap, "spot_stables_total", 0.0),
+        # R-DASHBOARD-RABBY-PARITY (2026-05-06): Pear Protocol staked is
+        # surfaced via env var (or future on-chain reader) and folded into
+        # the TOTAL EQUITY headline by ``auto.capital_calc.compute_net_capital``.
+        "pear_staked_total": getattr(snap, "pear_staked_total", 0.0),
         # R-DASH-FIX Bug 2: use fresh UPnL — same source as /posiciones.
         "upnl_perp_total": upnl_fresh if fresh_wallets else snap.upnl_perp_total,
         "main_flywheel": _ws_to_dict(snap.main_flywheel),

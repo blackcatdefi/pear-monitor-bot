@@ -159,6 +159,21 @@ class WalletSnapshot:
     raw_positions: list[dict[str, Any]] = field(default_factory=list)
     # R-DASH-FIX Bug 1: raw spot balances for per-token display in dashboard
     spot_balances: list[dict[str, Any]] = field(default_factory=list)
+    # R-DASHBOARD-RABBY-PARITY (2026-05-06): HF cache-fallback fields
+    # propagated from auto.hyperlend_reader so the dashboard can render
+    # ``HF: 1.24 (cached 2min ago)`` instead of literal ``nan`` when the
+    # HyperEVM RPC rate-limits a per-wallet refresh. Values come from
+    # ``read_all_with_cache``'s ``hf_status`` taxonomy:
+    #   'OK'      → live read, ``health_factor`` valid
+    #   'ZERO'    → wallet truly empty (no col + no debt)
+    #   'UNKNOWN' → fetch failed, ``last_known_*`` populated from JSON cache
+    hf_status: str = "OK"
+    last_known_hf: Any = None  # float | "inf" sentinel | None
+    last_known_at_iso: str | None = None
+    last_known_collateral_usd: float = 0.0
+    last_known_debt_usd: float = 0.0
+    age_seconds: int | None = None
+    recovered_from_cache: bool = False
 
 
 @dataclass
@@ -201,6 +216,12 @@ class PortfolioSnapshot:
     # across all fund wallets. Defaults to 0.0 to keep the existing kwargs
     # construction sites compatible with older callers.
     spot_stables_total: float = 0.0
+    # R-DASHBOARD-RABBY-PARITY (2026-05-06): external DeFi positions
+    # surfaced through the env-var ``PEAR_STAKED_USD`` (BCD-controlled
+    # static value while we don't yet have an on-chain Pear Protocol
+    # reader). Folded into the dashboard's TOTAL EQUITY headline by
+    # ``auto.capital_calc.compute_net_capital``. Defaults to 0.0.
+    pear_staked_total: float = 0.0
 
 
 # ─── Aggregator ─────────────────────────────────────────────────────────────
@@ -570,8 +591,12 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
     )
 
     # ─── HyperLend by wallet ──────────────────────────────────────────────
-    # Lower-cased addr → full HL data row (data dict from fetch_all_hyperlend)
+    # Lower-cased addr → full HL data row (data dict from fetch_all_hyperlend).
+    # R-DASHBOARD-RABBY-PARITY (2026-05-06): we now also stash the
+    # ``hf_status`` taxonomy from the hyperlend_reader entry so per-wallet
+    # snapshots can branch UNKNOWN / OK / ZERO at render time.
     hl_by_wallet: dict[str, dict[str, Any]] = {}
+    hl_status_by_wallet: dict[str, str] = {}
     if isinstance(hl, list):
         for r in hl:
             if r.get("status") != "ok":
@@ -580,6 +605,7 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
             addr = (d.get("wallet") or "").lower()
             if addr:
                 hl_by_wallet[addr] = d
+                hl_status_by_wallet[addr] = r.get("hf_status") or "OK"
 
     # ─── Per-wallet snapshot ──────────────────────────────────────────────
     wallet_snaps: list[WalletSnapshot] = []
@@ -631,6 +657,14 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
                     })
 
             _pd = hl_data.get("primary_debt")
+            # R-DASHBOARD-RABBY-PARITY: pull hf_status + cache-fallback
+            # fields out of hl_data so the dashboard can branch on them
+            # instead of rendering literal NaN.
+            _age = hl_data.get("age_seconds")
+            try:
+                _age_int = int(_age) if _age is not None else None
+            except (TypeError, ValueError):
+                _age_int = None
             wallet_snaps.append(WalletSnapshot(
                 address=addr,
                 label=label,
@@ -652,6 +686,19 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
                 raw_positions=list(d.get("positions") or []),
                 # R-DASH-FIX Bug 1: preserve raw spot_balances for per-token display
                 spot_balances=list(d.get("spot_balances") or []),
+                hf_status=hl_status_by_wallet.get(addr, "OK"),
+                last_known_hf=hl_data.get("last_known_hf"),
+                last_known_at_iso=hl_data.get("last_known_at_iso"),
+                last_known_collateral_usd=float(
+                    hl_data.get("last_known_collateral_usd") or 0.0
+                ),
+                last_known_debt_usd=float(
+                    hl_data.get("last_known_debt_usd") or 0.0
+                ),
+                age_seconds=_age_int,
+                recovered_from_cache=bool(
+                    hl_data.get("recovered_from_cache") or False
+                ),
             ))
 
     # Some HyperLend wallets may not be listed in FUND_WALLETS (e.g. legacy
@@ -666,6 +713,11 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
         if coll < 0.01 and debt < 0.01:
             continue
         _pd2 = hl_data.get("primary_debt")
+        _age2 = hl_data.get("age_seconds")
+        try:
+            _age2_int = int(_age2) if _age2 is not None else None
+        except (TypeError, ValueError):
+            _age2_int = None
         wallet_snaps.append(WalletSnapshot(
             address=addr,
             label=hl_data.get("label") or "HyperLend",
@@ -682,6 +734,19 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
             debt_symbol=hl_data.get("debt_symbol"),
             debt_balance=float(hl_data.get("debt_balance") or 0.0),
             debt_asset=(_pd2.get("asset") if isinstance(_pd2, dict) else None),
+            hf_status=hl_status_by_wallet.get(addr, "OK"),
+            last_known_hf=hl_data.get("last_known_hf"),
+            last_known_at_iso=hl_data.get("last_known_at_iso"),
+            last_known_collateral_usd=float(
+                hl_data.get("last_known_collateral_usd") or 0.0
+            ),
+            last_known_debt_usd=float(
+                hl_data.get("last_known_debt_usd") or 0.0
+            ),
+            age_seconds=_age2_int,
+            recovered_from_cache=bool(
+                hl_data.get("recovered_from_cache") or False
+            ),
         ))
 
     # Sort wallets by capital descending (matches /reporte ordering)
@@ -719,6 +784,17 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
     spot_stables_total = sum(ws.spot_stables_usd for ws in wallet_snaps)
     upnl_perp_total = sum(ws.upnl_perp for ws in wallet_snaps)
 
+    # R-DASHBOARD-RABBY-PARITY (2026-05-06): Pear Protocol staked balance
+    # is BCD-controlled via env var PEAR_STAKED_USD. It does not show up
+    # in any HL/perp/spot endpoint, so without this surface the dashboard
+    # under-counts fund equity by ~$1.2K vs. Rabby. The env var is
+    # intentionally static for now — when the on-chain Pear Protocol
+    # reader lands it will replace this in-place.
+    try:
+        pear_staked_total = float(os.getenv("PEAR_STAKED_USD", "0") or 0)
+    except (TypeError, ValueError):
+        pear_staked_total = 0.0
+
     return PortfolioSnapshot(
         wallets=wallet_snaps,
         capital_total=capital_total,
@@ -738,4 +814,5 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
         is_fresh=True,
         fetch_attempts=1,
         last_error=None,
+        pear_staked_total=pear_staked_total,
     )

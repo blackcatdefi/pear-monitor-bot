@@ -419,7 +419,10 @@ class TestDashboardFlywheelShowsAssetSymbols:
             "last_error": None,
             "basket_state": {
                 "wallets": {
-                    "0xc7ae": {
+                    # R-DASHBOARD-RABBY-PARITY: full canonical address so the
+                    # wallet-labels override map ("BlackCatDeFi EVM (Trading)")
+                    # neutralises the stale env-var label.
+                    "0xc7ae23316b47f7e75f455f53ad37873a18351505": {
                         "status": "ACTIVE",
                         "label": "Alt Short Bleed v4",   # stale env-var label
                         "basket_id_inferido": "v6",       # dynamically detected
@@ -446,9 +449,15 @@ class TestDashboardFlywheelShowsAssetSymbols:
             "spot_tokens": [],
         }
         html = _render_html(state)
-        # Must show v6 with leg count — NOT the stale wallet label
+        # Must show v6 with leg count — NOT the stale wallet label.
+        # R-DASHBOARD-RABBY-PARITY: canonical-map override replaces the
+        # stale env label with "BlackCatDeFi EVM (Trading)".
         assert "Alt Short Bleed v4" not in html, (
-            "Stale hardcoded basket label 'Alt Short Bleed v4' still in HTML"
+            "Stale env-var label 'Alt Short Bleed v4' still in HTML — "
+            "canonical-map override not applied."
+        )
+        assert "BlackCatDeFi EVM (Trading)" in html, (
+            "Canonical wallet label must replace stale env-var label."
         )
         assert "v6" in html, "basket_id_inferido 'v6' must appear in HTML"
         assert "20 legs" in html, "Leg count must be shown (20 positions)"

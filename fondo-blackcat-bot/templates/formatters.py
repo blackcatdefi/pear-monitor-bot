@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -315,6 +316,13 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                 pass
 
         from auto.capital_calc import compute_net_capital, format_net_capital_telegram
+        # R-DASHBOARD-RABBY-PARITY (2026-05-06): Pear Protocol staked is
+        # surfaced via env var PEAR_STAKED_USD (or future on-chain reader)
+        # and folded into the TOTAL EQUITY headline alongside HL/perp/spot.
+        try:
+            _pear_total = float(os.getenv("PEAR_STAKED_USD", "0") or 0)
+        except (TypeError, ValueError):
+            _pear_total = 0.0
         _net = compute_net_capital({
             "hl_collateral_total": _hl_coll_total,
             "hl_debt_total": _hl_debt_total,
@@ -324,6 +332,7 @@ def format_quick_positions(wallets: list[dict[str, Any]],
             "spot_usd_total": _spot_non_stable_total,
             "spot_stables_total": _spot_stables_total,
             "upnl_perp_total": _upnl_total,
+            "pear_staked_total": _pear_total,
         })
         lines.append(format_net_capital_telegram(_net))
         lines.append("")
