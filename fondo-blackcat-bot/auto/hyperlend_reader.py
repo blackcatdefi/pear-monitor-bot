@@ -219,14 +219,30 @@ def _persist_ok(entry: dict[str, Any], cache: dict[str, Any]) -> None:
         if isinstance(primary_debt, dict):
             debt_sym = _sym_from_asset(primary_debt.get("asset"))
 
+    # R-DASHBOARD-DOUBLECOUNT-FIX (2026-05-06) Bug #2: same fallback chain
+    # for collateral. Without it, a per-reserve RPC failure left
+    # collateral_symbol=None on the live entry → main flywheel rendered
+    # "Collateral: 0.00 UETH ($75.7K)" because downstream defaulted to
+    # whatever string was first in the entry. The known-reserve address
+    # map (WHYPE = 0x5555…5555) covers ~95% of fund collateral assets.
+    if not coll_sym:
+        primary_coll = data.get("primary_collateral")
+        if isinstance(primary_coll, dict):
+            coll_sym = _sym_from_asset(primary_coll.get("asset"))
+
     # Protect the cache from null-overwrite: if the newly-fetched data still
     # has no symbol (total enumeration failure), preserve the previously-known
-    # good value so future UNKNOWN recoveries can still show "UETH" / "USDH".
+    # good value so future UNKNOWN recoveries can still show "UETH" / "USDH"
+    # / "WHYPE".
     existing = cache.get(addr) or {}
     if not debt_sym and existing.get("debt_symbol"):
         debt_sym = existing["debt_symbol"]
         if not debt_bal:
             debt_bal = float(existing.get("debt_balance") or 0.0)
+    if not coll_sym and existing.get("collateral_symbol"):
+        coll_sym = existing["collateral_symbol"]
+        if not coll_bal:
+            coll_bal = float(existing.get("collateral_balance") or 0.0)
 
     # Write the resolved values back into the live entry so that downstream
     # consumers (portfolio_snapshot → dashboard) see the correct symbol/balance
@@ -235,6 +251,10 @@ def _persist_ok(entry: dict[str, Any], cache: dict[str, Any]) -> None:
         data["debt_symbol"] = debt_sym
     if debt_bal and not data.get("debt_balance"):
         data["debt_balance"] = debt_bal
+    if coll_sym and not data.get("collateral_symbol"):
+        data["collateral_symbol"] = coll_sym
+    if coll_bal and not data.get("collateral_balance"):
+        data["collateral_balance"] = coll_bal
     if not _is_finite_hf(hf):
         # Skip writing infinite HF (it carries no signal for recovery).
         # But preserve a marker so we know the wallet was last seen healthy.

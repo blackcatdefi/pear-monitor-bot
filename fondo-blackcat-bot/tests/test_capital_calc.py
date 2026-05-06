@@ -260,9 +260,16 @@ def test_spot_non_stable_excludes_usdt0_usdh():
     assert stables == pytest.approx(RDASHBOARD_REAL_STABLES_IDLE, abs=0.01)
 
 
-def test_spot_non_stable_with_active_perp_drops_usdc_only():
-    """When perp is active, USDC is skipped (Unified Account) but USDT0/USDH
-    still go to stables — they are independent on-chain spots."""
+def test_spot_non_stable_with_active_perp_drops_all_stables():
+    """When perp is active, ALL stablecoins (USDC + USDT0 + USDH + USDe…)
+    are inside HyperLiquid Unified Account margin — not just USDC.
+
+    R-DASHBOARD-DOUBLECOUNT-FIX (2026-05-06): pre-fix only USDC dropped
+    when perp was active; USDT0+USDH leaked into stables and inflated the
+    dashboard top-line by ~$2.6K vs Rabby on the may 6 audit. Post-fix
+    every stablecoin is skipped while perp is active — the unified pool
+    already counts them via ``marginSummary.accountValue``.
+    """
     from modules.portfolio_snapshot import _spot_split_value
 
     spot_balances = [
@@ -276,11 +283,8 @@ def test_spot_non_stable_with_active_perp_drops_usdc_only():
     )
     # Non-stable still excludes ALL stablecoins.
     assert non_stable == pytest.approx(RDASHBOARD_LIVE_HYPE, abs=0.01)
-    # Stables exclude USDC (already in marginSummary.accountValue) but keep
-    # USDT0 + USDH — those are independent on-chain spot tokens.
-    assert stables == pytest.approx(
-        RDASHBOARD_LIVE_USDT0 + RDASHBOARD_LIVE_USDH, abs=0.01,
-    )
+    # Post-fix: ALL stables are skipped under active perp — no double-count.
+    assert stables == pytest.approx(0.0, abs=0.01)
 
 
 def test_dashboard_capital_block_no_double_count():
@@ -362,7 +366,12 @@ def test_backward_compat_spot_non_usdc_alias():
 def test_estimate_spot_split_in_formatters():
     """Mirror of the snapshot helper for the /reporte banner builder.
     Bug surface was wider than just portfolio_snapshot — formatters had
-    an independent ``_estimate_spot_usd`` with the same bug."""
+    an independent ``_estimate_spot_usd`` with the same bug.
+
+    R-DASHBOARD-DOUBLECOUNT-FIX (2026-05-06): with perp active, ALL
+    stablecoins fold into the unified margin pool; the split helper
+    must drop them all to avoid the $2.6K phantom equity on /reporte.
+    """
     from templates.formatters import _estimate_spot_split, _estimate_spot_usd
 
     spot_balances = [
@@ -373,8 +382,16 @@ def test_estimate_spot_split_in_formatters():
     ]
     non_stable, stables = _estimate_spot_split(spot_balances, perp_account_value=2_900.0)
     assert non_stable == pytest.approx(16.92, abs=0.01)
-    assert stables == pytest.approx(1_245.0 + 360.0, abs=0.01)  # USDC dropped (active perp)
+    # Post-fix: ALL stables skipped under active perp.
+    assert stables == pytest.approx(0.0, abs=0.01)
     # Backward-compat wrapper returns non-stable only — bug is closed.
     assert _estimate_spot_usd(spot_balances, perp_account_value=2_900.0) == pytest.approx(
         16.92, abs=0.01,
     )
+
+    # Idle wallet (no perp) → all stables fold into the cash bucket.
+    non_stable_idle, stables_idle = _estimate_spot_split(
+        spot_balances, perp_account_value=0.0,
+    )
+    assert non_stable_idle == pytest.approx(16.92, abs=0.01)
+    assert stables_idle == pytest.approx(1_500.0 + 1_245.0 + 360.0, abs=0.01)

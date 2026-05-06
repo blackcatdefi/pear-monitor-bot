@@ -155,6 +155,12 @@ class WalletSnapshot:
     # primary debt position. Used as short-form fallback in the dashboard
     # when debt_symbol cannot be resolved (e.g. unknown new reserve).
     debt_asset: str | None = None
+    # R-DASHBOARD-DOUBLECOUNT-FIX (2026-05-06) Bug #2: same surface for
+    # collateral. Without this address the dashboard had no last-resort
+    # fallback when ``collateral_symbol`` was missing — main flywheel
+    # rendered "0.00 UETH ($75.7K)" because the live entry had no symbol
+    # AND the dashboard had no canonical-map lookup either.
+    collateral_asset: str | None = None
     short_positions: list[dict[str, Any]] = field(default_factory=list)
     raw_positions: list[dict[str, Any]] = field(default_factory=list)
     # R-DASH-FIX Bug 1: raw spot balances for per-token display in dashboard
@@ -253,19 +259,29 @@ def _spot_split_value(spot_balances: list[dict[str, Any]],
 
     Rules
     -----
-    * ``USDC``: under HyperLiquid Unified Account, the spot USDC balance
-      and ``marginSummary.accountValue`` are the SAME pool. If
-      ``perp_account_value > 0.01`` we skip it entirely (already counted in
-      perp_equity). If idle, USDC is added to ``stables_usd`` (1:1 cash).
-    * Other ``STABLECOINS`` (USDT0/USDH/USDT/USDE/USDHL/USR/sUSDe/DAI):
-      always added to ``stables_usd`` 1:1 — they are cash equivalent, not
-      market exposure.
+    * ALL ``STABLECOINS`` (USDC/USDT/USDT0/USDH/USDE/USDHL/USR/sUSDe/DAI):
+      under HyperLiquid Unified Account, EVERY USD-pegged spot balance is
+      already counted inside ``marginSummary.accountValue`` when an active
+      perp exists — the unified margin pool absorbs ALL stables, not just
+      USDC. If ``perp_account_value > 0.01`` we skip every stable entirely
+      to avoid the double-count that inflated dashboard equity to $38.8K
+      vs Rabby's authoritative $35.5K on 2026-05-06.
+      If idle (no active perp), all stables fold into ``stables_usd`` 1:1.
     * Anything else (HYPE, kHYPE→HYPE proxy, USOL, PEAR, etc.): added to
       ``non_stable_usd``, valued at live price with entry-notional cost
       basis as last-resort proxy.
 
     The two halves are returned separately so callers can pick which
     they need (NET=non_stable; "Cash equivalents" line=stables).
+
+    R-DASHBOARD-DOUBLECOUNT-FIX (2026-05-06)
+    ----------------------------------------
+    Pre-fix, only USDC was conditional on ``has_active_perp``; USDT0/USDH
+    et al. were *always* added to ``stables_usd``. But HyperLiquid's
+    unified account aggregates the entire stable spot bucket into perp
+    margin equity. With basket margin of $4.7K (USDC+USDT0+USDH all
+    concurrently in margin), the dashboard was adding $2.6K of stables
+    on top of the perp accountValue → $3.3K phantom equity.
     """
     has_active_perp = perp_account_value > 0.01
     non_stable = 0.0
@@ -274,14 +290,12 @@ def _spot_split_value(spot_balances: list[dict[str, Any]],
         coin = (sb.get("coin") or "").upper()
         amount = float(sb.get("total") or 0)
         entry_ntl = float(sb.get("entry_ntl") or 0)
-        # USDC: special-case for Unified Account double-count.
-        if coin == "USDC":
+        # ALL stablecoins: double-counted by Unified Account when perp
+        # active. Skip the lot. When idle, fold into the stables bucket
+        # as cash equivalent (1:1).
+        if coin in STABLECOINS:
             if has_active_perp:
                 continue
-            stables += amount
-            continue
-        # Any other stablecoin → cash equivalent bucket (1:1).
-        if coin in STABLECOINS:
             stables += amount
             continue
         # Non-stable: price-based valuation, kHYPE→HYPE proxy, entry_ntl fallback.
@@ -657,6 +671,7 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
                     })
 
             _pd = hl_data.get("primary_debt")
+            _pc = hl_data.get("primary_collateral")
             # R-DASHBOARD-RABBY-PARITY: pull hf_status + cache-fallback
             # fields out of hl_data so the dashboard can branch on them
             # instead of rendering literal NaN.
@@ -682,6 +697,7 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
                 debt_symbol=hl_data.get("debt_symbol"),
                 debt_balance=float(hl_data.get("debt_balance") or 0.0),
                 debt_asset=(_pd.get("asset") if isinstance(_pd, dict) else None),
+                collateral_asset=(_pc.get("asset") if isinstance(_pc, dict) else None),
                 short_positions=short_positions,
                 raw_positions=list(d.get("positions") or []),
                 # R-DASH-FIX Bug 1: preserve raw spot_balances for per-token display
@@ -713,6 +729,7 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
         if coll < 0.01 and debt < 0.01:
             continue
         _pd2 = hl_data.get("primary_debt")
+        _pc2 = hl_data.get("primary_collateral")
         _age2 = hl_data.get("age_seconds")
         try:
             _age2_int = int(_age2) if _age2 is not None else None
@@ -734,6 +751,7 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
             debt_symbol=hl_data.get("debt_symbol"),
             debt_balance=float(hl_data.get("debt_balance") or 0.0),
             debt_asset=(_pd2.get("asset") if isinstance(_pd2, dict) else None),
+            collateral_asset=(_pc2.get("asset") if isinstance(_pc2, dict) else None),
             hf_status=hl_status_by_wallet.get(addr, "OK"),
             last_known_hf=hl_data.get("last_known_hf"),
             last_known_at_iso=hl_data.get("last_known_at_iso"),

@@ -153,7 +153,16 @@ def _render_html(state: dict[str, Any]) -> str:
         return _render_loading_placeholder(error=state.get("last_error"))
 
     cap_total = _fmt_compact_usd(state["capital_total"])
-    upnl_cls, upnl_fmt = _signed(state["upnl_perp_total"])
+    # R-DASHBOARD-DOUBLECOUNT-FIX (2026-05-06) Bug #5: header UPnL is the
+    # SAME number as the basket card UPnL. Pre-fix the header summed every
+    # perp position's UPnL (header +$40.22) while the basket card summed
+    # only the SHORT-basket leg UPnLs (basket -$35.79). Two truths is one
+    # too many — `basket_upnl` is the single source of truth: all open
+    # perp positions in active basket wallets aggregated once.
+    upnl_for_header = state.get("basket_upnl")
+    if upnl_for_header is None:
+        upnl_for_header = state.get("upnl_perp_total") or 0.0
+    upnl_cls, upnl_fmt = _signed(upnl_for_header)
 
     # ─── R-DASH: NET CAPITAL via single-source-of-truth ───────────────────
     # Replaces the misleading "Total: $79K" first line that summed gross
@@ -175,11 +184,43 @@ def _render_html(state: dict[str, Any]) -> str:
     # called ``f"{float(main['hf']):.3f}"`` directly on a NaN whenever the
     # HyperEVM RPC rate-limited the per-wallet refresh — surfaced 'nan'
     # in both flywheels in the may 6 09:09 UTC parity audit.
-    from auto.wallet_labels import apply_wallet_label as _apply_label
+    #
+    # R-DASHBOARD-DOUBLECOUNT-FIX (2026-05-06):
+    # * Bug #2: collateral_symbol now falls back to the canonical reserve
+    #   address map (WHYPE = 0x5555…5555) so the main flywheel renders
+    #   "1,751.18 WHYPE ($75.7K)" instead of "0.00 UETH ($75.7K)".
+    # * Bug #4: when the wallet is in the CLOSED_AT_ISO map, render
+    #   "CLOSED at <date>, last HF: X" instead of an auto-staleness "(cached
+    #   Xh ago)" counter that is meaningless for a retired wallet.
+    from auto.wallet_labels import (
+        apply_wallet_label as _apply_label,
+        is_closed_wallet as _is_closed,
+        closed_at_iso as _closed_at,
+    )
+    # Canonical reserve address → symbol map (mirror of
+    # auto.hyperlend_reader._KNOWN_RESERVE_SYMBOLS) for the last-resort
+    # collateral_symbol fallback at render time.
+    _RESERVE_SYMBOLS = {
+        "0x5555555555555555555555555555555555555555": "WHYPE",
+        "0x94e8396e0869c9f2200760af0621afd240e1cf38": "wstHYPE",
+        "0x9fdbda0a5e284c32744d2f17ee5c74b284993463": "UBTC",
+        "0xbe6727b535545c67d5caa73dea54865b92cf7907": "UETH",
+        "0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34": "USDe",
+        "0xb8ce59fc3717ada4c02eadf9682a9e934f625ebb": "USDT0",
+        "0xb88339cb7199b77e23db6e890353e22632ba630f": "USDC",
+        "0x111111a1a0667d36bd57c0a9f569b98057111111": "USDH",
+        "0xfd739d4e423301ce9385c1fb8850539d657c296d": "kHYPE",
+        "0xd8fc8f0b03eba61f64d08b0bef69d80916e5dda9": "beHYPE",
+        "0x068f321fa8fb9f0d135f290ef6a3e2813e1c8a29": "USOL",
+    }
 
     def _render_hf_block(card_data: dict[str, Any]) -> str:
         """Render a flywheel card with hf_status-aware HF fallback."""
         status = (card_data.get("hf_status") or "OK").upper()
+        addr = card_data.get("address") or ""
+        is_closed = _is_closed(addr)
+        closed_iso = _closed_at(addr)
+
         # Live HF
         live_hf = card_data.get("hf")
         live_hf_str = "—"
@@ -195,7 +236,7 @@ def _render_html(state: dict[str, Any]) -> str:
             except Exception:  # noqa: BLE001
                 live_hf_str = "—"
 
-        # Cached HF (fallback path for UNKNOWN)
+        # Cached HF (fallback path for UNKNOWN / CLOSED)
         last_hf = card_data.get("last_known_hf")
         age_s = card_data.get("age_seconds")
         if isinstance(age_s, (int, float)):
@@ -208,7 +249,29 @@ def _render_html(state: dict[str, Any]) -> str:
         else:
             age_label = "?"
 
-        if status == "OK" and live_hf_str != "—":
+        # R-DASHBOARD-DOUBLECOUNT-FIX Bug #4: closed wallets render the
+        # last-known HF with the closure date, NOT a stale-counter. The
+        # cached value is informative ("HF was X when we walked away")
+        # but is no longer changing.
+        if is_closed:
+            try:
+                last_hf_str = (
+                    f"{float(last_hf):.3f}" if last_hf is not None and not isinstance(last_hf, str)
+                    else "—"
+                )
+            except Exception:  # noqa: BLE001
+                last_hf_str = "—"
+            if closed_iso:
+                hf_render = (
+                    f"<span class='dim'>CLOSED at {_esc(closed_iso)}, "
+                    f"last HF: <strong>{_esc(last_hf_str)}</strong></span>"
+                )
+            else:
+                hf_render = (
+                    f"<span class='dim'>CLOSED, "
+                    f"last HF: <strong>{_esc(last_hf_str)}</strong></span>"
+                )
+        elif status == "OK" and live_hf_str != "—":
             hf_render = f"<strong>{_esc(live_hf_str)}</strong>"
         elif status == "ZERO":
             hf_render = "<span class='dim'>n/a (no positions)</span>"
@@ -239,21 +302,36 @@ def _render_html(state: dict[str, Any]) -> str:
         canonical_label = _apply_label(
             card_data.get("address"), card_data.get("label")
         )
-        # Collateral / debt rendering
+        # R-DASHBOARD-DOUBLECOUNT-FIX Bug #2: collateral_symbol fallback
+        # chain — live data → primary_collateral.asset → known-reserve
+        # map. Without this fallback the main flywheel rendered
+        # "Collateral: 0.00 UETH ($75.7K)" because UETH was the FIRST
+        # entry in collateral_assets but the actual collateral asset on
+        # this wallet is WHYPE (0x5555…5555).
         coll_amt = (
             _fmt_token_amount(card_data.get("collateral_balance"), dec=2)
             if card_data.get("collateral_balance") else "—"
         )
-        coll_sym = card_data.get("collateral_symbol") or "?"
+        coll_sym = card_data.get("collateral_symbol")
+        if not coll_sym:
+            coll_asset = (card_data.get("collateral_asset") or "").lower()
+            if coll_asset:
+                coll_sym = _RESERVE_SYMBOLS.get(coll_asset)
+        coll_sym = coll_sym or "?"
+
         debt_amt = (
             _fmt_token_amount(card_data.get("debt_balance"), dec=4)
             if card_data.get("debt_balance") else "—"
         )
         debt_sym_raw = card_data.get("debt_symbol")
-        debt_asset = card_data.get("debt_asset") or ""
-        debt_sym = debt_sym_raw or (
-            debt_asset[:6] + "…" + debt_asset[-4:]
-            if len(debt_asset) >= 10 else "?"
+        debt_asset = (card_data.get("debt_asset") or "").lower()
+        debt_sym = (
+            debt_sym_raw
+            or _RESERVE_SYMBOLS.get(debt_asset)
+            or (
+                debt_asset[:6] + "…" + debt_asset[-4:]
+                if len(debt_asset) >= 10 else "?"
+            )
         )
         return (
             f"<p><strong>{_esc(canonical_label)}</strong>"
@@ -265,19 +343,46 @@ def _render_html(state: dict[str, Any]) -> str:
             f" <span class='dim'>({_esc(_fmt_compact_usd(card_data.get('debt_usd')))})</span></p>"
         )
 
+    # R-DASHBOARD-DOUBLECOUNT-FIX Bug #3: pick the FIRST non-closed
+    # flywheel as "main". The legacy logic took flywheels[0] by collateral
+    # rank, which surfaced the closed 0xcddf wallet next to the main one
+    # whenever the closed wallet still carried collateral residue.
     main = state.get("main_flywheel")
-    if main is not None:
+    sec = state.get("secondary_flywheel")
+    if main is not None and _is_closed(main.get("address") or ""):
+        # Promote the secondary if main is closed.
+        main, sec = sec, main
+    if main is not None and not _is_closed(main.get("address") or ""):
         flywheel_html = _render_hf_block(main)
     else:
         flywheel_html = "<p class='dim'>No active HyperLend flywheel (no debt).</p>"
 
-    # Secondary flywheel (chico) — solo si existe y no es dust ($50 floor).
-    # The historical secondary flywheel (0xCDDF…F22E) was closed by BCD; if
-    # only residual debris remains we hide the card to avoid clutter.
+    # Secondary flywheel (chico) — solo si existe, no es dust ($50 floor)
+    # AND no está cerrada. Wallets cerradas se renderizan en su propia
+    # sección "Wallets cerradas (histórico)" debajo.
     from auto.wallet_labels import is_dust as _is_dust
-    sec = state.get("secondary_flywheel")
     secondary_html = ""
-    if sec is not None:
+    closed_html = ""
+    closed_cards: list[str] = []
+
+    # Collect every flywheel referenced by main/secondary that is closed
+    # so they render in the historical section instead of beside the
+    # main one. Using both main and sec slots covers the case where the
+    # raw snapshot put the closed wallet first.
+    _seen_addrs: set[str] = set()
+    raw_main = state.get("main_flywheel")
+    raw_sec = state.get("secondary_flywheel")
+    for cand in (raw_main, raw_sec):
+        if cand is None:
+            continue
+        addr_l = (cand.get("address") or "").lower()
+        if not addr_l or addr_l in _seen_addrs:
+            continue
+        if _is_closed(addr_l):
+            _seen_addrs.add(addr_l)
+            closed_cards.append(_render_hf_block(cand))
+
+    if sec is not None and not _is_closed(sec.get("address") or ""):
         sec_capital = float(
             (sec.get("collateral_usd") or 0.0)
             + abs(sec.get("debt_usd") or 0.0)
@@ -289,6 +394,14 @@ def _render_html(state: dict[str, Any]) -> str:
                 + _render_hf_block(sec)
                 + "</div>"
             )
+
+    if closed_cards:
+        closed_html = (
+            "<div class='card'>"
+            "<h2>Wallets cerradas (histórico)</h2>"
+            + "".join(closed_cards)
+            + "</div>"
+        )
 
     # ─── Basket activa (R-SILENT autodetect) ─────────────────────────────
     # Datos vienen de auto.fund_state_v2.detect_active_baskets() (on-chain).
@@ -584,6 +697,8 @@ def _render_html(state: dict[str, Any]) -> str:
 
         {secondary_html}
 
+        {closed_html}
+
         {pear_card_html}
 
         <div class="card">
@@ -752,6 +867,11 @@ async def _build_state() -> dict[str, Any]:
             # R-DASHBOARD-DEBT-SYMBOL: underlying asset address used as
             # short-form fallback when debt_symbol is still None (unknown reserve).
             "debt_asset": ws.debt_asset,
+            # R-DASHBOARD-DOUBLECOUNT-FIX (2026-05-06) Bug #2: same surface
+            # for collateral so the renderer's _RESERVE_SYMBOLS map can pick
+            # the WHYPE label out of 0x5555…5555 when the live entry has
+            # no symbol (per-reserve RPC failure).
+            "collateral_asset": getattr(ws, "collateral_asset", None),
             # R-DASHBOARD-RABBY-PARITY (2026-05-06): HF cache-fallback fields
             # propagated to the renderer so it can branch UNKNOWN / OK / ZERO
             # and never emit literal NaN.

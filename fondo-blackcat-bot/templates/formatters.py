@@ -125,15 +125,17 @@ def _estimate_spot_split(spot_balances: list[dict[str, Any]],
     the formatter accurately label "Spot non-stable" exposure and surface
     "Spot stables" as cash equivalent.
 
-    USDC remains special-cased for HyperLiquid Unified Account: when a
-    perp is active the spot USDC bucket IS the perp accountValue
-    (skipped here to avoid double-counting). When idle, USDC is added
-    to ``stables_usd`` 1:1.
+    R-DASHBOARD-DOUBLECOUNT-FIX (2026-05-06): every stablecoin (not just
+    USDC) is part of the HyperLiquid Unified Account margin pool. When
+    ``perp_account_value > 0.01`` we skip the entire stable bucket to
+    avoid the double-count that inflated ``Spot stables`` by ~$2.6K on
+    top of perp accountValue. When idle, all stables fold into the cash
+    bucket 1:1.
 
-    Other stablecoins always go to ``stables_usd``. Non-stable tokens
-    use entry_ntl (cost basis) as rough USD proxy — a more accurate
-    valuation requires the full price map and is done by the snapshot
-    aggregator in ``modules.portfolio_snapshot._spot_split_value``.
+    Non-stable tokens use entry_ntl (cost basis) as rough USD proxy — a
+    more accurate valuation requires the full price map and is done by
+    the snapshot aggregator in
+    ``modules.portfolio_snapshot._spot_split_value``.
     """
     has_active_perp = perp_account_value > 0.01
     non_stable = 0.0
@@ -141,14 +143,11 @@ def _estimate_spot_split(spot_balances: list[dict[str, Any]],
     for sb in spot_balances:
         coin = (sb.get("coin") or "").upper()
         amount = sb.get("total", 0) or 0
-        # USDC: Unified-Account special-case (skip if perp active, else cash).
-        if coin == "USDC":
+        # ALL stablecoins are part of Unified Account margin when perp
+        # is active. Skip them entirely. When idle, fold into cash bucket.
+        if coin in _STABLECOINS:
             if has_active_perp:
                 continue
-            stables += amount
-            continue
-        # Any other stablecoin → cash equivalent (1:1).
-        if coin in _STABLECOINS:
             stables += amount
             continue
         # Non-stable: entry_ntl (cost basis) as rough USD estimate.

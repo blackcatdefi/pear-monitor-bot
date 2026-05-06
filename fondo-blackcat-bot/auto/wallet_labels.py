@@ -101,3 +101,39 @@ def is_canonical_dust_wallet(addr: str | None) -> bool:
     if not addr:
         return False
     return CANONICAL_WALLET_LABELS.get(addr.lower(), "") == "Dust"
+
+
+# R-DASHBOARD-DOUBLECOUNT-FIX (2026-05-06) — Bug #3 + #4.
+# Map of wallets that are explicitly retired (CLOSED in canonical label).
+# Used by the dashboard to:
+#   * route the secondary flywheel render through the "Wallets cerradas
+#     (histórico)" collapsible block instead of beside the main flywheel.
+#   * skip the "(cached Xh ago)" HF rendering when a wallet is closed —
+#     the cached HF is meaningless for a wallet that's no longer active.
+# Optional ``CLOSED_AT_ISO`` map captures the human-known closure date so
+# the dashboard can render "CLOSED at 2026-04-22, last HF: 1.429" instead
+# of an auto-staleness counter.
+CLOSED_AT_ISO: Final[dict[str, str]] = {
+    # Secondary flywheel — BCD officially closed late April 2026.
+    "0xcddfcc4e597091d8e395a24738f09bbd8973f22e": "2026-04-22",
+}
+
+
+def is_closed_wallet(addr: str | None) -> bool:
+    """True when the canonical label contains "CLOSED" (case-insensitive).
+
+    Drives the Bug #3 (filter from main render) and Bug #4 (HF render
+    branch on closed status) fixes in modules/dashboard.py.
+    """
+    if not addr:
+        return False
+    label = CANONICAL_WALLET_LABELS.get(addr.lower(), "")
+    return "CLOSED" in label.upper()
+
+
+def closed_at_iso(addr: str | None) -> str | None:
+    """Return the recorded closure date (ISO ``YYYY-MM-DD``) for a wallet,
+    or ``None`` if the wallet is not in the closed-wallets map."""
+    if not addr:
+        return None
+    return CLOSED_AT_ISO.get(addr.lower())
