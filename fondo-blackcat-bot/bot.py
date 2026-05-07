@@ -1219,6 +1219,40 @@ async def cmd_scheduler_health(update: Update, context: ContextTypes.DEFAULT_TYP
 # ─── R-DASHBOARD-COMMAND: /dashboard ─────────────────────────────────────────
 
 
+# ─── R-BOT-LMEC-AUTOFEED: /lmec_status command ──────────────────────────────
+
+
+@authorized
+@with_error_logging
+async def cmd_lmec_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-BOT-LMEC-AUTOFEED — bear-invalidation telemetry.
+
+    Shows source actual (tradermap/env), last successful pull, valores de
+    cada leg, persisted state (weeks counter + last flip + scraper health).
+    """
+    await update.message.reply_text(
+        "🔬 Calculando LMEC...", reply_markup=MAIN_KEYBOARD
+    )
+    try:
+        from modules.lmec_triggers import (
+            evaluate_lmec_triggers,
+            format_lmec_status,
+        )
+        from modules.market import fetch_market_data
+
+        market = None
+        try:
+            market = await fetch_market_data()
+        except Exception:  # noqa: BLE001
+            log.exception("/lmec_status market fetch failed (non-fatal)")
+        result = evaluate_lmec_triggers(market)
+        text = format_lmec_status(result)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("/lmec_status render failed")
+        text = f"❌ /lmec_status error: {str(exc)[:200]}\nSee /errors for details."
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
 @authorized
 @with_error_logging
 async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1419,6 +1453,71 @@ async def _weekly_summary_job(application: Application) -> None:
         await weekly_scheduled_summary(application.bot)
     except Exception:  # noqa: BLE001
         log.exception("weekly summary job failed")
+
+
+async def _lmec_weekly_recheck_job(application: Application) -> None:
+    """R-BOT-LMEC-AUTOFEED: domingo 00:00 UTC — recheck + alert on flip.
+
+    1. Pull tradermap (best-effort) so the validator updates the
+       failure streak.
+    2. Re-evaluate the 4 LMEC legs.
+    3. If any leg flipped from non-VALIDA → VALIDA on this evaluation,
+       send a critical Telegram alert. Idempotent: lmec_state already
+       guards against duplicate flips.
+    """
+    try:
+        # Warm tradermap state + record schema validation outcome.
+        try:
+            from modules.tradermap import fetch_tradermap_btc
+            from modules.tradermap_validator import record_outcome
+
+            payload = await fetch_tradermap_btc()
+            record_outcome(payload)
+        except Exception:  # noqa: BLE001
+            log.exception("LMEC weekly: tradermap warm failed (non-fatal)")
+        from modules.lmec_triggers import detect_and_alert_flips
+        from modules.market import fetch_market_data
+
+        market = None
+        try:
+            market = await fetch_market_data()
+        except Exception:  # noqa: BLE001
+            log.exception("LMEC weekly: market fetch failed (non-fatal)")
+        out = detect_and_alert_flips(market)
+        flips = out.get("flips") or []
+        text = out.get("alert_text") or ""
+        chat_id = TELEGRAM_CHAT_ID
+        if not chat_id:
+            log.warning("LMEC weekly: TELEGRAM_CHAT_ID unset, alert suppressed")
+            return
+        if flips and text:
+            await send_bot_message(application.bot, chat_id, text)
+            log.info("LMEC weekly: alert sent for flips=%s", flips)
+        else:
+            log.info("LMEC weekly: no flips detected (state stable)")
+    except Exception:  # noqa: BLE001
+        log.exception("LMEC weekly job failed")
+
+
+async def _lmec_counter_refresh_job() -> None:
+    """R-BOT-LMEC-AUTOFEED: every 6h — keep weeks-broken counter warm.
+
+    Calls evaluate_lmec_triggers() so the counter is kept in sync even
+    when /reporte hasn't been issued recently. Lightweight — no
+    Telegram messaging. Failure is swallowed.
+    """
+    try:
+        from modules.lmec_triggers import evaluate_lmec_triggers
+        from modules.market import fetch_market_data
+
+        market = None
+        try:
+            market = await fetch_market_data()
+        except Exception:  # noqa: BLE001
+            return
+        evaluate_lmec_triggers(market)
+    except Exception:  # noqa: BLE001
+        log.exception("LMEC counter refresh job failed")
 
 
 async def _portfolio_snapshot_refresh_job() -> None:
@@ -1689,6 +1788,43 @@ async def post_init(application: Application) -> None:
             coalesce=True,
         )
 
+        # R-BOT-LMEC-AUTOFEED: weekly LMEC recheck — Sunday 00:00 UTC.
+        # Aligns with weekly chart close. Emits flip-to-VALIDA alerts.
+        if os.getenv("LMEC_AUTOFEED_ENABLED", "true").strip().lower() != "false":
+            scheduler.add_job(
+                _lmec_weekly_recheck_job,
+                "cron",
+                day_of_week="sun",
+                hour=0,
+                minute=0,
+                args=[application],
+                id="lmec_weekly_recheck",
+                max_instances=1,
+                coalesce=True,
+            )
+            # Refresh counter every 6h so the weeks-broken streak survives
+            # idle weeks where BCD doesn't issue /reporte.
+            try:
+                _lmec_refresh_hours = float(os.getenv("LMEC_REFRESH_INTERVAL_HOURS", "6"))
+            except ValueError:
+                _lmec_refresh_hours = 6.0
+            scheduler.add_job(
+                _lmec_counter_refresh_job,
+                "interval",
+                hours=_lmec_refresh_hours,
+                id="lmec_counter_refresh",
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now(timezone.utc) + timedelta(minutes=2),
+            )
+            log.info(
+                "R-BOT-LMEC-AUTOFEED: weekly recheck (Sun 00:00 UTC) + "
+                "counter refresh every %.1fh ENABLED",
+                _lmec_refresh_hours,
+            )
+        else:
+            log.info("LMEC_AUTOFEED_ENABLED=false → LMEC scheduler DISABLED")
+
         # Round 18: Cryexc monitor — every 30 min, alerts on new notable events
         if cryexc_monitor_is_enabled():
             scheduler.add_job(
@@ -1956,6 +2092,8 @@ HANDLER_MAP = {
     "silent": cmd_silent,
     # R-DASHBOARD-COMMAND
     "dashboard": cmd_dashboard,
+    # R-BOT-LMEC-AUTOFEED
+    "lmec_status": cmd_lmec_status,
 }
 
 

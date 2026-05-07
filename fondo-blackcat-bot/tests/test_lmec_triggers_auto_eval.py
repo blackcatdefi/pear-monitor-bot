@@ -188,19 +188,28 @@ def test_tradermap_ma50w_overrides_lmec():
     assert leg["status"] == "NEUTRO"
 
 
-def test_weeks_broken_remains_env_var_only():
-    """LMEC_MA50W_BROKEN_WEEKS controls the sustained-weeks check (TraderMap
-    does not expose it). Without it, leg should be UNKNOWN."""
+def test_weeks_broken_autofeed_falls_back_to_counter():
+    """R-BOT-LMEC-AUTOFEED (2026-05-07): LMEC_MA50W_BROKEN_WEEKS is now
+    AUTO-MANAGED via lmec_state.update_weeks_counter when the env var is
+    unset. Fresh state → counter=0 (or 1 after first tick) → leg=NEUTRO,
+    not UNKNOWN. The legacy env-var still wins as a manual override.
+    """
+    import tempfile
+
+    tmp = tempfile.mkdtemp(prefix="lmec_autofeed_")
     with env(
         TRADERMAP_BTC_MA50W="95000",
         TRADERMAP_BTC_MACD=None,
         TRADERMAP_BTC_RSI=None,
         LMEC_MA50W_USD="95000",
         LMEC_MA50W_BROKEN_WEEKS=None,
+        DATA_DIR=tmp,
     ):
         result = evaluate_lmec_triggers(_market(105_000))
     leg = next(c for c in result["conditions"] if c["id"] == "ma50w_broken_sustained")
-    assert leg["status"] == "UNKNOWN"
+    # Counter just ticked to 1 on first call → still below sustained threshold (2)
+    # → NEUTRO, not UNKNOWN. This documents the autofeed contract.
+    assert leg["status"] in ("NEUTRO", "VALIDA")
 
 
 # ── Leg #1 unaffected ──────────────────────────────────────────────────

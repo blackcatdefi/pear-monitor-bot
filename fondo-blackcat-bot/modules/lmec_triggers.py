@@ -151,17 +151,47 @@ def evaluate_lmec_triggers(market: dict[str, Any] | None = None) -> dict[str, An
     in Railway propagates to legs 2 / 3 / 4 automatically. The override
     is best-effort — if the TraderMap module fails to import the function
     silently degrades back to the LMEC_* env vars.
+
+    R-BOT-LMEC-AUTOFEED (2026-05-07): Leg-4 weeks-broken counter is
+    auto-managed via ``modules.lmec_state.update_weeks_counter`` —
+    increments by 1 on every NEW ISO-week tick where BTC > MA50w,
+    resets when BTC drops back below MA. The legacy
+    ``LMEC_MA50W_BROKEN_WEEKS`` env var still wins as a manual override
+    when the counter has not been warmed yet, and a self-heal banner
+    is emitted in the result dict when TraderMap has failed
+    consecutively for ≥ ``LMEC_TRADERMAP_FAILURE_THRESHOLD`` cycles.
     """
     btc_price = _btc_price_from_market(market)
     btc_ath = _env_float("LMEC_BTC_ATH_USD", 98000.0) or 98000.0
     btc_neutral_band_pct = _env_float("LMEC_BTC_NEUTRAL_BAND_PCT", 2.0) or 2.0
 
     # TraderMap overrides for indicator-driven legs (2 / 3 / 4).
+    # R-BOT-LMEC-AUTOFEED: read via tradermap_validator so we honour the
+    # self-heal failure streak (skip overrides when scraper is unhealthy).
+    autofeed_enabled = (os.getenv("LMEC_AUTOFEED_ENABLED", "true").strip().lower()
+                        not in {"false", "0", "no", "off"})
+    tm_over: dict[str, Any] = {}
+    tradermap_unhealthy = False
     try:
-        from modules.tradermap import tradermap_indicator_overrides
-        tm_over = tradermap_indicator_overrides() or {}
+        from modules.lmec_state import is_tradermap_unhealthy
+
+        tradermap_unhealthy = bool(is_tradermap_unhealthy())
     except Exception:  # noqa: BLE001
-        tm_over = {}
+        tradermap_unhealthy = False
+    if autofeed_enabled and not tradermap_unhealthy:
+        try:
+            from modules.tradermap_validator import (
+                get_indicator_overrides_safely,
+            )
+
+            tm_over = get_indicator_overrides_safely()
+        except Exception:  # noqa: BLE001
+            try:
+                from modules.tradermap import tradermap_indicator_overrides
+
+                tm_over = tradermap_indicator_overrides() or {}
+            except Exception:  # noqa: BLE001
+                tm_over = {}
 
     conditions: list[dict[str, Any]] = []
 
@@ -257,7 +287,8 @@ def evaluate_lmec_triggers(market: dict[str, Any] | None = None) -> dict[str, An
 
     # ── 4. 50-week MA broken with sustained force ────────────────────
     # TraderMap override > LMEC env var (only the MA value — weeks-broken
-    # remains BCD-managed since TraderMap doesn't expose it).
+    # is now AUTO-MANAGED via lmec_state.update_weeks_counter, with the
+    # legacy LMEC_MA50W_BROKEN_WEEKS env var as manual override).
     if "ma50w" in tm_over:
         try:
             ma50w: float | None = float(tm_over["ma50w"])
@@ -265,8 +296,26 @@ def evaluate_lmec_triggers(market: dict[str, Any] | None = None) -> dict[str, An
             ma50w = _env_float("LMEC_MA50W_USD", None)
     else:
         ma50w = _env_float("LMEC_MA50W_USD", None)
-    weeks_broken = _env_int("LMEC_MA50W_BROKEN_WEEKS", None)
-    sustained_min_weeks = _env_int("LMEC_MA50W_SUSTAINED_WEEKS", 2) or 2
+
+    # R-BOT-LMEC-AUTOFEED: auto-managed counter (lmec_state.json on Railway Volume).
+    # Manual env-var override still wins so BCD can force a value if needed.
+    counter_weeks: int | None = None
+    if autofeed_enabled and btc_price is not None and ma50w is not None:
+        try:
+            from modules.lmec_state import update_weeks_counter
+
+            new_state = update_weeks_counter(btc_price, ma50w)
+            counter_weeks = int(new_state.get("ma50w_consecutive_weeks", 0))
+        except Exception:  # noqa: BLE001
+            log.exception("lmec_triggers: weeks counter update failed (non-fatal)")
+            counter_weeks = None
+    env_weeks = _env_int("LMEC_MA50W_BROKEN_WEEKS", None)
+    weeks_broken = env_weeks if env_weeks is not None else counter_weeks
+    sustained_min_weeks = (
+        _env_int("LMEC_MA50W_BROKEN_THRESHOLD_WEEKS", None)
+        or _env_int("LMEC_MA50W_SUSTAINED_WEEKS", 2)
+        or 2
+    )
     if ma50w is None or weeks_broken is None or btc_price is None:
         conditions.append({
             "id": "ma50w_broken_sustained",
@@ -303,6 +352,15 @@ def evaluate_lmec_triggers(market: dict[str, Any] | None = None) -> dict[str, An
         })
 
     triggered = sum(1 for c in conditions if c["status"] == "VALIDA")
+
+    # R-BOT-LMEC-AUTOFEED: surface scraper health + indicator data source.
+    if tm_over and not tradermap_unhealthy:
+        data_source = "tradermap"
+    elif tradermap_unhealthy:
+        data_source = "env (tradermap unhealthy)"
+    else:
+        data_source = "env"
+
     result = {
         "ts_utc": datetime.now(timezone.utc).isoformat(),
         "btc_price_usd": btc_price,
@@ -311,13 +369,30 @@ def evaluate_lmec_triggers(market: dict[str, Any] | None = None) -> dict[str, An
         "all_triggered": triggered == len(conditions) and len(conditions) > 0,
         "triggered_count": triggered,
         "total": len(conditions),
+        "data_source": data_source,
+        "tradermap_unhealthy": tradermap_unhealthy,
+        "autofeed_enabled": autofeed_enabled,
     }
+
+    # Persist the leg snapshot so the weekly scheduler can detect flips.
+    flips: list[str] = []
+    try:
+        from modules.lmec_state import record_legs_snapshot
+
+        snap = record_legs_snapshot(conditions)
+        flips = list(snap.get("flips") or [])
+    except Exception:  # noqa: BLE001
+        log.exception("lmec_triggers: legs snapshot persistence failed (non-fatal)")
+    result["flips"] = flips
+
     log.info(
-        "lmec_triggers: triggered=%d/%d any=%s all=%s",
+        "lmec_triggers: triggered=%d/%d any=%s all=%s flips=%s source=%s",
         result["triggered_count"],
         result["total"],
         result["any_triggered"],
         result["all_triggered"],
+        result["flips"],
+        result["data_source"],
     )
     return result
 
@@ -336,11 +411,16 @@ def format_lmec_block(result: dict[str, Any] | None = None) -> str:
         header_icon = "⚠️"
     else:
         header_icon = "🟢"
+    data_source = str(result.get("data_source") or "env")
     lines.append(
-        f"{header_icon} LMEC BEAR INVALIDATION TRIGGERS — {triggered}/{total}"
+        f"🎯 LMEC BEAR INVALIDATION TRIGGERS — {triggered}/{total} (data: {data_source})"
     )
+    if result.get("tradermap_unhealthy"):
+        lines.append(
+            "⚠️ TraderMap scraping failed, using env fallback"
+        )
     lines.append(
-        "Cuando ≥1 condición pasa a ✅ VALIDA, la convicción bear debe BAJAR."
+        f"{header_icon} Cuando ≥1 condición pasa a ✅ VALIDA, la convicción bear debe BAJAR."
     )
     icon_map = {
         "VALIDA": "✅",
@@ -358,4 +438,92 @@ def format_lmec_block(result: dict[str, Any] | None = None) -> str:
             "según cuántas legs estén ✅. Si all_triggered → SALIR de SHORTs y "
             "rotar a LONG core (BTC/HYPE)."
         )
+    elif total > 0:
+        lines.append("")
+        lines.append(
+            f"→ All {total} INVALIDA = bear thesis intact, convicción 9/10"
+        )
     return "\n".join(lines)
+
+
+def format_lmec_status(result: dict[str, Any] | None = None) -> str:
+    """Verbose Telegram block for the /lmec_status command.
+
+    Returns source actual (tradermap/env), last successful pull,
+    valores de cada leg, and persisted state (weeks counter +
+    last flip + scraper health).
+    """
+    if result is None:
+        result = evaluate_lmec_triggers()
+    try:
+        from modules.lmec_state import status_summary
+
+        st = status_summary()
+    except Exception:  # noqa: BLE001
+        st = {}
+
+    lines: list[str] = []
+    lines.append("🔬 /lmec_status — bear-invalidation telemetry")
+    lines.append("")
+    lines.append(format_lmec_block(result))
+    lines.append("")
+    lines.append("── Persisted state (lmec_state.json) ──")
+    lines.append(f"  weeks counter (Leg 4): {st.get('ma50w_consecutive_weeks', 0)}")
+    if st.get("ma50w_first_break_iso"):
+        lines.append(
+            f"  streak started: {st.get('ma50w_first_break_iso')} "
+            f"(ISO week {st.get('last_iso_week') or '?'})"
+        )
+    lines.append(f"  BTC < MA50w on last check: {st.get('last_btc_below_ma', False)}")
+    lines.append(f"  last_check_iso: {st.get('last_check_iso') or '—'}")
+    lines.append("")
+    lines.append("── TraderMap health ──")
+    streak = int(st.get("tradermap_failure_streak", 0) or 0)
+    threshold = int((st.get("thresholds") or {}).get("tradermap_failure", 3))
+    health_icon = "🔴" if streak >= threshold else ("🟡" if streak > 0 else "🟢")
+    lines.append(
+        f"  {health_icon} consecutive failures: {streak} / {threshold} (threshold)"
+    )
+    lines.append(f"  active source: {result.get('data_source', '?')}")
+    lines.append(f"  autofeed_enabled: {result.get('autofeed_enabled', True)}")
+    lines.append("")
+    lines.append("── Last flip ──")
+    if st.get("last_flip_iso"):
+        lines.append(f"  at: {st.get('last_flip_iso')}")
+        lines.append(f"  legs: {', '.join(st.get('last_flip_legs') or []) or '—'}")
+    else:
+        lines.append("  (no flips recorded yet)")
+    return "\n".join(lines)
+
+
+def detect_and_alert_flips(
+    market: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run a fresh evaluation and return ``{result, flips, alert_text}``.
+
+    Pure function — does NOT send Telegram messages itself. The bot
+    scheduler is responsible for delivering the alert. ``alert_text`` is
+    only populated when at least one leg flipped from non-VALIDA to
+    VALIDA on this evaluation.
+    """
+    res = evaluate_lmec_triggers(market)
+    flips = list(res.get("flips") or [])
+    alert_text = ""
+    if flips:
+        flipped_names: list[str] = []
+        for c in res.get("conditions") or []:
+            if isinstance(c, dict) and c.get("id") in flips:
+                flipped_names.append(
+                    f"  • {c.get('name', c.get('id'))}: {c.get('detail', '')}"
+                )
+        alert_text = "\n".join(
+            [
+                "🚨 LMEC TRIGGER FLIP — leg(s) became ✅ VALIDA",
+                "",
+                *flipped_names,
+                "",
+                f"State: {res.get('triggered_count', 0)}/{res.get('total', 0)} "
+                f"VALIDA — convicción bear debe BAJAR.",
+            ]
+        )
+    return {"result": res, "flips": flips, "alert_text": alert_text}

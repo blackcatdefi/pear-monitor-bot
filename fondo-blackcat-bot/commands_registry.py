@@ -70,6 +70,8 @@ COMMANDS: List[BotCommand] = [
     BotCommand("scheduler_health", "Scheduler health table (R18 add-on)", "admin", "cmd_scheduler_health"),
     BotCommand("silent", "Toggle silent mode (on/off/status) — R-SILENT denoise", "admin", "cmd_silent"),
 
+    BotCommand("lmec_status", "LMEC bear-invalidation telemetry (R-BOT-LMEC-AUTOFEED)", "trading", "cmd_lmec_status"),
+
     # ─── DEBUG / OBSERVABILITY ───
     BotCommand("debug_x", "X/Twitter connectivity diagnostic", "debug", "cmd_debug_x"),
     BotCommand("x_status", "X API status (R15+ live + counters + cache)", "debug", "cmd_x_status"),
