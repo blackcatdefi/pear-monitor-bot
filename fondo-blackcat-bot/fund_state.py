@@ -42,7 +42,12 @@ TRADE_DEL_CICLO_NOTE = (
     "LAST_ENTRY, LAST_UPDATE, y vaciar LAST_CLOSE."
 )
 
-# ─── Basket SHORT status (Alt Short Bleed) ─────────────────────────────────
+# ─── Basket SHORT status (Super Basket Stage 6) ────────────────────────────
+# R-BOT-TERMINOLOGY-UNIFY (2026-05-07): historical category name was
+# "Alt Short Bleed". Renamed to "Super Basket Stage 6" everywhere a user-
+# facing string is rendered. The constant ``ALT_SHORT_BLEED_WALLETS`` is
+# kept as the data-structure name (it's a wallet-prefix list, not a
+# category label) for backward-compat with imports across the codebase.
 # Update when a new basket is opened or the current one closes.
 BASKET_STATUS: dict[str, object] = {
     "active": False,
@@ -61,12 +66,13 @@ ALT_SHORT_BLEED_WALLETS = [
 ]
 
 BASKET_NOTE = (
-    "Las wallets de Alt Short Bleed (0x00bb, 0xc7AE, 0xcddf) están IDLE "
-    "desde 2026-04-20 22:45 UTC — basket v4 se cerró con NET +$290.20. "
+    "Las wallets de Super Basket Stage 6 (0x00bb, 0xc7AE, 0xcddf) están "
+    "IDLE desde 2026-04-20 22:45 UTC — basket v4 se cerró con NET +$290.20. "
     "Cualquier valor spot <$1 en esas wallets es dust residual, NO posición "
     "activa ni estructura separada. v5 EN PAUSA hasta nueva orden. NO "
     "interpretar account_value=0 como 'posiciones Pear Protocol TWAP en "
-    "contratos separados'."
+    "contratos separados'. Categoría legacy 'Alt Short Bleed' fue renombrada "
+    "a 'Super Basket Stage 6' el 2026-05-07."
 )
 
 # ─── Basket v5 operational plan (PENDING_CAPITAL) ──────────────────────────

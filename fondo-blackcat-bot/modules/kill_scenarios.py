@@ -24,8 +24,8 @@ async def compute_kill_scenarios() -> str:
     hype_px = await get_spot_price("HYPE")
     eth_px = await get_spot_price("ETH")
 
-    # 1. Alt Short Bleed
-    lines.append("1\ufe0f\u20e3 ALT SHORT BLEED (SHORT basket 3x)")
+    # 1. Super Basket Stage 6 (canonical name since 2026-05-07)
+    lines.append("1\ufe0f\u20e3 SUPER BASKET STAGE 6 (SHORT basket 3x)")
     lines.append("   Kill scenario: Ceasefire + dovish Fed \u2192 risk-on alt squeeze")
     lines.append("   Triggers concretos:")
     lines.append("   \u2022 Ceasefire confirmado Iran/Israel (no solo rumores)")

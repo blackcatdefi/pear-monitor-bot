@@ -24,19 +24,50 @@ from templates.system_prompt import SYSTEM_PROMPT, THESIS_PROMPT, build_fund_sta
 # when fund_state.py is stale (basket v6 was active 30 abr while
 # BASKET_STATUS still said v4 closed).
 from auto.fund_state_v2 import build_authoritative_state_block as _onchain_state_block
+# R-BOT-TERMINOLOGY-UNIFY (2026-05-07) — Bug #5 LMEC bear invalidation
+# triggers. Injected at the top of the prompt and surfaced in /tesis.
+from modules.lmec_triggers import evaluate_lmec_triggers, format_lmec_block
 
 
-async def _full_state_block() -> str:
-    """Return on-chain truth concatenated with the hardcoded legacy block.
+def _lmec_state_block(market: dict[str, Any] | None = None) -> str:
+    """Return the LMEC triggers block ready for prompt injection.
 
-    The on-chain block goes FIRST so the LLM treats it as authoritative
-    and discards any contradicting stale constants below.
+    Uses ``market`` for live BTC price; the rest of the legs are env-var
+    driven (TradingView weekly close inputs). Errors are swallowed so a
+    LMEC failure never breaks /reporte or /tesis generation.
+    """
+    try:
+        result = evaluate_lmec_triggers(market)
+    except Exception:  # noqa: BLE001
+        log.exception("lmec_triggers evaluation failed")
+        return ""
+    block = [
+        "═══════ LMEC TRIGGERS — BEAR INVALIDATION ═══════",
+        "Estas son las 4 condiciones formales que invalidan la tesis bear.",
+        "Si ≥1 está ✅ VALIDA, la convicción global del fondo debe bajar.",
+        "",
+        format_lmec_block(result),
+        "═══════ FIN LMEC TRIGGERS ═══════",
+        "",
+    ]
+    return "\n".join(block)
+
+
+async def _full_state_block(market: dict[str, Any] | None = None) -> str:
+    """Return on-chain truth + LMEC triggers + hardcoded legacy block.
+
+    Ordering matters: the on-chain block goes FIRST so the LLM treats
+    on-chain reality as authoritative; the LMEC triggers go SECOND so
+    bear-invalidation conditions are visible before the static fund
+    constants. Any contradicting stale constants below are explicitly
+    framed as lower-priority.
     """
     try:
         onchain = await _onchain_state_block()
     except Exception:  # noqa: BLE001
         onchain = ""
-    return (onchain or "") + build_fund_state_block()
+    lmec = _lmec_state_block(market)
+    return (onchain or "") + (lmec or "") + build_fund_state_block()
 
 log = logging.getLogger(__name__)
 
@@ -54,15 +85,66 @@ MAX_HISTORY = 30  # keep last 30 thesis snapshots
 
 
 def _load_thesis() -> dict[str, Any]:
-    """Load thesis state from disk. Returns empty dict if none."""
+    """Load thesis state from disk. Returns empty dict if none.
+
+    R-BOT-TERMINOLOGY-UNIFY (2026-05-07) — auto-migrate legacy key
+    ``alt_short_bleed`` → ``super_basket_stage_6`` in components/history
+    on load so the rename is forward-compatible without losing
+    accumulated thesis state. The migration is idempotent and silent
+    when there's nothing to rename.
+    """
     if not os.path.isfile(THESIS_FILE):
         return {}
     try:
         with open(THESIS_FILE) as f:
-            return json.load(f)
+            state = json.load(f)
     except Exception:  # noqa: BLE001
         log.warning("Could not load thesis state from %s", THESIS_FILE)
         return {}
+    return _migrate_thesis_state(state)
+
+
+def _migrate_thesis_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Rename legacy ``alt_short_bleed`` key to ``super_basket_stage_6``.
+
+    Touches:
+      * ``state["components"]`` (current thesis snapshot)
+      * each entry in ``state["history"]`` ``components`` dict.
+
+    Returns the (possibly mutated) state dict. Safe to call repeatedly —
+    if the migration already ran the function is a no-op.
+    """
+    if not isinstance(state, dict):
+        return state
+    LEGACY = "alt_short_bleed"
+    NEW = "super_basket_stage_6"
+    migrated = False
+    components = state.get("components")
+    if isinstance(components, dict) and LEGACY in components:
+        if NEW not in components:
+            components[NEW] = components[LEGACY]
+            migrated = True
+        del components[LEGACY]
+        state["components"] = components
+    history = state.get("history")
+    if isinstance(history, list):
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+            ec = entry.get("components")
+            if isinstance(ec, dict) and LEGACY in ec:
+                if NEW not in ec:
+                    ec[NEW] = ec[LEGACY]
+                    migrated = True
+                del ec[LEGACY]
+                entry["components"] = ec
+    if migrated:
+        log.info(
+            "thesis migration: renamed legacy %r → %r in thesis state",
+            LEGACY,
+            NEW,
+        )
+    return state
 
 
 def _save_thesis(state: dict[str, Any]) -> None:
@@ -107,10 +189,11 @@ Respondé EXCLUSIVAMENTE en este formato JSON (sin markdown, sin backticks, solo
 {
   "components": {
     "war_trade": {"status": "VALIDA|NEUTRO|INVALIDA", "detail": "dato específico corto", "action": "MANTENER|AGREGAR|REDUCIR|SALIR"},
-    "alt_short_bleed": {"status": "VALIDA|NEUTRO|INVALIDA", "detail": "dato específico corto", "action": "MANTENER|AGREGAR|REDUCIR|SALIR"},
+    "super_basket_stage_6": {"status": "VALIDA|NEUTRO|INVALIDA", "detail": "dato específico corto", "action": "MANTENER|AGREGAR|REDUCIR|SALIR"},
     "hype_flywheel": {"status": "VALIDA|NEUTRO|INVALIDA", "detail": "dato específico corto", "action": "MANTENER|AGREGAR|REDUCIR|SALIR"},
     "fed_hawkish": {"status": "VALIDA|NEUTRO|INVALIDA", "detail": "dato específico corto", "action": "MANTENER|AGREGAR|REDUCIR|SALIR"},
-    "trade_del_ciclo": {"status": "VALIDA|NEUTRO|INVALIDA", "detail": "dato específico corto", "action": "MANTENER|AGREGAR|REDUCIR|SALIR"}
+    "trade_del_ciclo": {"status": "VALIDA|NEUTRO|INVALIDA", "detail": "dato específico corto", "action": "MANTENER|AGREGAR|REDUCIR|SALIR"},
+    "lmec_bear_invalidation": {"status": "VALIDA|NEUTRO|INVALIDA", "detail": "dato específico corto", "action": "MANTENER|AGREGAR|REDUCIR|SALIR"}
   },
   "overall_conviction": "1-10 (10=máxima convicción en la tesis)",
   "new_learnings": ["aprendizaje nuevo 1 de este reporte (si hay)", "aprendizaje 2 (si hay)"],
@@ -223,8 +306,18 @@ def _load_last_analysis() -> dict[str, Any] | None:
         return None
 
 
-async def _update_thesis_state(report_text: str, user_data: str) -> str | None:
-    """Call LLM to extract updated thesis state from the report."""
+async def _update_thesis_state(
+    report_text: str,
+    user_data: str,
+    market: dict[str, Any] | None = None,
+) -> str | None:
+    """Call LLM to extract updated thesis state from the report.
+
+    R-BOT-TERMINOLOGY-UNIFY (2026-05-07): the LMEC bear-invalidation
+    block is appended to the user-facing thesis message so BCD sees the
+    4 trigger statuses on every /reporte alongside the per-component
+    status icons.
+    """
     state = _load_thesis()
     prev_context = _thesis_context(state)
 
@@ -270,10 +363,11 @@ async def _update_thesis_state(report_text: str, user_data: str) -> str | None:
 
         for key, label in [
             ("war_trade", "War Trade"),
-            ("alt_short_bleed", "Alt Short Bleed"),
+            ("super_basket_stage_6", "Super Basket Stage 6"),
             ("hype_flywheel", "HYPE Flywheel"),
             ("fed_hawkish", "Fed Hawkish"),
             ("trade_del_ciclo", "Trade del Ciclo"),
+            ("lmec_bear_invalidation", "LMEC Bear Invalidation"),
         ]:
             c = components.get(key, {})
             icon = status_map.get(c.get("status", ""), "\u2753")
@@ -316,11 +410,22 @@ async def _update_thesis_state(report_text: str, user_data: str) -> str | None:
         log.info("Thesis state updated (report #%d) via %s", new_state["report_count"], provider)
 
         user_summary = update.get("summary", current_text)
-        return (
+        # R-BOT-TERMINOLOGY-UNIFY: surface the 4 LMEC bear-invalidation
+        # legs alongside the LLM thesis update so BCD has the full
+        # picture in one Telegram message.
+        try:
+            lmec_block = format_lmec_block(evaluate_lmec_triggers(market))
+        except Exception:  # noqa: BLE001
+            log.exception("LMEC block render failed (non-fatal)")
+            lmec_block = ""
+        out = (
             f"\U0001f9ec TESIS AUTO-ACTUALIZADA (reporte #{new_state['report_count']})"
             f"\n\n{current_text}\n\n{user_summary}"
             f"\n\n_Tesis actualizada por: {provider}_"
         )
+        if lmec_block:
+            out = out + "\n\n" + lmec_block
+        return out
 
     except json.JSONDecodeError as e:
         log.warning("Thesis update JSON parse failed: %s \u2014 raw: %s", e, raw[:200] if raw else "empty")
@@ -356,7 +461,9 @@ async def generate_report(
     # Fund-state block is injected at the TOP so the LLM sees it before any
     # stale prose below. Ground truth: HF thresholds, Trade del Ciclo Blofin
     # constants, basket status, flywheel pair trade design note.
-    full_system = (await _full_state_block()) + SYSTEM_PROMPT + prev_thesis
+    # R-BOT-TERMINOLOGY-UNIFY (2026-05-07): pass market so the LMEC
+    # bear-invalidation block uses live BTC for condition #1 / #4.
+    full_system = (await _full_state_block(market)) + SYSTEM_PROMPT + prev_thesis
 
     try:
         report_text, provider = await route_request(
@@ -374,7 +481,7 @@ async def generate_report(
         # fails (JSON parse / LLMError). Root cause fix for 2026-04-22 bug.
         _save_tesis_latest(report_text, provider)
 
-        thesis_update = await _update_thesis_state(report_text, user_content)
+        thesis_update = await _update_thesis_state(report_text, user_content, market)
 
         return report_text, thesis_update
 
@@ -518,7 +625,7 @@ async def generate_thesis_check(
 
     state = _load_thesis()
     prev_thesis = _thesis_context(state)
-    full_prompt = (await _full_state_block()) + THESIS_PROMPT + prev_thesis
+    full_prompt = (await _full_state_block(market)) + THESIS_PROMPT + prev_thesis
 
     try:
         text, provider = await route_request(
@@ -526,6 +633,15 @@ async def generate_thesis_check(
         )
         result = text.strip() if text else "(an\u00e1lisis vac\u00edo)"
         result += f"\n\n_Tesis generada por: {provider}_"
+        # R-BOT-TERMINOLOGY-UNIFY (2026-05-07): append the LMEC bear
+        # invalidation triggers block so /tesis always shows the 4
+        # condition checks regardless of LLM verbosity.
+        try:
+            result = result + "\n\n" + format_lmec_block(
+                evaluate_lmec_triggers(market)
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("LMEC block append failed for /tesis (non-fatal)")
         return result
 
     except LLMError:

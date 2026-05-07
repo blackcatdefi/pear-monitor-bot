@@ -7,6 +7,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
+from auto.wallet_labels import apply_wallet_label
 from fund_state import (
     ALT_SHORT_BLEED_WALLETS,
     BASKET_STATUS,
@@ -257,6 +258,269 @@ def _fmt_cycle_upnl_block(lines_out: list[str], market: dict[str, Any] | None) -
     lines_out.append("  Individual SL = liq price (single SL). Manual TP in zone $130K–$150K.")
 
 
+# ─── R-BOT-TERMINOLOGY-UNIFY (2026-05-07) — Bug #4 ───────────────────────────
+# Destacado header for /reporte: 4 critical metrics surfaced BEFORE the
+# user has to scroll through the timeline. Single-source-of-truth with
+# the existing capital_calc / hyperlend_reader / macro_calendar modules
+# so the headline can never disagree with the body of the report.
+
+def _flywheel_hf_for_header(hyperlend: list[dict[str, Any]] | dict[str, Any]) -> tuple[str, str]:
+    """Resolve the HF to surface in the destacado header.
+
+    Returns ``(hf_text, source_label)`` where ``hf_text`` is the formatted
+    HF string ("1.214" / "∞" / "—") and ``source_label`` describes which
+    wallet was selected ("Main Flywheel" / "Principal" / "n/a"). Picks
+    the highest-collateral OK entry; falls back to last_known cache for
+    UNKNOWN; returns "—" if nothing is usable.
+    """
+    hl_list = hyperlend if isinstance(hyperlend, list) else [hyperlend] if hyperlend else []
+    best_ok: dict[str, Any] | None = None
+    best_ok_coll: float = -1.0
+    fallback_unknown: dict[str, Any] | None = None
+    for hl in hl_list:
+        if not isinstance(hl, dict):
+            continue
+        if hl.get("status") != "ok":
+            continue
+        d = hl.get("data") or {}
+        cls = hl.get("hf_status") or d.get("hf_status") or "OK"
+        if cls == "OK":
+            try:
+                coll = float(d.get("total_collateral_usd") or 0.0)
+            except (TypeError, ValueError):
+                coll = 0.0
+            if coll > best_ok_coll:
+                best_ok = hl
+                best_ok_coll = coll
+        elif cls == "UNKNOWN" and fallback_unknown is None:
+            fallback_unknown = hl
+    if best_ok is not None:
+        d = best_ok.get("data") or {}
+        addr = (d.get("wallet") or "").lower()
+        canonical = apply_wallet_label(addr, d.get("label"))
+        hf_val = d.get("health_factor")
+        if hf_val == float("inf") or hf_val is None:
+            return "∞", canonical
+        return _fmt_hf(hf_val), canonical
+    if fallback_unknown is not None:
+        d = fallback_unknown.get("data") or {}
+        addr = (d.get("wallet") or "").lower()
+        canonical = apply_wallet_label(addr, d.get("label"))
+        last = d.get("last_known_hf")
+        return _fmt_hf_loose(last) + " (cached)", canonical
+    return "—", "n/a"
+
+
+def _basket_upnl_for_header(wallets: list[dict[str, Any]]) -> tuple[float, int]:
+    """Aggregate basket UPnL from the trading wallet's perp positions.
+
+    Returns ``(upnl_usd, position_count)``. The basket lives on the
+    BlackCatDeFi EVM (Trading) wallet (canonical 0xc7ae…1505) — sum the
+    unrealized_pnl of its perp positions to surface basket UPnL on the
+    header. Falls back to wallet-level ``unrealized_pnl_total`` if the
+    per-position breakdown is missing.
+    """
+    basket_addr = "0xc7ae23316b47f7e75f455f53ad37873a18351505"
+    upnl = 0.0
+    n = 0
+    for w in wallets:
+        if not isinstance(w, dict) or w.get("status") != "ok":
+            continue
+        d = w.get("data") or {}
+        addr = (d.get("wallet") or "").lower()
+        if addr != basket_addr:
+            continue
+        positions = d.get("positions") or []
+        if positions:
+            for p in positions:
+                try:
+                    upnl += float(p.get("unrealized_pnl") or p.get("upnl") or 0.0)
+                except (TypeError, ValueError):
+                    pass
+                n += 1
+            return upnl, n
+        # Fall back to wallet-level total.
+        try:
+            upnl = float(d.get("unrealized_pnl_total") or 0.0)
+        except (TypeError, ValueError):
+            upnl = 0.0
+        return upnl, 0
+    return 0.0, 0
+
+
+def _next_catalyst_for_header(window_hours: int = 72) -> str:
+    """Return the next macro catalyst within ``window_hours``.
+
+    Returns a one-line string like "Powell FOMC in 2d 4h (🔴 critical)"
+    or "ninguno <72h" when the calendar is empty / nothing in window.
+    Best-effort — if the calendar module is unavailable returns "n/a".
+    """
+    try:
+        from modules.macro_calendar import (
+            _impact_emoji,
+            format_time_until,
+            upcoming_events,
+        )
+    except Exception:  # noqa: BLE001
+        return "n/a"
+    try:
+        evs = upcoming_events(limit=20)
+    except Exception:  # noqa: BLE001
+        return "n/a"
+    if not evs:
+        return f"ninguno <{window_hours}h"
+    # Filter to the requested window; fall back to "next overall" if empty.
+    window_secs = window_hours * 3600
+    in_window: list[Any] = []
+    now = datetime.now(timezone.utc)
+    for ev in evs:
+        ts = ev.timestamp_utc
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if (ts - now).total_seconds() <= window_secs:
+            in_window.append(ev)
+    target_list = in_window if in_window else evs[:1]
+    if not target_list:
+        return f"ninguno <{window_hours}h"
+    # Pick highest impact within window; tie-break by soonest.
+    impact_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+    target_list.sort(
+        key=lambda e: (-impact_rank.get(e.impact_level, 0), e.timestamp_utc)
+    )
+    ev = target_list[0]
+    until = format_time_until(ev.timestamp_utc)
+    name = (ev.name or "?")
+    if len(name) > 60:
+        name = name[:57] + "…"
+    emoji = _impact_emoji(ev.impact_level)
+    note = "" if in_window else " (>72h)"
+    return f"{name} en {until} ({emoji} {ev.impact_level}){note}"
+
+
+def format_report_header(
+    wallets: list[dict[str, Any]],
+    hyperlend: list[dict[str, Any]] | dict[str, Any],
+    market: dict[str, Any] | None = None,
+) -> str:
+    """Build the destacado header for /reporte (Bug #4).
+
+    Surfaces 4 critical KPIs at the top of /reporte so BCD doesn't have
+    to scroll past the X timeline + body to know fund health:
+
+    1. TOTAL EQUITY — single-source-of-truth via auto.capital_calc
+       (HL net + perp + non-stable spot + Pear staked, stables NOT
+       double-counted under Unified Account).
+    2. BASKET UPnL — aggregate UPnL across the BlackCatDeFi EVM
+       (Trading) wallet's perp positions (Super Basket Stage 6).
+    3. HF FLYWHEEL — Main Flywheel HF from auto.hyperlend_reader
+       (cache-aware, branches on hf_status).
+    4. NEXT CATALYST <72h — highest-impact macro event from
+       modules.macro_calendar within a 72h window.
+
+    Returns a Telegram-ready multi-line string. Never raises — degrades
+    each line independently to "—" if its data source is unavailable.
+    """
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    lines: list[str] = []
+    lines.append("⚡ DESTACADO — FONDO BLACK CAT")
+    lines.append("─" * 30)
+    lines.append(f"Snapshot: {now_utc}")
+
+    # 1. TOTAL EQUITY
+    total_equity_text = "—"
+    try:
+        from auto.capital_calc import compute_net_capital
+        hl_list = hyperlend if isinstance(hyperlend, list) else [hyperlend] if hyperlend else []
+        hl_coll = 0.0
+        hl_debt = 0.0
+        for hl in hl_list:
+            if not isinstance(hl, dict):
+                continue
+            if hl.get("status") == "ok":
+                hd = hl.get("data") or {}
+                try:
+                    hl_coll += float(hd.get("total_collateral_usd") or 0.0)
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    hl_debt += float(hd.get("total_debt_usd") or 0.0)
+                except (TypeError, ValueError):
+                    pass
+        perp_total = 0.0
+        spot_non_stable = 0.0
+        spot_stables = 0.0
+        for w in wallets:
+            if not isinstance(w, dict) or w.get("status") != "ok":
+                continue
+            d = w.get("data") or {}
+            try:
+                pe = float(d.get("account_value") or 0.0)
+            except (TypeError, ValueError):
+                pe = 0.0
+            perp_total += pe
+            try:
+                ns, st = _estimate_spot_split(d.get("spot_balances") or [], pe)
+                spot_non_stable += float(ns)
+                spot_stables += float(st)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            pear_total = float(os.getenv("PEAR_STAKED_USD", "0") or 0)
+        except (TypeError, ValueError):
+            pear_total = 0.0
+        net = compute_net_capital({
+            "hl_collateral_total": hl_coll,
+            "hl_debt_total": hl_debt,
+            "perp_equity_total": perp_total,
+            "spot_usd_total": spot_non_stable,
+            "spot_stables_total": spot_stables,
+            "upnl_perp_total": 0.0,  # already in perp accountValue
+            "pear_staked_total": pear_total,
+        })
+        # NetCapital dataclass — total_equity_usd is the Rabby-parity headline.
+        try:
+            total_equity_val = float(getattr(net, "total_equity_usd", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            total_equity_val = float(getattr(net, "net_total_usd", 0.0) or 0.0)
+        total_equity_text = _fmt_usd(total_equity_val)
+    except Exception:  # noqa: BLE001
+        total_equity_text = "—"
+    lines.append(f"💰 TOTAL EQUITY: {total_equity_text}")
+
+    # 2. BASKET UPnL
+    try:
+        upnl, n_pos = _basket_upnl_for_header(wallets)
+        sign = "+" if upnl >= 0 else ""
+        if n_pos > 0:
+            lines.append(
+                f"📉 BASKET UPnL: {sign}{_fmt_usd(upnl)} ({n_pos} legs · Super Basket Stage 6)"
+            )
+        elif upnl != 0:
+            lines.append(
+                f"📉 BASKET UPnL: {sign}{_fmt_usd(upnl)} (Super Basket Stage 6 — wallet-total)"
+            )
+        else:
+            lines.append("📉 BASKET UPnL: $0 (basket idle / sin posiciones perp)")
+    except Exception:  # noqa: BLE001
+        lines.append("📉 BASKET UPnL: —")
+
+    # 3. HF FLYWHEEL
+    try:
+        hf_text, hf_source = _flywheel_hf_for_header(hyperlend)
+        lines.append(f"⚖️ HF FLYWHEEL: {hf_text} ({hf_source})")
+    except Exception:  # noqa: BLE001
+        lines.append("⚖️ HF FLYWHEEL: —")
+
+    # 4. NEXT CATALYST <72h
+    try:
+        cat = _next_catalyst_for_header(window_hours=72)
+        lines.append(f"🗓 NEXT CATALYST <72h: {cat}")
+    except Exception:  # noqa: BLE001
+        lines.append("🗓 NEXT CATALYST <72h: —")
+
+    return "\n".join(lines)
+
+
 def format_quick_positions(wallets: list[dict[str, Any]],
                            hyperlend: list[dict[str, Any]] | dict[str, Any],
                            bounce_tech: list[dict[str, Any]] | None = None,
@@ -382,8 +646,14 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                      if w.get("status") == "ok" else 0,
                      reverse=True)
 
-    # Dynamic wallet labels based on capital rank
-    RANK_LABELS = ["PRINCIPAL", "SECUNDARIA"]
+    # R-BOT-TERMINOLOGY-UNIFY (2026-05-07) — Bug #1.
+    # Wallet labels now flow from auto.wallet_labels.apply_wallet_label()
+    # which resolves the canonical address→label map (single-source-of-
+    # truth with /dashboard) and falls back to the env-var label
+    # (FUND_WALLET_N_LABEL → d["label"]) for unknown addresses. Removed
+    # the legacy hardcoded RANK_LABELS = ["PRINCIPAL", "SECUNDARIA"]
+    # override that was masking FUND_WALLET_4_LABEL=BlackCatDeFi EVM
+    # (Trading) on 0xc7AE because that wallet ranked #2 by capital.
 
     lines.append("PORTFOLIO CONSOLIDADO")
 
@@ -391,7 +661,6 @@ def format_quick_positions(wallets: list[dict[str, Any]],
     total_upnl = 0.0
     all_spot: list[dict[str, Any]] = []
     cycle_positions: list[dict[str, Any]] = []
-    wallet_rank = 0
 
     for w in wallets:
         if w.get("status") != "ok":
@@ -417,18 +686,19 @@ def format_quick_positions(wallets: list[dict[str, Any]],
         total_fund_capital += tc
         total_upnl += upnl_val
 
-        # Dynamic label: PRINCIPAL / SECUNDARIA / original label
-        if wallet_rank < len(RANK_LABELS) and tc > 0.01:
-            display_label = f"💰 {RANK_LABELS[wallet_rank]}"
-        else:
-            display_label = d["label"]
-        wallet_rank += 1
+        # R-BOT-TERMINOLOGY-UNIFY (2026-05-07) — canonical wallet label.
+        # apply_wallet_label resolves the address→label map first (so
+        # 0xc7ae → "BlackCatDeFi EVM (Trading)", 0xa44e → "Main
+        # Flywheel (DDS)", 0x171b → "DreamCash (WAR TRADE)", etc.) and
+        # falls back to d["label"] (env-var) for unknown addresses.
+        canonical_label = apply_wallet_label(d.get("wallet"), d.get("label"))
+        display_label = f"💼 {canonical_label}"
 
         positions = d.get("positions") or []
         if positions:
             pos_summary = ", ".join(f"{p['side']} {p['coin']}" for p in positions[:5])
         elif _is_alt_short_wallet(d.get("wallet", "")) and not BASKET_STATUS.get("active"):
-            # Wallet historically from Alt Short Bleed basket, now IDLE.
+            # Wallet historically from Super Basket Stage 6 basket, now IDLE.
             last = BASKET_STATUS.get("last_basket", "?")
             net = BASKET_STATUS.get("last_basket_result_net_usd", 0.0)
             nxt = BASKET_STATUS.get("next_basket", "pending")

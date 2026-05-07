@@ -13,8 +13,8 @@ fix:
   • build_fund_state_block() no longer renders the basket sections —
     on-chain reality (auto.fund_state_v2.build_authoritative_state_block)
     is the only basket source the LLM sees.
-  • The hardcoded prose section "1. ALT SHORT BLEED: BASKET v4 CERRADO
-    ..." was replaced with a neutral pointer to the on-chain block.
+  • The hardcoded prose section that pinned a stale basket v4 status
+    was replaced with a neutral pointer to the on-chain block.
   • Non-conflicting constants (HF thresholds, Trade del Ciclo, Flywheel
     pair-trade design, BCD DCA plan) STAY — they don't drift with the
     basket and remain valid prompt material.
@@ -54,7 +54,7 @@ def build_fund_state_block() -> str:
     R-FUNDFIX: this block deliberately OMITS the basket section. The
     basket is rendered separately by
     ``auto.fund_state_v2.build_authoritative_state_block`` from
-    on-chain reality. Including any "BASKET ALT SHORT BLEED" /
+    on-chain reality. Including any legacy basket-status prose or
     "BASKET v5 PLAN" lines here re-introduces the 1 may 17:23 bug
     where the LLM saw two contradicting basket states and asked BCD
     to confirm.
@@ -80,13 +80,16 @@ TRADE DEL CICLO:
   • Balance disponible para próxima entrada: ${BLOFIN_BALANCE_AVAILABLE:,.2f}
   • {TRADE_DEL_CICLO_NOTE}
 
-BASKET ALT SHORT BLEED:
-  • La verdad sobre el basket activa/inactiva ESTÁ ARRIBA, en el bloque
+SUPER BASKET STAGE 6 (basket activa del fondo):
+  • La verdad sobre la basket activa/inactiva ESTÁ ARRIBA, en el bloque
     "BASKET STATE — ON-CHAIN AUTORITATIVO". Tomá esos datos como ground
     truth — leé el estado del bloque on-chain, no asumas un id específico
     de basket de tu memoria. Si la realidad on-chain difiere de cualquier
     memoria previa, prevalece la on-chain. NO pidas confirmación a BCD
     por una discrepancia con tu memoria.
+  • La categoría de basket SHORT 3x se llama "Super Basket Stage 6"
+    (renombre interno 2026-05-07). Usar SIEMPRE este nombre en outputs.
+    No emitir nombres legacy alternativos.
 
 FLYWHEEL HYPERLEND:
   • {FLYWHEEL_NOTE}
@@ -149,21 +152,25 @@ Tu rol: análisis macro, gestión de riesgo, cero sycophancy. Reportás en espa�
 FUENTE DE VERDAD DEL ESTADO DEL FONDO:
 El bloque "BASKET STATE — ON-CHAIN AUTORITATIVO" inyectado al tope es la única
 fuente de verdad sobre qué basket está activa y qué posiciones están abiertas.
-Usá EXCLUSIVAMENTE esos datos para describir basket SHORT (Alt Short Bleed).
-NO inventes "v4 cerrado" / "v5 pending capital" / "v6 ya deployado" — leelo del
-bloque on-chain. Si el bloque dice ACTIVE, está activa. Si dice IDLE, está
-inactiva. Si dice anomalía, es anomalía. NO pidas confirmación al usuario por
-una discrepancia entre tu memoria y la realidad on-chain — la realidad on-chain
-PREVALECE siempre.
+Usá EXCLUSIVAMENTE esos datos para describir la basket activa (Super Basket
+Stage 6). NO inventes "v4 cerrado" / "v5 pending capital" / "v6 ya deployado"
+— leelo del bloque on-chain. Si el bloque dice ACTIVE, está activa. Si dice
+IDLE, está inactiva. Si dice anomalía, es anomalía. NO pidas confirmación al
+usuario por una discrepancia entre tu memoria y la realidad on-chain — la
+realidad on-chain PREVALECE siempre. NUNCA usar el nombre histórico "Alt
+Short Bleed" para referirse a la basket activa — la categoría operativa
+actual es "Super Basket Stage 6" desde 2026-05-07.
 
 POSICIONES ACTIVAS DEL FONDO (esquema general, leer estado actual del bloque on-chain):
 
-1. ALT SHORT BLEED: ver "BASKET STATE — ON-CHAIN AUTORITATIVO" arriba.
+1. SUPER BASKET STAGE 6: ver "BASKET STATE — ON-CHAIN AUTORITATIVO" arriba.
    - Si el bloque marca basket ACTIVA: usar coins, notional, label inferido tal cual.
    - Si el bloque marca basket IDLE: cualquier valor spot <$1 en wallets de basket es DUST RESIDUAL.
    - NUNCA interpretar account_value=0 como "posiciones Pear Protocol TWAP en contratos separados".
    - NO reabrir el basket sin orden explícita del socio humano — pero SÍ reportar el estado on-chain real cuando lo veas.
    - Kill scenario: ceasefire + dovish Fed → risk-on alt squeeze (aplica si la basket está abierta)
+   - Categoría: "Super Basket Stage 6" (renombre interno 2026-05-07).
+     Usar SIEMPRE este nombre en outputs cuando la basket esté activa.
 
 2. WAR TRADE (DreamCash): INACTIVA — wallet 0x171b vacía por decisión operativa.
    - Tesis Dalio Stage 6 sigue vigente pero NO hay trade activo expuesto a ella.
@@ -296,7 +303,7 @@ ETF flows, OI, Funding, Liquidaciones
 Iran/Israel developments, Fed, catalizadores 48-72h
 
 4. UNLOCKS
-Tokens relevantes + fecha + % float + valor. Foco en basket SHORT + HYPE.
+Tokens relevantes + fecha + % float + valor. Foco en Super Basket Stage 6 + HYPE.
 
 5. TELEGRAM INTEL
 🔴 ALERTAS CRÍTICAS (ceasefire signals primero si hay)
@@ -310,6 +317,9 @@ Qué VALIDA la tesis (✅ con data específica)
 Qué podría INVALIDARLA (⚠️ con triggers concretos)
 Acción sugerida (MANTENER/AGREGAR/REDUCIR/SALIR con razón)
 Trade del Ciclo: MANTENER siempre (solo DCA adds en dips según plan)
+Para acciones sobre la basket activa, escribir "SUPER BASKET STAGE 6:
+<MANTENER|AGREGAR|REDUCIR|SALIR>" — usar SIEMPRE este nombre canónico
+(renombre interno 2026-05-07; cualquier otra terminología es obsoleta).
 
 ═══ FIN REPORTE ═══
 """
@@ -325,10 +335,20 @@ Generá un análisis CORTO (máx 1500 chars) del estado de la tesis macro:
 
 Para cada uno de estos componentes, marcá ✅ VALIDA / ⚠️ NEUTRO / 🔴 INVALIDA con un dato específico:
 1. War trade (oil > $80, gold > $3500): Dalio Stage 6, Hormuz cerrado, energy crisis
-2. Alt Short Bleed: leer estado real del bloque "BASKET STATE — ON-CHAIN AUTORITATIVO" arriba; alts en bear / no risk-on squeeze valida la tesis cuando la basket está ACTIVE.
+2. Super Basket Stage 6: leer estado real del bloque "BASKET STATE — ON-CHAIN AUTORITATIVO" arriba; alts en bear / no risk-on squeeze valida la tesis cuando la basket está ACTIVE. (Nombre canónico — renombre interno 2026-05-07; usar siempre este nombre en outputs.)
 3. HYPE flywheel (pair trade LONG kHYPE / SHORT ETH): HF > 1.10 (threshold operativo), kHYPE estable o subiendo. ETH outperform HYPE NO invalida la tesis — es caso adverso intrínseco.
 4. Fed hawkish: Warsh narrative, no pivot dovish
 5. Trade del Ciclo (BTC bull cycle): BTC > $60K, Cycle Top Model < 19/30, no bear market confirmation
+6. LMEC Bear Invalidation Triggers (las 4 condiciones formales que destruyen la tesis bear):
+     a) BTC rompe ATH $97-98K
+     b) MACD semanal terreno positivo
+     c) RSI semanal > 70
+     d) MA50w (~$95K) rota con fuerza sostenida 2-3 semanas
+   Si ≥1 condición es ✅ VALIDA → la convicción global del fondo debe BAJAR
+   y la acción global por defecto debe rotar a REDUCIR shorts. Si las 4 son
+   ✅ VALIDA → SALIR de shorts. El bloque "LMEC TRIGGERS" inyectado al tope
+   del prompt es la fuente de verdad para esas condiciones — NO inventes
+   números ni asumas estados; leé el bloque tal cual.
 
 Cerrá con: ACCIÓN SUGERIDA (MANTENER / AGREGAR / REDUCIR / SALIR) por cada componente.
 Sin relleno, datos específicos, español directo.

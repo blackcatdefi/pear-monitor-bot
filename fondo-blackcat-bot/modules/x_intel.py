@@ -84,6 +84,47 @@ X_SCHEDULER_ENABLED = os.getenv("X_SCHEDULER_ENABLED", "false").strip().lower() 
     "true", "1", "yes", "on"
 )
 LIST_ENDPOINT_KEY = "lists/tweets"
+USER_TIMELINE_ENDPOINT_KEY = "users/tweets"
+
+# R-BOT-FEEDS-EXPAND (2026-05-07) — Task 2.
+# `X_EXTRA_HANDLES` is a comma-separated list of usernames to pull via the
+# per-user timeline endpoint AS A SUPPLEMENT to the canonical list. Lets
+# BCD add a handle to the bot without going through the X UI; respects
+# the same DAILY_CALL_CAP + FETCH_COOLDOWN_HOURS gates and is capped to
+# X_EXTRA_HANDLES_MAX entries (default 5) so a typo can't blow the cap.
+# When the list call has already consumed the cap, extras are skipped.
+_DEFAULT_EXTRA_HANDLES = "intheassembly"
+X_EXTRA_HANDLES_RAW = os.getenv("X_EXTRA_HANDLES", _DEFAULT_EXTRA_HANDLES)
+X_EXTRA_HANDLES_MAX = int(os.getenv("X_EXTRA_HANDLES_MAX", "5"))
+X_EXTRA_HANDLES_ENABLED = os.getenv("X_EXTRA_HANDLES_ENABLED", "true").strip().lower() not in (
+    "false", "0", "no", "off"
+)
+
+
+def _parse_extra_handles(raw: str) -> list[str]:
+    """Parse the X_EXTRA_HANDLES env var into a sanitized handle list.
+
+    Accepts ``"@foo, bar,@baz"`` style; strips ``@`` and whitespace, lower-
+    cases, dedups order-preserving, caps at ``X_EXTRA_HANDLES_MAX``.
+    """
+    if not raw:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for tok in raw.split(","):
+        h = tok.strip().lstrip("@").lower()
+        if not h or not h.replace("_", "").isalnum():
+            continue
+        if h in seen:
+            continue
+        seen.add(h)
+        out.append(h)
+        if len(out) >= max(1, X_EXTRA_HANDLES_MAX):
+            break
+    return out
+
+
+X_EXTRA_HANDLES = _parse_extra_handles(X_EXTRA_HANDLES_RAW)
 
 
 def _track_call(endpoint: str, status: int) -> None:
@@ -398,6 +439,137 @@ async def fetch_timeline_via_list(
     return all_tweets, last_error_diag
 
 
+async def fetch_extra_handles_supplement(
+    handles: list[str] | None = None,
+    hours: int = 48,
+    caller: str = "extra_handles",
+) -> tuple[list[dict[str, Any]], str | None]:
+    """R-BOT-FEEDS-EXPAND Task 2 — supplement timeline with per-user fetches.
+
+    Pulls recent tweets from each handle in ``handles`` via the X API v2
+    user timeline endpoints. Each call is gated by the same daily cap and
+    kill switch as the list fetch, but the cooldown is not separately
+    enforced (the supplement only runs after a successful list fetch
+    which has already consumed cooldown). Returns ``(tweets, diag)``.
+
+    Designed to be safe under aggressive cap settings:
+      * hard-skips when ``X_EXTRA_HANDLES_ENABLED=false``
+      * hard-skips when the daily cap is < remaining_calls + 1 (always
+        leaves headroom for the next /reporte list call)
+      * each handle = 2 API calls (lookup + timeline). With 1 default
+        handle and cap=15, the worst case is 1 (list) + 2 (extras) = 3
+        of the 15 daily calls.
+    """
+    handles = handles or X_EXTRA_HANDLES
+    if not handles or not X_EXTRA_HANDLES_ENABLED:
+        return [], None
+    if not X_API_BEARER_TOKEN:
+        return [], _DIAG_NO_BEARER
+    if not X_LIVE_ENABLED:
+        return [], _DIAG_KILL_SWITCH
+
+    # Cap headroom: keep at least 2 free calls in the daily budget.
+    cap_hit, used = _daily_cap_exceeded()
+    if cap_hit:
+        return [], _DIAG_INTERNAL_DAILY_CAP.format(used=used, cap=DAILY_CALL_CAP)
+    headroom = DAILY_CALL_CAP - used
+    if headroom < 3:
+        log.info(
+            "[X_API_COST] extras skipped — only %d call headroom (caller=%s)",
+            headroom, caller,
+        )
+        return [], None
+
+    out: list[dict[str, Any]] = []
+    last_diag: str | None = None
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    headers = {"Authorization": f"Bearer {X_API_BEARER_TOKEN}"}
+
+    async with httpx.AsyncClient(timeout=30) as c:
+        for handle in handles:
+            # Re-check headroom each iteration so a multi-handle config
+            # cannot blow the cap if it grew slow.
+            cap_hit, used = _daily_cap_exceeded()
+            if cap_hit or (DAILY_CALL_CAP - used) < 2:
+                log.info(
+                    "[X_API_COST] extras stopped at %s — cap %d/%d",
+                    handle, used, DAILY_CALL_CAP,
+                )
+                last_diag = _DIAG_INTERNAL_DAILY_CAP.format(used=used, cap=DAILY_CALL_CAP)
+                break
+
+            # 1. Lookup user id by username.
+            try:
+                u_resp = await c.get(
+                    f"https://api.x.com/2/users/by/username/{handle}",
+                    headers=headers,
+                    params={"user.fields": "username,name,verified"},
+                )
+            except Exception as e:
+                last_diag = f"lookup_failed:{handle} ({type(e).__name__})"
+                log.warning("[X_EXTRA] %s lookup failed: %s", handle, e)
+                continue
+            record_x_api_call(USER_TIMELINE_ENDPOINT_KEY, u_resp.status_code,
+                              pages=1, tweets_returned=0, caller=f"{caller}:{handle}:by")
+            if u_resp.status_code != 200:
+                last_diag = f"lookup_{u_resp.status_code}:{handle}"
+                log.warning("[X_EXTRA] %s lookup status %d", handle, u_resp.status_code)
+                continue
+            udata = (u_resp.json() or {}).get("data") or {}
+            uid = udata.get("id")
+            if not uid:
+                last_diag = f"no_user_id:{handle}"
+                continue
+
+            # 2. Pull recent tweets.
+            try:
+                t_resp = await c.get(
+                    f"https://api.x.com/2/users/{uid}/tweets",
+                    headers=headers,
+                    params={
+                        "max_results": 20,
+                        "tweet.fields": "created_at,text,public_metrics",
+                        "exclude": "retweets,replies",
+                    },
+                )
+            except Exception as e:
+                last_diag = f"timeline_failed:{handle} ({type(e).__name__})"
+                log.warning("[X_EXTRA] %s timeline failed: %s", handle, e)
+                continue
+            t_returned = 0
+            t_status = t_resp.status_code
+            if t_status == 200:
+                batch = (t_resp.json() or {}).get("data") or []
+                t_returned = len(batch)
+                for t in batch:
+                    try:
+                        created = datetime.fromisoformat(
+                            t["created_at"].replace("Z", "+00:00")
+                        )
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if created < cutoff:
+                        continue
+                    out.append({
+                        "username": udata.get("username") or handle,
+                        "name": udata.get("name") or "",
+                        "verified": bool(udata.get("verified")),
+                        "text": t.get("text") or "",
+                        "created_at": t.get("created_at") or "",
+                        "metrics": t.get("public_metrics") or {},
+                        "url": f"https://x.com/{udata.get('username') or handle}/status/{t.get('id') or ''}",
+                        "_source": "extra_handle",
+                    })
+            else:
+                last_diag = f"timeline_{t_status}:{handle}"
+                log.warning("[X_EXTRA] %s timeline status %d", handle, t_status)
+            record_x_api_call(USER_TIMELINE_ENDPOINT_KEY, t_status,
+                              pages=1, tweets_returned=t_returned,
+                              caller=f"{caller}:{handle}:tweets")
+
+    return out, last_diag
+
+
 async def maybe_send_cost_alert(app=None) -> None:
     """Round 12: fire Telegram alert if 7d projection exceeds threshold.
 
@@ -480,6 +652,32 @@ async def fetch_x_intel(
             "tweets": [],
         }
 
+    # R-BOT-FEEDS-EXPAND Task 2 — supplement with per-user extra handles
+    # (e.g. @intheassembly). Skipped when disabled / cap-exhausted; failures
+    # are non-fatal — list tweets still flow through.
+    extras_added = 0
+    extras_diag: str | None = None
+    if tweets is not None:
+        try:
+            extras, extras_diag = await fetch_extra_handles_supplement(
+                handles=X_EXTRA_HANDLES, hours=hours, caller=f"{caller}:extras",
+            )
+            if extras:
+                # Dedup by tweet URL (per-user pull and list pull can both
+                # surface the same tweet if a handle is in both).
+                seen_urls = {t.get("url") for t in tweets if isinstance(t, dict)}
+                for et in extras:
+                    if et.get("url") in seen_urls:
+                        continue
+                    tweets.append(et)
+                    extras_added += 1
+                log.info(
+                    "[X_EXTRA] added %d tweets from %d handle(s) (window=%dh)",
+                    extras_added, len(X_EXTRA_HANDLES), hours,
+                )
+        except Exception:  # noqa: BLE001
+            log.exception("fetch_extra_handles_supplement failed (non-fatal)")
+
     if not tweets:
         return {
             "status": "ok",
@@ -493,6 +691,9 @@ async def fetch_x_intel(
             "data": {},
             "accounts_scanned": 0,
             "total_tweets": 0,
+            "extra_handles": list(X_EXTRA_HANDLES),
+            "extras_added": extras_added,
+            "extras_diag": extras_diag,
         }
 
     # Sort by engagement (likes + retweets + replies)
@@ -524,6 +725,10 @@ async def fetch_x_intel(
         "data": by_user,
         "accounts_scanned": unique_accounts,
         "total_tweets": len(tweets),
+        # R-BOT-FEEDS-EXPAND Task 2 — supplement attribution.
+        "extra_handles": list(X_EXTRA_HANDLES),
+        "extras_added": extras_added,
+        "extras_diag": extras_diag,
     }
 
     # Round 15: persist to SQLite so the cache survives Railway redeploys.

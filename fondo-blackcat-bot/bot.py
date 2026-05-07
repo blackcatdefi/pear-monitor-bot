@@ -250,7 +250,7 @@ try:
     )
 except Exception:  # noqa: BLE001
     r18_aipear_prompt = None
-from templates.formatters import format_hf, format_quick_positions
+from templates.formatters import format_hf, format_quick_positions, format_report_header
 from templates.timeline import format_timeline
 from utils.security import authorized
 from utils.telegram import send_bot_message, send_long_message
@@ -380,7 +380,10 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         reply_markup=MAIN_KEYBOARD,
     )
 
-    portfolio, hl, market, unlocks, x_intel, gmail_intel, bt, recent_fills = await asyncio.gather(
+    # R-BOT-FEEDS-EXPAND (2026-05-07) — TraderMap.io BTC fetched in parallel
+    # alongside the other intel sources so it adds zero serial latency.
+    from modules.tradermap import fetch_tradermap_btc
+    portfolio, hl, market, unlocks, x_intel, gmail_intel, bt, recent_fills, tradermap = await asyncio.gather(
         fetch_all_wallets(),
         fetch_all_hyperlend(),
         fetch_market_data(),
@@ -389,6 +392,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         scan_gmail_unread(),
         fetch_bounce_tech(),
         fetch_all_recent_fills(hours=24),
+        fetch_tradermap_btc(),
     )
 
     if _telethon_ok:
@@ -399,6 +403,16 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     else:
         intel_legacy = {"status": "error", "error": "telethon_disabled"}
         intel_unread = {"status": "error", "error": "telethon_disabled"}
+
+    # ─── Section 0: Destacado Header (R-BOT-TERMINOLOGY-UNIFY Bug #4) ────────
+    # 4 KPIs surfaced BEFORE timeline: TOTAL EQUITY + BASKET UPnL + HF
+    # FLYWHEEL + NEXT CATALYST <72h. Single-source-of-truth via
+    # auto.capital_calc / auto.hyperlend_reader / modules.macro_calendar.
+    try:
+        header_text = format_report_header(portfolio, hl, market)
+        await update.message.reply_text(header_text, reply_markup=MAIN_KEYBOARD)
+    except Exception:  # noqa: BLE001
+        log.exception("format_report_header failed (non-fatal — continuing)")
 
     # ─── Section 1: X Timeline (48h) ─────────────────────────────────────────
     x_intel_ok = isinstance(x_intel, dict) and x_intel.get("status") == "ok"
@@ -453,6 +467,17 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         reply_markup=MAIN_KEYBOARD,
     )
 
+    # ─── Section 2b: TraderMap BTC (R-BOT-FEEDS-EXPAND Task 1) ────────────────
+    # Surface the BTC chart snapshot (price + indicators when env vars set)
+    # next to positions so BCD sees price-action context in /reporte without
+    # hopping to a separate command. Block is non-fatal — never breaks /reporte.
+    try:
+        from modules.tradermap import format_tradermap_block
+        tm_text = format_tradermap_block(tradermap)
+        await update.message.reply_text(tm_text, reply_markup=MAIN_KEYBOARD)
+    except Exception:  # noqa: BLE001
+        log.exception("format_tradermap_block failed (non-fatal)")
+
     # ─── Section 3: LLM Analysis (Sonnet primary) ───────────────────────────────
     merged_intel: dict = {}
     if isinstance(intel_legacy, dict):
@@ -465,6 +490,9 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         merged_intel["gmail_intel"] = gmail_intel
     if bt:
         merged_intel["bounce_tech"] = bt
+    # R-BOT-FEEDS-EXPAND Task 1: feed TraderMap BTC into the LLM context.
+    if isinstance(tradermap, dict) and tradermap.get("status") == "ok":
+        merged_intel["tradermap_btc"] = tradermap
 
     # Round 18: Cryexc snapshot (cache 5min, falls back gracefully if disabled)
     if cryexc_is_enabled():
