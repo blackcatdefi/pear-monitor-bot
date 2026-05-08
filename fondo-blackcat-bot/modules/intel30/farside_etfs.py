@@ -30,13 +30,30 @@ URLS = {
     "ETH": "https://farside.co.uk/eth/",
     "SOL": "https://farside.co.uk/sol/",
 }
-HTTP_TIMEOUT = 10.0
+HTTP_TIMEOUT = 12.0
 
-# Browser UA to bypass CF1010
+# Browser UA + full header stack to bypass Cloudflare 403 on Farside
 UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
+
+BROWSER_HEADERS = {
+    "User-Agent": UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
+    "Accept-Encoding": "gzip, deflate",  # NO 'br' — httpx without brotli=python lib won't decode it
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"macOS"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+}
 
 
 def _parse_latest_row(html: str) -> dict[str, Any]:
@@ -75,27 +92,101 @@ def _parse_latest_row(html: str) -> dict[str, Any]:
     return {"date": latest_date, "total_flow_musd": latest_total}
 
 
+BITBO_URLS = {
+    "BTC": "https://bitbo.io/treasuries/etf-flows/",
+    # bitbo only tracks BTC ETFs publicly; ETH/SOL fallback is best-effort
+}
+
+
+def _parse_bitbo_row(html: str) -> dict[str, Any]:
+    """Extract latest BTC ETF flow row from bitbo HTML table.
+
+    Format: <tr><td>Date</td><td>...</td><td>...Total</td></tr>
+    Latest row is at the top of the table on bitbo.
+    """
+    # Look for first row with a date in MMMM DD, YYYY (or similar) and a numeric total
+    rows = re.findall(r"<tr[^>]*>(.*?)</tr>", html, flags=re.DOTALL | re.IGNORECASE)
+    for row in rows:
+        cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row, flags=re.DOTALL | re.IGNORECASE)
+        if len(cells) < 3:
+            continue
+        clean = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
+        # Date heuristics
+        date_cell = clean[0]
+        date_m = re.search(r"(\w+\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+\w+\s+\d{4}|\d{4}-\d{2}-\d{2})", date_cell)
+        if not date_m:
+            continue
+        # Find a numeric cell that looks like a total (large, +/- M magnitude)
+        for c in reversed(clean[1:]):
+            cleaned = c.replace(",", "").replace("$", "").replace("M", "").replace("(", "-").replace(")", "").strip()
+            try:
+                v = float(cleaned)
+                if abs(v) < 100000:  # filter out reasonable M-scale numbers
+                    return {"date": date_m.group(1), "total_flow_musd": v}
+            except (TypeError, ValueError):
+                continue
+    return {"date": None, "total_flow_musd": None}
+
+
 async def fetch_etf(asset: str) -> dict[str, Any]:
     url = URLS.get(asset.upper())
     if not url:
         return {"asset": asset, "_error": "unknown_asset"}
+    last_err = None
+    # Try canonical Farside first
     try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers={"User-Agent": UA}) as client:
+        async with httpx.AsyncClient(
+            timeout=HTTP_TIMEOUT,
+            headers=BROWSER_HEADERS,
+            follow_redirects=True,
+            http2=False,
+        ) as client:
             r = await client.get(url)
-            r.raise_for_status()
-            html = r.text
-        parsed = _parse_latest_row(html)
-        if parsed.get("date") is None:
-            return {"asset": asset, "_error": "parse_failed"}
-        return {
-            "asset": asset.upper(),
-            "date": parsed["date"],
-            "flow_musd": parsed["total_flow_musd"],
-            "_error": None,
-        }
+            if r.status_code == 200:
+                parsed = _parse_latest_row(r.text)
+                if parsed.get("date") is not None:
+                    return {
+                        "asset": asset.upper(),
+                        "date": parsed["date"],
+                        "flow_musd": parsed["total_flow_musd"],
+                        "source": "farside",
+                        "_error": None,
+                    }
+                last_err = "farside_parse_failed"
+            else:
+                last_err = f"farside_http_{r.status_code}"
     except Exception as e:
         log.warning("farside %s fail: %s", asset, e)
-        return {"asset": asset, "_error": str(e)}
+        last_err = str(e)[:60]
+
+    # Fallback: bitbo.io (BTC only)
+    bitbo_url = BITBO_URLS.get(asset.upper())
+    if bitbo_url:
+        try:
+            async with httpx.AsyncClient(
+                timeout=HTTP_TIMEOUT,
+                headers=BROWSER_HEADERS,
+                follow_redirects=True,
+            ) as client:
+                r = await client.get(bitbo_url)
+                if r.status_code == 200:
+                    parsed = _parse_bitbo_row(r.text)
+                    if parsed.get("date") is not None:
+                        return {
+                            "asset": asset.upper(),
+                            "date": parsed["date"],
+                            "flow_musd": parsed["total_flow_musd"],
+                            "source": "bitbo",
+                            "_error": None,
+                        }
+                    last_err = "bitbo_parse_failed"
+                else:
+                    last_err = f"bitbo_http_{r.status_code}"
+        except Exception as e:
+            log.warning("bitbo %s fail: %s", asset, e)
+            last_err = str(e)[:60]
+
+    return {"asset": asset, "_error": last_err or "all_sources_failed"}
 
 
 async def fetch_all() -> dict[str, Any]:
@@ -116,17 +207,25 @@ def format_for_telegram(data: dict[str, Any]) -> str:
     if not flows:
         return "\n".join(lines + ["  ⚠️ sin datos"])
     rendered = 0
+    failed_assets = []
     for f in flows:
-        if not isinstance(f, dict) or f.get("_error"):
+        if not isinstance(f, dict):
             continue
         asset = f.get("asset", "?")
+        if f.get("_error"):
+            failed_assets.append(asset)
+            continue
         d = f.get("date", "?")
         flow = f.get("flow_musd")
+        src = f.get("source") or "farside"
         if isinstance(flow, (int, float)):
             arrow = "📈" if flow > 0 else ("📉" if flow < 0 else "➖")
-            lines.append(f"  {arrow} {asset}: ${flow:+,.1f}M ({d})")
+            tag = f" [{src}]" if src != "farside" else ""
+            lines.append(f"  {arrow} {asset}: ${flow:+,.1f}M ({d}){tag}")
             rendered += 1
-    if rendered == 0:
-        errs = [f.get("_error", "?")[:40] for f in flows if isinstance(f, dict) and f.get("_error")]
-        lines.append(f"  ⚠️ scrape err: {errs[0] if errs else '?'}")
+    if failed_assets:
+        lines.append(f"  ⚠️ {','.join(failed_assets)} bloqueados (CF1010 datacenter)")
+        lines.append("  → ver: farside.co.uk / sosovalue.com")
+    if rendered == 0 and not failed_assets:
+        lines.append("  ⚠️ sin datos")
     return "\n".join(lines)

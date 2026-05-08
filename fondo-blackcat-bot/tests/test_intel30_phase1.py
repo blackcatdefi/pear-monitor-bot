@@ -199,6 +199,57 @@ class TestHypurrscan(unittest.TestCase):
         self.assertIn("FOO", out)
 
 
+class TestHotfixContracts(unittest.TestCase):
+    """Hotfix verification — multi-URL fallback chains + canonical paths."""
+
+    def test_isw_ctp_has_fallback_urls(self):
+        from modules.intel30 import isw_ctp
+        # Each label must have multiple candidate URLs (canonical + fallback)
+        self.assertIsInstance(isw_ctp.FEEDS, dict)
+        for label, urls in isw_ctp.FEEDS.items():
+            self.assertIsInstance(urls, list, f"{label} not list")
+            self.assertGreaterEqual(len(urls), 2, f"{label} needs ≥2 fallback URLs")
+
+    def test_hypurrscan_probes_multiple_paths(self):
+        from modules.intel30 import hypurrscan
+        self.assertGreaterEqual(len(hypurrscan.CANDIDATE_PATHS), 3)
+
+    def test_farside_uses_browser_headers(self):
+        from modules.intel30 import farside_etfs
+        # Cloudflare bypass requires more than just User-Agent
+        self.assertIn("User-Agent", farside_etfs.BROWSER_HEADERS)
+        self.assertIn("Accept", farside_etfs.BROWSER_HEADERS)
+        self.assertIn("Sec-Fetch-Mode", farside_etfs.BROWSER_HEADERS)
+
+    def test_asxn_walk_blob_extracts_metrics(self):
+        from modules.intel30 import asxn_data
+        blob = {
+            "pageProps": {
+                "stats": {"buyback_total": 12500000.0, "burn_total": 380000.0},
+                "noise": {"unrelated": 42},
+            }
+        }
+        out = asxn_data._walk_blob_for_metrics(blob)
+        self.assertIn("buyback_total", out)
+        self.assertIn("burn_total", out)
+
+    def test_bcra_uses_v4_endpoint(self):
+        from modules.intel30 import bcra_macro
+        # v3.0 deprecated 2026-02-28; module must use v4.0
+        self.assertIn("v4.0", bcra_macro.BASE)
+
+    def test_farside_falls_back_to_bitbo(self):
+        from modules.intel30 import farside_etfs
+        # bitbo.io fallback table parser must extract date + total flow
+        html = """<table><tr><td>May 07, 2026</td><td>-97.6</td><td>-128.4</td>
+        <td>-17.3</td><td>0.0</td><td>-12.5</td><td>0.0</td><td>-0.0</td>
+        <td>0.0</td><td>-9.0</td><td>0.0</td><td>7.4</td><td>0.0</td>
+        <td>0.0</td><td>-257.4</td></tr></table>"""
+        out = farside_etfs._parse_bitbo_row(html)
+        self.assertEqual(out["date"], "May 07, 2026")
+        self.assertEqual(out["total_flow_musd"], -257.4)
+
+
 class TestBotWiringIntegrity(unittest.TestCase):
     """Verify command/handler registry is consistent for R-INTEL30 entries."""
 

@@ -6,9 +6,8 @@ Documented Swagger.
 Endpoint base: https://api.hypurrscan.io
 Free, community-grade limits. Real-time.
 
-Endpoints used:
-    /ui/auctions          — current Dutch auction state
-    /ui/twap/{addr}       — TWAP orders by address (optional; not used by default)
+Endpoints probed (path moved/renamed since first impl):
+    /ui/auctions, /auctions, /auction/current, /v1/auctions
 """
 
 from __future__ import annotations
@@ -22,20 +21,47 @@ log = logging.getLogger(__name__)
 
 BASE = "https://api.hypurrscan.io"
 HTTP_TIMEOUT = 10.0
+UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+
+CANDIDATE_PATHS = [
+    "/ui/auctions",
+    "/auctions",
+    "/auction/current",
+    "/v1/auctions",
+    "/api/auctions",
+]
 
 
 async def fetch_auctions() -> dict[str, Any]:
-    """Latest HIP-1 Dutch auction state."""
-    try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-            r = await client.get(f"{BASE}/ui/auctions")
-            r.raise_for_status()
-            data = r.json()
-        # Format may vary; pass through
-        return {"data": data, "_error": None}
-    except Exception as e:
-        log.warning("hypurrscan auctions fail: %s", e)
-        return {"data": None, "_error": str(e)}
+    """Latest HIP-1 Dutch auction state — probes multiple candidate paths."""
+    last_err = None
+    last_status = None
+    async with httpx.AsyncClient(
+        timeout=HTTP_TIMEOUT,
+        headers={"User-Agent": UA, "Accept": "application/json"},
+        follow_redirects=True,
+    ) as client:
+        for path in CANDIDATE_PATHS:
+            url = f"{BASE}{path}"
+            try:
+                r = await client.get(url)
+                last_status = r.status_code
+                if r.status_code == 200:
+                    try:
+                        data = r.json()
+                    except Exception:
+                        last_err = f"non_json@{path}"
+                        continue
+                    if data:
+                        return {"data": data, "source": url, "_error": None}
+                    last_err = f"empty@{path}"
+                else:
+                    last_err = f"http_{r.status_code}@{path}"
+            except Exception as e:
+                last_err = f"{type(e).__name__}@{path}: {str(e)[:50]}"
+                continue
+    log.warning("hypurrscan all-paths fail (last status=%s): %s", last_status, last_err)
+    return {"data": None, "source": None, "_error": last_err or "all_paths_failed"}
 
 
 async def fetch_all() -> dict[str, Any]:
@@ -46,7 +72,8 @@ def format_for_telegram(data: dict[str, Any]) -> str:
     lines = ["🪶 *HypurrScan — HIP-1 Auctions*"]
     auc = data.get("auctions") or {}
     if auc.get("_error"):
-        lines.append(f"  ⚠️ {auc['_error'][:60]}")
+        lines.append(f"  ⚠️ API path no expuesto ({auc['_error'][:60]})")
+        lines.append("  → ver auctions en vivo: https://hypurrscan.io/auctions")
         return "\n".join(lines)
     payload = auc.get("data")
     if not payload:

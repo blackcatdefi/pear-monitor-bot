@@ -19,7 +19,7 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-BASE = "https://api.bcra.gob.ar/estadisticas/v3.0"
+BASE = "https://api.bcra.gob.ar/estadisticas/v4.0"  # v3.0 deprecated 2026-02-28
 HTTP_TIMEOUT = 12.0
 
 # Canonical variable IDs per BCRA catalog. Subject to change — module degrades gracefully.
@@ -28,7 +28,7 @@ TRACKED = {
     15: "Base Monetaria ($M)",
     27: "Inflación mensual (%)",
     28: "Inflación interanual (%)",
-    34: "TAMAR (%)",
+    # 34 (TAMAR) returns 400 in v4.0 — variable likely renumbered; pruned 2026-05-08
     7: "BADLAR Bancos Privados (%)",
     5: "Tasa Política Monetaria (%)",
     4: "TC mayorista A3500 ($/USD)",
@@ -65,21 +65,39 @@ def ssl_exc():
 
 
 async def fetch_variable(var_id: int) -> dict[str, Any]:
-    """Fetch latest value of a single BCRA variable."""
+    """Fetch latest value of a single BCRA variable.
+
+    v4.0 response shape (since 2026-02-28):
+        {"results": [{"idVariable": 1, "detalle": [{"fecha": "...", "valor": 123.45}]}]}
+    Older v3.0 (deprecated) had {"results": [{"fecha": "...", "valor": ...}]}.
+    Code accepts both shapes for forward/backward compatibility.
+    """
     try:
         url = f"{BASE}/Monetarias/{var_id}?limit=1"
         data = await _get(url)
-        # Format: {"results": [{"idVariable": 1, "fecha": "2026-05-07", "valor": 22500.5}]}
         results = data.get("results") if isinstance(data, dict) else None
         if results and len(results) > 0:
             entry = results[0]
-            return {
-                "id": var_id,
-                "name": TRACKED.get(var_id, f"var_{var_id}"),
-                "fecha": entry.get("fecha"),
-                "valor": entry.get("valor"),
-                "_error": None,
-            }
+            # v4.0 — values nested under "detalle"
+            detalle = entry.get("detalle")
+            if isinstance(detalle, list) and detalle:
+                inner = detalle[0]
+                return {
+                    "id": var_id,
+                    "name": TRACKED.get(var_id, f"var_{var_id}"),
+                    "fecha": inner.get("fecha"),
+                    "valor": inner.get("valor"),
+                    "_error": None,
+                }
+            # v3.0 fallback shape
+            if "valor" in entry or "fecha" in entry:
+                return {
+                    "id": var_id,
+                    "name": TRACKED.get(var_id, f"var_{var_id}"),
+                    "fecha": entry.get("fecha"),
+                    "valor": entry.get("valor"),
+                    "_error": None,
+                }
         return {"id": var_id, "name": TRACKED.get(var_id, f"var_{var_id}"), "_error": "empty"}
     except Exception as e:
         log.warning("bcra var %s fail: %s", var_id, e)
