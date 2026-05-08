@@ -106,6 +106,12 @@ def _track_success(provider: str, in_tok: int, out_tok: int, task_name: str) -> 
     _last_provider = provider
     _last_provider_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     _persist_usage(task_name, provider, in_tok, out_tok, True)
+    # R-VALIDATE 2026-05-08: also feed R-PERFECT cost_tracker so /cost + cost_alert work
+    try:
+        from modules.cost_tracker import log_llm_call
+        log_llm_call(provider, in_tok or 0, out_tok or 0, source=task_name)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("cost_tracker.log_llm_call failed (%s/%s): %s", task_name, provider, exc)
 
 
 def _track_error(provider: str, task_name: str) -> None:
