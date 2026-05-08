@@ -502,6 +502,42 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except Exception:  # noqa: BLE001
             log.exception("cryexc fetch in /reporte failed (non-fatal)")
 
+    # ─── R-INTEL30 Phase 1 — fan out 11 new sources in parallel for /reporte ──
+    # Adds ETF flows, FRED macro, AR FX, ISW geopol, EIA WPSR, ASXN HYPE,
+    # HypurrScan auctions, Arkham whales, HL info extras, Apollo Spark to the
+    # LLM intel context. Block is wrapped in try/except — never breaks /reporte.
+    intel30_blocks: list[str] = []
+    try:
+        from modules.intel30 import (
+            hl_info_api as _hli, asxn_data as _asxn, hypurrscan as _hp,
+            fred_api as _fred, farside_etfs as _far, arkham_intel as _ark,
+            eia_oil as _eia, isw_ctp as _isw, criptoya_ar as _cy, bcra_macro as _bcra,
+            apollo_spark as _spark,
+        )
+        intel30_results = await asyncio.gather(
+            _hli.fetch_all(), _asxn.fetch_all(), _hp.fetch_all(), _fred.fetch_all(),
+            _far.fetch_all(), _ark.fetch_all(), _eia.fetch_all(), _isw.fetch_all(),
+            _cy.fetch_all(), _bcra.fetch_all(), _spark.fetch_all(),
+            return_exceptions=True,
+        )
+        intel30_modules = [
+            ("hl_info", _hli), ("asxn", _asxn), ("hypurrscan", _hp), ("fred", _fred),
+            ("farside_etfs", _far), ("arkham", _ark), ("eia", _eia), ("isw_ctp", _isw),
+            ("criptoya_ar", _cy), ("bcra", _bcra), ("apollo_spark", _spark),
+        ]
+        intel30_payload: dict = {}
+        for (key, mod), res in zip(intel30_modules, intel30_results):
+            if not isinstance(res, Exception):
+                intel30_payload[key] = res
+                try:
+                    intel30_blocks.append(mod.format_for_telegram(res))
+                except Exception:  # noqa: BLE001
+                    log.exception("intel30 %s format failed", key)
+        if intel30_payload:
+            merged_intel["intel30"] = intel30_payload
+    except Exception:  # noqa: BLE001
+        log.exception("R-INTEL30 fetch in /reporte failed (non-fatal)")
+
     report, thesis_update = await generate_report(portfolio, hl, market, unlocks, merged_intel)
 
     await send_long_message(
@@ -511,6 +547,21 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
     if thesis_update:
         await send_long_message(update, thesis_update, reply_markup=MAIN_KEYBOARD)
+
+    # ─── Section 4: R-INTEL30 Phase 1 enrichment ─────────────────────────────
+    # Surface the 11 new sources in /reporte as a single combined message after
+    # the LLM analysis so BCD can scan ETF flows + macro + geopol at a glance
+    # without running the dedicated commands.
+    if intel30_blocks:
+        intel30_text = (
+            "🌐 R-INTEL30 PHASE 1 — INTEL EXPANDIDO\n"
+            + ("─" * 30) + "\n\n"
+            + "\n\n".join(intel30_blocks)
+        )
+        try:
+            await send_long_message(update, intel30_text, reply_markup=MAIN_KEYBOARD)
+        except Exception:  # noqa: BLE001
+            log.exception("R-INTEL30 send_long_message failed (non-fatal)")
 
     if not x_intel_ok:
         live_err = ""
@@ -1348,6 +1399,154 @@ async def cmd_silent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await send_long_message(update, msg, reply_markup=MAIN_KEYBOARD)
 
 
+# ─── R-INTEL30 Phase 1 — 11 new free intel sources ────────────────────────────
+#
+# Modules under modules/intel30/. Each handler is a thin wrapper that fetches
+# data via the module's `fetch_all()` and renders via `format_for_telegram()`.
+# All modules degrade gracefully on network errors / missing API keys, so a
+# command never crashes the bot — at worst it prints a one-liner with the error.
+
+async def _intel30_render(update: Update, module_name: str, header: str) -> None:
+    """Generic dispatch: import a Phase 1 module and render its output."""
+    try:
+        mod = __import__(f"modules.intel30.{module_name}", fromlist=["fetch_all", "format_for_telegram"])
+        data = await mod.fetch_all()
+        text = mod.format_for_telegram(data)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("intel30 %s failed", module_name)
+        text = f"⚠️ {header}\n  Error: {str(exc)[:200]}"
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_etfs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-INTEL30 #5 — Farside daily BTC/ETH/SOL ETF flows."""
+    await _intel30_render(update, "farside_etfs", "Farside ETF Flows")
+
+
+@authorized
+@with_error_logging
+async def cmd_macro(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-INTEL30 #4+#11 — FRED US macro + Apollo Daily Spark."""
+    from modules.intel30 import fred_api, apollo_spark
+    try:
+        fred_data, apollo_data = await asyncio.gather(
+            fred_api.fetch_all(), apollo_spark.fetch_all(), return_exceptions=True
+        )
+        parts = []
+        if not isinstance(fred_data, Exception):
+            parts.append(fred_api.format_for_telegram(fred_data))
+        if not isinstance(apollo_data, Exception):
+            parts.append(apollo_spark.format_for_telegram(apollo_data))
+        text = "\n\n".join(parts) if parts else "⚠️ macro fetch failed"
+    except Exception as exc:  # noqa: BLE001
+        log.exception("/macro failed")
+        text = f"⚠️ Macro intel error: {str(exc)[:200]}"
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_argy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-INTEL30 #9+#10 — CriptoYa AR FX + BCRA macro."""
+    from modules.intel30 import criptoya_ar, bcra_macro
+    try:
+        cy_data, bcra_data = await asyncio.gather(
+            criptoya_ar.fetch_all(), bcra_macro.fetch_all(), return_exceptions=True
+        )
+        parts = []
+        if not isinstance(cy_data, Exception):
+            parts.append(criptoya_ar.format_for_telegram(cy_data))
+        if not isinstance(bcra_data, Exception):
+            parts.append(bcra_macro.format_for_telegram(bcra_data))
+        text = "\n\n".join(parts) if parts else "⚠️ AR macro fetch failed"
+    except Exception as exc:  # noqa: BLE001
+        log.exception("/argy failed")
+        text = f"⚠️ AR intel error: {str(exc)[:200]}"
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_isw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-INTEL30 #8 — ISW + Critical Threats Project geopol RSS."""
+    await _intel30_render(update, "isw_ctp", "ISW+CTP")
+
+
+@authorized
+@with_error_logging
+async def cmd_eia(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-INTEL30 #7 — EIA WPSR oil/gas weekly."""
+    await _intel30_render(update, "eia_oil", "EIA WPSR")
+
+
+@authorized
+@with_error_logging
+async def cmd_asxn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-INTEL30 #2 — ASXN HYPE buyback/burn/staking dashboards."""
+    await _intel30_render(update, "asxn_data", "ASXN HYPE")
+
+
+@authorized
+@with_error_logging
+async def cmd_hypurr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-INTEL30 #3 — HypurrScan HIP-1 auctions + TWAPs."""
+    await _intel30_render(update, "hypurrscan", "HypurrScan")
+
+
+@authorized
+@with_error_logging
+async def cmd_arkham(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-INTEL30 #6 — Arkham entity transfers."""
+    await _intel30_render(update, "arkham_intel", "Arkham")
+
+
+@authorized
+@with_error_logging
+async def cmd_hl_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-INTEL30 #1 — HL Info API extras (perpDexs + predictedFundings)."""
+    await _intel30_render(update, "hl_info_api", "HL Info API")
+
+
+@authorized
+@with_error_logging
+async def cmd_spark(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-INTEL30 #11 — Apollo Daily Spark (Torsten Slok)."""
+    await _intel30_render(update, "apollo_spark", "Apollo Daily Spark")
+
+
+@authorized
+@with_error_logging
+async def cmd_intel30(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-INTEL30 — Run all 11 Phase 1 sources in parallel and dump combined output."""
+    from modules.intel30 import (
+        hl_info_api, asxn_data, hypurrscan, fred_api, farside_etfs,
+        arkham_intel, eia_oil, isw_ctp, criptoya_ar, bcra_macro, apollo_spark,
+    )
+    await update.message.reply_text(
+        "\u23f3 Fetching 11 Phase-1 intel sources in parallel (~15s)...",
+        reply_markup=MAIN_KEYBOARD,
+    )
+    modules = [
+        ("HL Info", hl_info_api), ("ASXN", asxn_data), ("HypurrScan", hypurrscan),
+        ("FRED", fred_api), ("Farside", farside_etfs), ("Arkham", arkham_intel),
+        ("EIA", eia_oil), ("ISW+CTP", isw_ctp), ("CriptoYa", criptoya_ar),
+        ("BCRA", bcra_macro), ("Apollo Spark", apollo_spark),
+    ]
+    results = await asyncio.gather(
+        *[m.fetch_all() for _, m in modules], return_exceptions=True
+    )
+    parts = []
+    for (name, mod), res in zip(modules, results):
+        if isinstance(res, Exception):
+            parts.append(f"⚠️ {name}: {str(res)[:80]}")
+        else:
+            parts.append(mod.format_for_telegram(res))
+    combined = "\n\n".join(parts)
+    await send_long_message(update, combined, reply_markup=MAIN_KEYBOARD)
+
+
 # ─── Scheduler jobs ──────────────────────────────────────────────────────────
 
 
@@ -2094,6 +2293,18 @@ HANDLER_MAP = {
     "dashboard": cmd_dashboard,
     # R-BOT-LMEC-AUTOFEED
     "lmec_status": cmd_lmec_status,
+    # R-INTEL30 Phase 1 — 11 new free intel sources
+    "etfs": cmd_etfs,
+    "macro": cmd_macro,
+    "argy": cmd_argy,
+    "isw": cmd_isw,
+    "eia": cmd_eia,
+    "asxn": cmd_asxn,
+    "hypurr": cmd_hypurr,
+    "arkham": cmd_arkham,
+    "hl_info": cmd_hl_info,
+    "spark": cmd_spark,
+    "intel30": cmd_intel30,
 }
 
 

@@ -56,6 +56,19 @@ COMMANDS: List[BotCommand] = [
     BotCommand("intel_search", "Search keyword in intel_memory <kw>", "intel", "cmd_intel_search"),
     BotCommand("cryexc", "Snapshot cryexc.josedonato.com (funding+movers+HL OI)", "intel", "cmd_cryexc"),
 
+    # ── R-INTEL30 Phase 1 — 11 free intel sources (2026-05-08) ──────────────
+    BotCommand("etfs", "Farside daily BTC/ETH/SOL spot ETF flows", "intel", "cmd_etfs"),
+    BotCommand("macro", "FRED US macro + Apollo Daily Spark", "intel", "cmd_macro"),
+    BotCommand("argy", "AR macro: CriptoYa FX brecha + BCRA reservas/BM", "intel", "cmd_argy"),
+    BotCommand("isw", "ISW + Critical Threats Project geopol RSS", "intel", "cmd_isw"),
+    BotCommand("eia", "EIA WPSR oil/gas weekly stocks", "intel", "cmd_eia"),
+    BotCommand("asxn", "ASXN HYPE buyback/burn/staking/genesis", "intel", "cmd_asxn"),
+    BotCommand("hypurr", "HypurrScan HIP-1 Dutch auctions", "intel", "cmd_hypurr"),
+    BotCommand("arkham", "Arkham whale/entity transfers", "intel", "cmd_arkham"),
+    BotCommand("hl_info", "HL Info API: HIP-3 + predicted fundings", "intel", "cmd_hl_info"),
+    BotCommand("spark", "Apollo Daily Spark (Torsten Slok)", "intel", "cmd_spark"),
+    BotCommand("intel30", "Run all 11 R-INTEL30 Phase 1 sources at once", "intel", "cmd_intel30"),
+
     # ─── ADMIN ───
     BotCommand("log", "Last 20 position log entries", "admin", "cmd_log"),
     BotCommand("alertas", "Toggle automatic alerts (on/off)", "admin", "cmd_alertas"),
