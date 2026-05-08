@@ -22,28 +22,40 @@ URL = (
     "xp=1&xs=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&"
     "nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=10&page=1"
 )
-ROW_RE = re.compile(
-    r"<tr[^>]*>\s*<td[^>]*>(?P<x>[^<]*)</td>\s*"  # X column
-    r"<td[^>]*>(?P<filing>[^<]+)</td>\s*"
-    r"<td[^>]*>(?P<trade>[^<]+)</td>\s*"
-    r"<td[^>]*><a[^>]*>(?P<ticker>[^<]+)</a></td>\s*"
-    r"<td[^>]*>(?P<company>[^<]+)</td>\s*"
-    r"<td[^>]*><a[^>]*>(?P<insider>[^<]+)</a></td>",
-    re.DOTALL,
-)
+# 2026-05-08 schema fix: rows now use `<tr style="background:#...">` (no class)
+# and inner cells wrap content in <div>/<a>. Anchor on SEC.gov filing link.
+TR_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.DOTALL)
+FILING_RE = re.compile(r">(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})<")
+DATE_RE = re.compile(r">(\d{4}-\d{2}-\d{2})<")
+TICKER_RE = re.compile(r'<a href="/([A-Z][A-Z0-9.\-]*?)"')
+INSIDER_RE = re.compile(r'/insider/[^>]+>([^<]+)</a>')
 
 
 async def fetch_all() -> dict[str, Any]:
     text, meta = await get_text(SOURCE, URL, timeout=12.0)
     if not text:
         return {"_global_error": meta.get("reason", "fetch_failed"), "series": []}
+    # Slice from <tbody> to skip header table noise
+    idx = text.find("<tbody>")
+    body = text[idx:idx + 30000] if idx >= 0 else text
     rows = []
-    for m in ROW_RE.finditer(text):
+    for tr in TR_RE.finditer(body):
+        block = tr.group(1)
+        if "sec.gov/Archives" not in block and "SEC Form 4" not in block:
+            continue  # not a data row
+        filing = FILING_RE.search(block)
+        dates = DATE_RE.findall(block)
+        ticker = TICKER_RE.search(block)
+        insider = INSIDER_RE.search(block)
+        if not (ticker and (filing or dates)):
+            continue
+        # trade date is the second YYYY-MM-DD (first is the one inside filing timestamp)
+        trade_date = dates[1] if len(dates) >= 2 else (dates[0] if dates else "")
         rows.append({
-            "ticker": m.group("ticker").strip(),
-            "company": m.group("company").strip(),
-            "insider": m.group("insider").strip(),
-            "trade_date": m.group("trade").strip()[:10],
+            "ticker": ticker.group(1).strip(),
+            "company": ticker.group(1).strip(),
+            "insider": (insider.group(1).strip() if insider else "?"),
+            "trade_date": trade_date[:10],
             "_error": None,
         })
         if len(rows) >= 10:
