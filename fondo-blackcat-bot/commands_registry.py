@@ -69,6 +69,35 @@ COMMANDS: List[BotCommand] = [
     BotCommand("spark", "Apollo Daily Spark (Torsten Slok)", "intel", "cmd_spark"),
     BotCommand("intel30", "Run all 11 R-INTEL30 Phase 1 sources at once", "intel", "cmd_intel30"),
 
+    # ── R-PERFECT Phase 2 — 16 new free intel sources (2026-05-08) ───────────
+    BotCommand("hl_rpc", "HyperEVM RPC edge probe (block/gas/chain_id)", "intel", "cmd_hl_rpc"),
+    BotCommand("hyperevmscan", "HyperEVMScan via Etherscan v2 (block/gas)", "intel", "cmd_hyperevmscan"),
+    BotCommand("dune", "Dune top-5 HL dashboards", "intel", "cmd_dune"),
+    BotCommand("hypetrad", "HypeTrad pro-trader leaderboard", "intel", "cmd_hypetrad"),
+    BotCommand("treasury", "US Treasury Fiscal Data — public debt", "intel", "cmd_treasury"),
+    BotCommand("nyfed", "NY Fed Markets — SOFR/EFFR/OBFR rates", "intel", "cmd_nyfed"),
+    BotCommand("cot", "CFTC COT — TFF positioning weekly", "intel", "cmd_cot"),
+    BotCommand("l2beat", "L2Beat — top 10 L2 by TVS", "intel", "cmd_l2beat"),
+    BotCommand("artemis", "Artemis — chain metrics (fees+DAU+rev)", "intel", "cmd_artemis"),
+    BotCommand("visa_oc", "Visa Onchain Analytics — stablecoin volume", "intel", "cmd_visa_oc"),
+    BotCommand("treasuries", "BTC + ETH treasuries bundle", "intel", "cmd_treasuries"),
+    BotCommand("openinsider", "OpenInsider Form 4 latest", "intel", "cmd_openinsider"),
+    BotCommand("capitol", "CapitolTrades — Congress disclosures", "intel", "cmd_capitol"),
+    BotCommand("epoch", "Epoch AI — notable models recent", "intel", "cmd_epoch"),
+    BotCommand("semianalysis", "SemiAnalysis Substack RSS", "intel", "cmd_semianalysis"),
+    BotCommand("finrss", "Finance newsletter bundle (Money Stuff/NetInt/Diff)", "intel", "cmd_finrss"),
+
+    # ── R-PERFECT Phase 3 — 3 new sources ────────────────────────────────────
+    BotCommand("cryptovol", "Crypto vol — Deribit DVOL + Coinalyze + Velo", "intel", "cmd_cryptovol"),
+    BotCommand("kalshi", "Kalshi public markets + RSA-PSS auth probe", "intel", "cmd_kalshi"),
+    BotCommand("indec", "INDEC + LATAM macro extras", "intel", "cmd_indec"),
+
+    # ── R-PERFECT — meta/observability ───────────────────────────────────────
+    BotCommand("intel30_full", "Run ALL 30 intel sources in parallel", "intel", "cmd_intel30_full"),
+    BotCommand("selftest", "Selftest 30 sources — LIVE/PARTIAL/UNAVAILABLE matrix", "debug", "cmd_selftest"),
+    BotCommand("cost", "LLM cost breakdown last 7d", "debug", "cmd_cost"),
+    BotCommand("sources", "Last source-status snapshot from intel.log", "debug", "cmd_sources"),
+
     # ─── ADMIN ───
     BotCommand("log", "Last 20 position log entries", "admin", "cmd_log"),
     BotCommand("alertas", "Toggle automatic alerts (on/off)", "admin", "cmd_alertas"),

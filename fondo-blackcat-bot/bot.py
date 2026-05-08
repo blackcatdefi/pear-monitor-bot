@@ -1547,6 +1547,200 @@ async def cmd_intel30(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await send_long_message(update, combined, reply_markup=MAIN_KEYBOARD)
 
 
+# ─── R-PERFECT Phase 2 (16 modules) + Phase 3 (3 modules) ────────────────────
+
+@authorized
+@with_error_logging
+async def cmd_hl_rpc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT Sub-1 #1 — HyperEVM RPC edge probe."""
+    await _intel30_render(update, "hl_rpc_edge", "HyperEVM RPC")
+
+
+@authorized
+@with_error_logging
+async def cmd_hyperevmscan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT Sub-1 #2 — HyperEVMScan via Etherscan v2."""
+    await _intel30_render(update, "hyperevmscan", "HyperEVMScan")
+
+
+@authorized
+@with_error_logging
+async def cmd_dune(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT Sub-1 #3 — Dune top HL dashboards."""
+    await _intel30_render(update, "dune_hl", "Dune HL")
+
+
+@authorized
+@with_error_logging
+async def cmd_hypetrad(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT Sub-1 #4 — HypeTrad pro trader leaderboard."""
+    await _intel30_render(update, "hypetrad", "HypeTrad")
+
+
+@authorized
+@with_error_logging
+async def cmd_treasury(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT Sub-2 #1 — US Treasury Fiscal Data."""
+    await _intel30_render(update, "treasury_fiscal", "Treasury Fiscal")
+
+
+@authorized
+@with_error_logging
+async def cmd_nyfed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT Sub-2 #2 — NY Fed Markets reference rates."""
+    await _intel30_render(update, "nyfed_markets", "NY Fed")
+
+
+@authorized
+@with_error_logging
+async def cmd_cot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT Sub-2 #3 — CFTC Commitments of Traders."""
+    await _intel30_render(update, "cftc_cot", "CFTC COT")
+
+
+@authorized
+@with_error_logging
+async def cmd_l2beat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT Sub-3 #1 — L2Beat scaling summary."""
+    await _intel30_render(update, "l2beat", "L2Beat")
+
+
+@authorized
+@with_error_logging
+async def cmd_artemis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT Sub-3 #2 — Artemis Terminal asset metrics."""
+    await _intel30_render(update, "artemis_lite", "Artemis")
+
+
+@authorized
+@with_error_logging
+async def cmd_visa_oc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT Sub-3 #3 — Visa Onchain Analytics."""
+    await _intel30_render(update, "visa_onchain", "Visa Onchain")
+
+
+@authorized
+@with_error_logging
+async def cmd_treasuries(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT Sub-3 #4 — BTC + ETH treasuries bundle."""
+    await _intel30_render(update, "treasuries_bundle", "Treasuries")
+
+
+@authorized
+@with_error_logging
+async def cmd_openinsider(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT Sub-4 #1 — OpenInsider Form 4 latest."""
+    await _intel30_render(update, "openinsider", "OpenInsider")
+
+
+@authorized
+@with_error_logging
+async def cmd_capitol(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT Sub-4 #2 — Capitol Trades."""
+    await _intel30_render(update, "capitol_trades", "CapitolTrades")
+
+
+@authorized
+@with_error_logging
+async def cmd_epoch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT Sub-4 #3 — Epoch AI notable models."""
+    await _intel30_render(update, "epoch_ai", "Epoch AI")
+
+
+@authorized
+@with_error_logging
+async def cmd_semianalysis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT Sub-4 #4 — SemiAnalysis Substack RSS."""
+    await _intel30_render(update, "semianalysis_rss", "SemiAnalysis")
+
+
+@authorized
+@with_error_logging
+async def cmd_finrss(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT Sub-4 #5 — Finance newsletter RSS bundle."""
+    await _intel30_render(update, "finance_rss", "Finance RSS")
+
+
+@authorized
+@with_error_logging
+async def cmd_cryptovol(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT Phase 3 #1 — Deribit DVOL + Coinalyze + Velo."""
+    await _intel30_render(update, "crypto_vol", "Crypto Vol")
+
+
+@authorized
+@with_error_logging
+async def cmd_kalshi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT Phase 3 #2 — Kalshi public markets + RSA-PSS auth probe."""
+    await _intel30_render(update, "kalshi_api", "Kalshi")
+
+
+@authorized
+@with_error_logging
+async def cmd_indec(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT Phase 3 #3 — INDEC + LATAM macro extras."""
+    await _intel30_render(update, "argy_extra", "INDEC + LATAM")
+
+
+@authorized
+@with_error_logging
+async def cmd_intel30_full(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT — Run all 30 intel sources (Phase1+2+3) in parallel."""
+    from modules.intel30 import ALL_MODULES
+    await update.message.reply_text(
+        "\u23f3 Fetching 30 intel sources in parallel (~25s)...",
+        reply_markup=MAIN_KEYBOARD,
+    )
+    mods = []
+    for name in ALL_MODULES:
+        try:
+            mods.append((name, __import__(f"modules.intel30.{name}", fromlist=["fetch_all"])))
+        except Exception:  # noqa: BLE001
+            log.exception("intel30_full import %s", name)
+    results = await asyncio.gather(*[m.fetch_all() for _, m in mods], return_exceptions=True)
+    parts: list[str] = []
+    for (name, mod), res in zip(mods, results):
+        if isinstance(res, Exception):
+            parts.append(f"⚠️ {name}: {str(res)[:80]}")
+        else:
+            try:
+                parts.append(mod.format_for_telegram(res))
+            except Exception as e:  # noqa: BLE001
+                parts.append(f"⚠️ {name}: format failed — {str(e)[:60]}")
+    combined = "\n\n".join(parts)
+    await send_long_message(update, combined, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_selftest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT Phase 3 #9 — /selftest: fan out all 30 sources, return matrix."""
+    from modules.intel_selftest import run_selftest, format_matrix
+    await update.message.reply_text("\u23f3 Running /selftest on 30 sources (timeout 10s each)...",
+                                    reply_markup=MAIN_KEYBOARD)
+    matrix = await run_selftest()
+    text = format_matrix(matrix)
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_cost(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT Phase 3 #3 — /cost: LLM call cost breakdown last 7d."""
+    from modules.cost_tracker import format_cost_report
+    text = format_cost_report(days=7)
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PERFECT — /sources: latest source status table from intel.log."""
+    from modules.intel_selftest import format_source_status
+    text = format_source_status()
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
 # ─── Scheduler jobs ──────────────────────────────────────────────────────────
 
 
@@ -1652,6 +1846,75 @@ async def _weekly_summary_job(application: Application) -> None:
         await weekly_scheduled_summary(application.bot)
     except Exception:  # noqa: BLE001
         log.exception("weekly summary job failed")
+
+
+# ─── R-PERFECT Phase 4 scheduler jobs ───────────────────────────────────────
+
+
+async def _selftest_cron_job(application: Application) -> None:
+    """R-PERFECT Fase 4: 4x/day /selftest + flap-alert evaluation."""
+    if os.getenv("SELFTEST_CRON_ENABLED", "true").strip().lower() == "false":
+        return
+    try:
+        from modules.intel_selftest import run_selftest
+        from modules.source_alerts import evaluate_matrix, format_alerts
+        matrix = await run_selftest()
+        alerts = evaluate_matrix(matrix)
+        if alerts:
+            text = format_alerts(alerts)
+            chat_id = os.getenv("ALERT_CHAT_ID") or os.getenv("AUTHORIZED_USER_ID")
+            if chat_id and text:
+                try:
+                    await application.bot.send_message(
+                        chat_id=int(chat_id), text=text, parse_mode="Markdown"
+                    )
+                except Exception:  # noqa: BLE001
+                    log.exception("selftest cron alert send failed")
+    except Exception:  # noqa: BLE001
+        log.exception("selftest cron job failed")
+
+
+async def _backup_volume_job(application: Application) -> None:
+    """R-PERFECT Fase 4: daily 04:00 UTC — gzip /app/data, prune 30d, optional GH push."""
+    if os.getenv("BACKUP_VOLUME_ENABLED", "true").strip().lower() == "false":
+        return
+    try:
+        from modules.backup_volume import run_backup
+        loop = asyncio.get_event_loop()
+        # tarfile is sync; offload to a thread so we don't block the event loop
+        result = await loop.run_in_executor(None, run_backup)
+        if not result.get("ok"):
+            chat_id = os.getenv("ALERT_CHAT_ID") or os.getenv("AUTHORIZED_USER_ID")
+            if chat_id:
+                try:
+                    await application.bot.send_message(
+                        chat_id=int(chat_id),
+                        text=f"📦 backup FAILED: {result.get('reason','?')[:120]}",
+                    )
+                except Exception:  # noqa: BLE001
+                    log.exception("backup failure alert send failed")
+    except Exception:  # noqa: BLE001
+        log.exception("backup_volume cron job failed")
+
+
+async def _cost_alert_job(application: Application) -> None:
+    """R-PERFECT Fase 3 #3: hourly LLM cost threshold check, alert if breached."""
+    if os.getenv("COST_ALERTS_ENABLED", "true").strip().lower() == "false":
+        return
+    try:
+        from modules.cost_tracker import check_alert_thresholds
+        msg = check_alert_thresholds()
+        if msg:
+            chat_id = os.getenv("ALERT_CHAT_ID") or os.getenv("AUTHORIZED_USER_ID")
+            if chat_id:
+                try:
+                    await application.bot.send_message(
+                        chat_id=int(chat_id), text=msg, parse_mode="Markdown"
+                    )
+                except Exception:  # noqa: BLE001
+                    log.exception("cost alert send failed")
+    except Exception:  # noqa: BLE001
+        log.exception("cost_alert cron job failed")
 
 
 async def _lmec_weekly_recheck_job(application: Application) -> None:
@@ -2188,11 +2451,54 @@ async def post_init(application: Application) -> None:
             )
             log.info("R21 morning_brief ENABLED (cron %02d:00 UTC daily)", mb_hour)
 
+        # ─── R-PERFECT Fase 4: stress test cron + hardening ────────────
+        # /selftest 4x/day at 00:00, 06:00, 12:00, 18:00 UTC
+        if os.getenv("SELFTEST_CRON_ENABLED", "true").strip().lower() != "false":
+            scheduler.add_job(
+                _selftest_cron_job,
+                "cron",
+                hour="0,6,12,18",
+                minute=0,
+                args=[application],
+                id="selftest_cron",
+                max_instances=1,
+                coalesce=True,
+            )
+            log.info("R-PERFECT: /selftest cron ENABLED (4x/day at 00/06/12/18 UTC)")
+        # Daily backup at 04:00 UTC
+        if os.getenv("BACKUP_VOLUME_ENABLED", "true").strip().lower() != "false":
+            scheduler.add_job(
+                _backup_volume_job,
+                "cron",
+                hour=int(os.getenv("BACKUP_HOUR_UTC", "4")),
+                minute=0,
+                args=[application],
+                id="backup_volume",
+                max_instances=1,
+                coalesce=True,
+            )
+            log.info("R-PERFECT: backup_volume cron ENABLED (daily %sh UTC)",
+                     os.getenv("BACKUP_HOUR_UTC", "4"))
+        # Cost alert check — hourly
+        if os.getenv("COST_ALERTS_ENABLED", "true").strip().lower() != "false":
+            scheduler.add_job(
+                _cost_alert_job,
+                "interval",
+                hours=1,
+                args=[application],
+                id="cost_alert",
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now(timezone.utc) + timedelta(minutes=10),
+            )
+            log.info("R-PERFECT: cost_alert hourly check ENABLED")
+
         scheduler.start()
         application.bot_data["scheduler"] = scheduler
         log.info(
             "Scheduler started: alerts %dmin, intel 30min, X %s, backup 03:00 UTC, cleanup Sun 04:00 UTC. "
-            "R17: macro_cal 1min, reconcile 15min, kill 5min, rates 30min, weekly_summary Sun 18:00 UTC.",
+            "R17: macro_cal 1min, reconcile 15min, kill 5min, rates 30min, weekly_summary Sun 18:00 UTC. "
+            "R-PERFECT: selftest 4x/day, backup_volume 04:00 UTC, cost_alert hourly.",
             POLL_INTERVAL_MIN,
             "ON" if X_SCHEDULER_ENABLED else "OFF",
         )
@@ -2305,6 +2611,32 @@ HANDLER_MAP = {
     "hl_info": cmd_hl_info,
     "spark": cmd_spark,
     "intel30": cmd_intel30,
+    # R-PERFECT Phase 2 — 16 new intel sources
+    "hl_rpc": cmd_hl_rpc,
+    "hyperevmscan": cmd_hyperevmscan,
+    "dune": cmd_dune,
+    "hypetrad": cmd_hypetrad,
+    "treasury": cmd_treasury,
+    "nyfed": cmd_nyfed,
+    "cot": cmd_cot,
+    "l2beat": cmd_l2beat,
+    "artemis": cmd_artemis,
+    "visa_oc": cmd_visa_oc,
+    "treasuries": cmd_treasuries,
+    "openinsider": cmd_openinsider,
+    "capitol": cmd_capitol,
+    "epoch": cmd_epoch,
+    "semianalysis": cmd_semianalysis,
+    "finrss": cmd_finrss,
+    # R-PERFECT Phase 3 — 3 new sources
+    "cryptovol": cmd_cryptovol,
+    "kalshi": cmd_kalshi,
+    "indec": cmd_indec,
+    # R-PERFECT — meta/observability
+    "intel30_full": cmd_intel30_full,
+    "selftest": cmd_selftest,
+    "cost": cmd_cost,
+    "sources": cmd_sources,
 }
 
 

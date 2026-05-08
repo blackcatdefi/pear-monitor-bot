@@ -94,6 +94,57 @@ def format_version_block(commands_count: int) -> str:
     )
 
 
+def _intel_24h_calls() -> dict:
+    try:
+        from modules.intel_selftest import last_24h_call_summary
+        s = last_24h_call_summary()
+        return {"per_source": s, "total": sum(s.values())}
+    except Exception:  # noqa: BLE001
+        return {"per_source": {}, "total": 0}
+
+
+def _cost_24h_usd() -> float:
+    try:
+        from modules.cost_tracker import cost_last_24h
+        return round(cost_last_24h(), 4)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _backup_last_run() -> dict:
+    try:
+        from modules.backup_volume import (
+            get_last_backup_status,
+            hours_since_last_backup,
+        )
+        status = get_last_backup_status() or {}
+        return {
+            "iso": status.get("iso", ""),
+            "ok": bool(status.get("ok")),
+            "tarball": status.get("tarball", ""),
+            "hours_ago": hours_since_last_backup(),
+        }
+    except Exception:  # noqa: BLE001
+        return {"iso": "", "ok": False, "tarball": "", "hours_ago": None}
+
+
+def _selftest_summary() -> dict:
+    try:
+        from modules.intel_selftest import LAST_SELFTEST
+        import json
+        if not LAST_SELFTEST.exists():
+            return {"counts": {}, "total": 0, "ts_utc": 0}
+        with LAST_SELFTEST.open("r", encoding="utf-8") as fh:
+            m = json.load(fh)
+        return {
+            "counts": m.get("counts", {}),
+            "total": m.get("total", 0),
+            "ts_utc": m.get("ts_utc", 0),
+        }
+    except Exception:  # noqa: BLE001
+        return {"counts": {}, "total": 0, "ts_utc": 0}
+
+
 def health_payload(commands_count: int) -> dict:
     """JSON payload for /health endpoint (Railway probe)."""
     return {
@@ -106,4 +157,9 @@ def health_payload(commands_count: int) -> dict:
         "commands_registered": commands_count,
         "x_api": _x_status_short(),
         "llm": _llm_short(),
+        # R-PERFECT Phase 3 §EXIT
+        "intel_24h_calls": _intel_24h_calls(),
+        "cost_24h_usd": _cost_24h_usd(),
+        "backup_last_run": _backup_last_run(),
+        "selftest_last": _selftest_summary(),
     }
