@@ -2083,6 +2083,28 @@ async def _cryexc_monitor_job(application: Application) -> None:
             return
     except Exception:  # noqa: BLE001
         pass
+    try:
+        snap = await fetch_cryexc(force_live=True)
+        new_events = filter_new_events(snap.notable_events)
+        if not new_events:
+            return
+        chat_id = TELEGRAM_CHAT_ID
+        if not chat_id:
+            return
+        body_lines = ["\U0001f514 CRYEXC ALERT — eventos nuevos:"]
+        for ev in new_events[:8]:
+            body_lines.append(f"  \u2022 {ev}")
+        body_lines.append("")
+        body_lines.append(f"Source: cryexc.josedonato.com  Ts: {snap.timestamp_utc[:16]} UTC")
+        msg = "\n".join(body_lines)
+        try:
+            await send_bot_message(application.bot, chat_id, msg)
+            for ev in new_events:
+                mark_event_seen(ev)
+        except Exception:  # noqa: BLE001
+            log.exception("cryexc alert send failed")
+    except Exception:  # noqa: BLE001
+        log.exception("cryexc monitor job failed")
 
 
 # ─── R-ONDEMAND gate-aware wrappers for R18/R21 broadcast schedulers ────────
@@ -2108,28 +2130,6 @@ def _gated_broadcast(coro_factory, gate_fn, label: str):
         except Exception:  # noqa: BLE001
             log.exception("R-ONDEMAND broadcast %s task creation failed", label)
     return _runner
-    try:
-        snap = await fetch_cryexc(force_live=True)
-        new_events = filter_new_events(snap.notable_events)
-        if not new_events:
-            return
-        chat_id = TELEGRAM_CHAT_ID
-        if not chat_id:
-            return
-        body_lines = ["\U0001f514 CRYEXC ALERT — eventos nuevos:"]
-        for ev in new_events[:8]:
-            body_lines.append(f"  \u2022 {ev}")
-        body_lines.append("")
-        body_lines.append(f"Source: cryexc.josedonato.com  Ts: {snap.timestamp_utc[:16]} UTC")
-        msg = "\n".join(body_lines)
-        try:
-            await send_bot_message(application.bot, chat_id, msg)
-            for ev in new_events:
-                mark_event_seen(ev)
-        except Exception:  # noqa: BLE001
-            log.exception("cryexc alert send failed")
-    except Exception:  # noqa: BLE001
-        log.exception("cryexc monitor job failed")
 
 
 # ─── BotFather sync ──────────────────────────────────────────────────────────
