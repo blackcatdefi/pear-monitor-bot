@@ -2,11 +2,21 @@
 
 Source: https://publicreporting.cftc.gov/resource/{dataset}.json (Socrata API)
 Datasets:
-  - 6dca-aqww: TFF (Traders in Financial Futures) for financials
-  - jun7-fc8e: legacy COT all markets
+  - gpe5-46if: TFF (Traders in Financial Futures) — has dealer/lev_money/asset_mgr
+  - 6dca-aqww: legacy COT (Futures Only) — has noncomm/comm
+  - jun7-fc8e: legacy COT historical all markets
+
+R-ONDEMAND fix (2026-05-09): switched dataset from 6dca-aqww (legacy) to
+gpe5-46if (TFF). The legacy schema only exposes ``noncomm_*``/``comm_*``
+fields, so the prior code reading ``dealer_positions_*`` and
+``lev_money_positions_*`` always coerced to 0.0 via _f() (None → 0).
+Result: /cot rendered "lev_funds net=+0 · dealer net=+0" for every contract.
+TFF dataset (gpe5-46if) carries the right fields and the parser yields
+real net positions (e.g. BITCOIN 2026-05-05: dealer net +4,469, lev_funds
+net -11,738).
 
 No key required. Free Socrata throttle (~1000 req/hr/IP).
-Surface: BTC futures positioning week-over-week (when included), gold, S&P.
+Surface: BTC/ETH/SPX/Gold/DXY positioning week-over-week.
 """
 from __future__ import annotations
 
@@ -18,6 +28,9 @@ from modules.intel30._intel_base import LIVE, get_json, log_call
 log = logging.getLogger(__name__)
 
 BASE = "https://publicreporting.cftc.gov/resource"
+# TFF (Traders in Financial Futures) — exposes dealer / asset_mgr / lev_money / other_rept.
+# Legacy COT dataset (6dca-aqww) only has noncomm/comm — wrong schema for this surface.
+DATASET = "gpe5-46if"
 SOURCE = "cftc_cot"
 
 # Trackable contracts (TFF dataset)
@@ -32,7 +45,7 @@ TRACKED_NAMES = [
 
 
 async def fetch_latest_per_contract(name: str) -> dict[str, Any]:
-    url = f"{BASE}/6dca-aqww.json"
+    url = f"{BASE}/{DATASET}.json"
     # Socrata SoQL: filter by partial name
     where = f"upper(market_and_exchange_names) like '%{name.upper()}%'"
     data, meta = await get_json(
@@ -55,6 +68,8 @@ async def fetch_latest_per_contract(name: str) -> dict[str, Any]:
             "short_dealer": _f(row.get("dealer_positions_short_all")),
             "long_levfunds": _f(row.get("lev_money_positions_long")),
             "short_levfunds": _f(row.get("lev_money_positions_short")),
+            "long_assetmgr": _f(row.get("asset_mgr_positions_long")),
+            "short_assetmgr": _f(row.get("asset_mgr_positions_short")),
             "_error": None,
         }
     except Exception as e:  # noqa: BLE001
@@ -89,9 +104,10 @@ def format_for_telegram(data: dict[str, Any]) -> str:
         lab = s.get("label", "?")
         net_lev = s.get("long_levfunds", 0) - s.get("short_levfunds", 0)
         net_dealer = s.get("long_dealer", 0) - s.get("short_dealer", 0)
+        net_am = s.get("long_assetmgr", 0) - s.get("short_assetmgr", 0)
         fecha = s.get("fecha", "")
         lines.append(f"  • {lab} ({fecha}):")
-        lines.append(f"      lev_funds net: {net_lev:+,.0f}  · dealer net: {net_dealer:+,.0f}")
+        lines.append(f"      lev_funds net: {net_lev:+,.0f}  · dealer net: {net_dealer:+,.0f}  · asset_mgr net: {net_am:+,.0f}")
         rendered += 1
     if rendered == 0:
         lines.append("  ⚠️ no rows")

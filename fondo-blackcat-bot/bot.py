@@ -1754,6 +1754,13 @@ async def _alert_job(application: Application) -> None:
 
 
 async def _intel_processor_job() -> None:
+    # R-ONDEMAND gate: silence background intel pulls when bot is on-demand-only.
+    try:
+        from modules.cron_state import intel_autopull_enabled
+        if not intel_autopull_enabled():
+            return
+    except Exception:  # noqa: BLE001
+        pass
     try:
         count = await process_pending_intel(limit=50)
         if count > 0:
@@ -1763,6 +1770,12 @@ async def _intel_processor_job() -> None:
 
 
 async def _x_timeline_cache_job(application: Application | None = None) -> None:
+    try:
+        from modules.cron_state import intel_autopull_enabled
+        if not intel_autopull_enabled():
+            return
+    except Exception:  # noqa: BLE001
+        pass
     try:
         await poll_and_cache_timeline(app=application)
     except Exception:  # noqa: BLE001
@@ -1800,6 +1813,13 @@ async def _macro_calendar_job(application: Application) -> None:
     """
     if os.getenv("MACRO_CALENDAR_ENABLED", "true").strip().lower() == "false":
         return
+    # R-ONDEMAND: catalyst nudges (T-24/T-2/T-30) silenced unless explicit BCD opt-in.
+    try:
+        from modules.cron_state import catalyst_nudge_enabled
+        if not catalyst_nudge_enabled():
+            return
+    except Exception:  # noqa: BLE001
+        pass
     try:
         if os.getenv("TIME_AWARENESS_ENABLED", "true").strip().lower() != "false":
             from scheduler_calendar_v2 import run_calendar_alert_check
@@ -1842,6 +1862,13 @@ async def _rates_monitor_job(application: Application) -> None:
 
 async def _weekly_summary_job(application: Application) -> None:
     """R17: Sunday 18:00 UTC — weekly performance summary."""
+    # R-ONDEMAND: weekly auto-broadcast falls under REPORT_CRON_ENABLED.
+    try:
+        from modules.cron_state import report_cron_enabled
+        if not report_cron_enabled():
+            return
+    except Exception:  # noqa: BLE001
+        pass
     try:
         await weekly_scheduled_summary(application.bot)
     except Exception:  # noqa: BLE001
@@ -1968,6 +1995,16 @@ async def _lmec_counter_refresh_job() -> None:
     when /reporte hasn't been issued recently. Lightweight — no
     Telegram messaging. Failure is swallowed.
     """
+    # R-ONDEMAND gate: LMEC counter refresh is part of the background
+    # intel-autopull surface (silent helper that keeps state warm). The
+    # weekly Sunday recheck is *not* gated — flip alerts must keep firing
+    # since they are catalyst-critical.
+    try:
+        from modules.cron_state import intel_autopull_enabled
+        if not intel_autopull_enabled():
+            return
+    except Exception:  # noqa: BLE001
+        pass
     try:
         from modules.lmec_triggers import evaluate_lmec_triggers
         from modules.market import fetch_market_data
@@ -2039,6 +2076,38 @@ async def _cryexc_monitor_job(application: Application) -> None:
     """R18: every 30min — cryexc snapshot + fire alert on new notable events."""
     if not cryexc_is_enabled() or not cryexc_monitor_is_enabled():
         return
+    # R-ONDEMAND: cryexc proactive event push is a catalyst nudge surface.
+    try:
+        from modules.cron_state import catalyst_nudge_enabled
+        if not catalyst_nudge_enabled():
+            return
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# ─── R-ONDEMAND gate-aware wrappers for R18/R21 broadcast schedulers ────────
+
+
+def _gated_broadcast(coro_factory, gate_fn, label: str):
+    """Return a sync callable suitable for APScheduler ``add_job(...)``.
+
+    ``coro_factory`` is a 0-arg callable that, when invoked, returns the
+    coroutine to dispatch. ``gate_fn`` is a 0-arg sync callable returning
+    True if the broadcast should run. The wrapper short-circuits with a
+    debug log when the gate is closed — no Telegram traffic, no exception.
+    """
+    def _runner() -> None:
+        try:
+            if not gate_fn():
+                log.debug("R-ONDEMAND gate closed: %s skipped", label)
+                return
+        except Exception:  # noqa: BLE001
+            log.exception("R-ONDEMAND gate eval failed for %s (failing open)", label)
+        try:
+            asyncio.create_task(coro_factory())
+        except Exception:  # noqa: BLE001
+            log.exception("R-ONDEMAND broadcast %s task creation failed", label)
+    return _runner
     try:
         snap = await fetch_cryexc(force_live=True)
         new_events = filter_new_events(snap.notable_events)
@@ -2332,10 +2401,15 @@ async def post_init(application: Application) -> None:
             )
 
         # ─── Round 18 jobs ───────────────────────────────────────────────
-        # Morning brief — daily 08:00 UTC
+        # Morning brief — daily 08:00 UTC (R-ONDEMAND: REPORT_CRON_ENABLED gate)
         if r18_morning_scheduled is not None and r18_morning_enabled():
+            from modules.cron_state import report_cron_enabled
             scheduler.add_job(
-                lambda: asyncio.create_task(r18_morning_scheduled(application)),
+                _gated_broadcast(
+                    lambda: r18_morning_scheduled(application),
+                    report_cron_enabled,
+                    "r18_morning_brief",
+                ),
                 "cron",
                 hour=int(os.getenv("MORNING_BRIEF_HOUR_UTC", "8")),
                 minute=0,
@@ -2356,10 +2430,15 @@ async def post_init(application: Application) -> None:
                 coalesce=True,
             )
             log.info("R18 basket_close_detector ENABLED (every 30s)")
-        # Compounding detector — every 5 min
+        # Compounding detector — every 5 min (R-ONDEMAND: TESIS_CRON_ENABLED)
         if r18_compounding_scheduled is not None and r18_compounding_enabled():
+            from modules.cron_state import tesis_cron_enabled
             scheduler.add_job(
-                lambda: asyncio.create_task(r18_compounding_scheduled(application.bot)),
+                _gated_broadcast(
+                    lambda: r18_compounding_scheduled(application.bot),
+                    tesis_cron_enabled,
+                    "r18_compounding_detector",
+                ),
                 "interval",
                 minutes=5,
                 id="compounding_detector",
@@ -2367,10 +2446,15 @@ async def post_init(application: Application) -> None:
                 coalesce=True,
             )
             log.info("R18 compounding_detector ENABLED (every 5min)")
-        # Macro convergence — every 60 min
+        # Macro convergence — every 60 min (R-ONDEMAND: TESIS_CRON_ENABLED)
         if r18_convergence_scheduled is not None and r18_convergence_enabled():
+            from modules.cron_state import tesis_cron_enabled
             scheduler.add_job(
-                lambda: asyncio.create_task(r18_convergence_scheduled(application.bot)),
+                _gated_broadcast(
+                    lambda: r18_convergence_scheduled(application.bot),
+                    tesis_cron_enabled,
+                    "r18_macro_convergence",
+                ),
                 "interval",
                 minutes=60,
                 id="macro_convergence",
@@ -2378,10 +2462,15 @@ async def post_init(application: Application) -> None:
                 coalesce=True,
             )
             log.info("R18 macro_convergence ENABLED (every 60min)")
-        # Predictive alerts — every 30 min
+        # Predictive alerts — every 30 min (R-ONDEMAND: TESIS_CRON_ENABLED)
         if r18_predictive_scheduled is not None and r18_predictive_enabled():
+            from modules.cron_state import tesis_cron_enabled
             scheduler.add_job(
-                lambda: asyncio.create_task(r18_predictive_scheduled(application.bot)),
+                _gated_broadcast(
+                    lambda: r18_predictive_scheduled(application.bot),
+                    tesis_cron_enabled,
+                    "r18_predictive_alerts",
+                ),
                 "interval",
                 minutes=30,
                 id="predictive_alerts",
@@ -2389,10 +2478,15 @@ async def post_init(application: Application) -> None:
                 coalesce=True,
             )
             log.info("R18 predictive_alerts ENABLED (every 30min)")
-        # Pre-event brief — every 5 min, fires T-90→T-30 window
+        # Pre-event brief — every 5 min, fires T-90→T-30 window (R-ONDEMAND: CATALYST_NUDGE)
         if r18_preevent_scheduled is not None and r18_preevent_enabled():
+            from modules.cron_state import catalyst_nudge_enabled
             scheduler.add_job(
-                lambda: asyncio.create_task(r18_preevent_scheduled(application)),
+                _gated_broadcast(
+                    lambda: r18_preevent_scheduled(application),
+                    catalyst_nudge_enabled,
+                    "r18_pre_event_brief",
+                ),
                 "interval",
                 minutes=5,
                 id="pre_event_brief",
@@ -2437,10 +2531,16 @@ async def post_init(application: Application) -> None:
             log.info("R18 risk_config_validator ENABLED (every %.1fh)", rcv_hours)
 
         # R21: morning brief — anchor message at MORNING_BRIEF_HOUR_UTC every day
+        # R-ONDEMAND: gated by REPORT_CRON_ENABLED (broadcast surface).
         if os.getenv("MORNING_BRIEF_ENABLED", "true").strip().lower() != "false":
+            from modules.cron_state import report_cron_enabled
             mb_hour = _morning_brief_hour()
             scheduler.add_job(
-                lambda: asyncio.create_task(send_morning_brief_job(application.bot)),
+                _gated_broadcast(
+                    lambda: send_morning_brief_job(application.bot),
+                    report_cron_enabled,
+                    "r21_morning_brief",
+                ),
                 "cron",
                 hour=mb_hour,
                 minute=0,

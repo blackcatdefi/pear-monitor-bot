@@ -275,6 +275,23 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
             else:
                 _clear(state, key)
 
+    # 6b. R-ONDEMAND (2026-05-09) — Margin stress watchdog.
+    # Edge-triggered alert on any wallet whose ratio
+    #   total_margin_used / account_value > MARGIN_STRESS_ALERT_PCT (default 90)
+    # Operative meaning: <10% buffer to forced liquidation on the perp side.
+    # Single fire per breach; clears when ratio drops below threshold.
+    try:
+        from modules.cron_state import (
+            margin_stress_enabled,
+            margin_stress_threshold_pct,
+        )
+        if margin_stress_enabled():
+            await _run_margin_stress_alerts(
+                bot, state, wallets, threshold_pct=margin_stress_threshold_pct(),
+            )
+    except Exception:  # noqa: BLE001
+        log.exception("margin stress watchdog failed (non-fatal)")
+
     # 7. BCD DCA zone watchdog (Round 13)
     # Para cada asset en BCD_DCA_PLAN chequear si el precio entra en un range
     # con status lógico "pending" (= sin alerta activa en las últimas 24h).
@@ -368,3 +385,70 @@ async def _run_dca_zone_alerts(bot, state: dict[str, Any]) -> None:
                     state[zone_key] = False
                 if state.get(alerted_key) and not _dca_alerted_within_window(state, alerted_key):
                     state.pop(alerted_key, None)
+
+
+# ─── R-ONDEMAND: Margin stress watchdog ────────────────────────────────────
+
+
+def margin_stress_ratio(account_value: float, total_margin_used: float) -> float | None:
+    """Pure helper used by the alert path and by tests.
+
+    Returns ``total_margin_used / account_value`` as a float in [0, +inf), or
+    ``None`` when the wallet has no perp equity (empty wallet, idle wallet,
+    or pre-fund-ready). Returning None instead of 0 lets the caller skip
+    the wallet without generating false-positive 0% alerts.
+    """
+    try:
+        eq = float(account_value)
+        used = float(total_margin_used)
+    except (TypeError, ValueError):
+        return None
+    if eq <= 0.0:
+        # No perp equity → nothing to stress over. Includes the common
+        # "empty wallet" case where Hyperliquid returns accountValue=0.
+        return None
+    return used / eq
+
+
+async def _run_margin_stress_alerts(
+    bot,
+    state: dict[str, Any],
+    wallets: list[dict[str, Any]],
+    *,
+    threshold_pct: float,
+) -> None:
+    """Edge-triggered margin-stress alert per wallet.
+
+    Fires once when ratio crosses ``threshold_pct`` and clears state when it
+    drops back below. State key: ``margin_stress_<last8>``. ``threshold_pct``
+    is expressed in percent (e.g. 90.0 means used/equity ≥ 0.90).
+    """
+    threshold = max(0.0, min(1.0, threshold_pct / 100.0))
+    for w in wallets or []:
+        if w.get("status") != "ok":
+            continue
+        d = w.get("data") or {}
+        wallet_addr = d.get("wallet", "") or ""
+        label = d.get("label", "") or ""
+        eq = d.get("account_value", 0.0) or 0.0
+        used = d.get("total_margin_used", 0.0) or 0.0
+        ratio = margin_stress_ratio(eq, used)
+        if ratio is None:
+            # Idle/empty wallet — nothing to alert on; ensure state is clean.
+            if wallet_addr:
+                _clear(state, f"margin_stress_{wallet_addr[-8:]}")
+            continue
+        short_addr = wallet_addr[:6] + "\u2026" + wallet_addr[-4:] if wallet_addr else ""
+        ident = f"{label} ({short_addr})" if label else short_addr
+        key = f"margin_stress_{wallet_addr[-8:]}" if wallet_addr else "margin_stress_unknown"
+        if ratio >= threshold:
+            msg = (
+                f"\U0001f6a8 MARGIN STRESS \u2014 {ident} \u2014 "
+                f"used/equity = {ratio*100:.1f}% (threshold {threshold_pct:.0f}%). "
+                f"margin_used=${used:,.0f} \u00b7 account_value=${eq:,.0f}. "
+                f"Buffer to liquidation <{(1-ratio)*100:.1f}% \u2014 "
+                f"reduce size or add collateral."
+            )
+            await _emit(bot, key, state, msg)
+        else:
+            _clear(state, key)

@@ -145,6 +145,15 @@ def _selftest_summary() -> dict:
         return {"counts": {}, "total": 0, "ts_utc": 0}
 
 
+def _cron_state_safe() -> dict:
+    """Best-effort cron-state snapshot — never raises into /health."""
+    try:
+        from modules.cron_state import cron_state_payload
+        return cron_state_payload()
+    except Exception:  # noqa: BLE001
+        return {"_error": "cron_state unavailable"}
+
+
 def health_payload(commands_count: int) -> dict:
     """JSON payload for /health endpoint (Railway probe)."""
     return {
@@ -162,4 +171,6 @@ def health_payload(commands_count: int) -> dict:
         "cost_24h_usd": _cost_24h_usd(),
         "backup_last_run": _backup_last_run(),
         "selftest_last": _selftest_summary(),
+        # R-ONDEMAND (2026-05-09): proactive cron gates + safety thresholds.
+        "cron_state": _cron_state_safe(),
     }
