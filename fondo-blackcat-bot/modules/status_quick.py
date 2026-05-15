@@ -8,7 +8,7 @@ Sources tocadas:
     - hyperlend.fetch_all_hyperlend()  (cache 30s on second call)
     - market.fetch_market_data()       (cache 60s)
     - portfolio.fetch_all_wallets()    (cached if available)
-    - fund_state.BASKET_V5_STATUS, TRADE_DEL_CICLO_STATUS
+    - fund_state.BASKET_V5_STATUS
     - macro_calendar.next_event()      (read-only)
     - errors_log: count last 24h
 
@@ -89,16 +89,11 @@ async def build_status_block() -> str:
     fg_label = snap.market.fear_greed_label
 
     # ─── Fund state from authoritative file ──────────────────────────────────
+    # R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): Trade del Ciclo / Blofin eliminados.
     try:
-        from fund_state import (
-            BASKET_V5_STATUS,
-            TRADE_DEL_CICLO_STATUS,
-            TRADE_DEL_CICLO_PNL_REALIZED,
-        )
+        from fund_state import BASKET_V5_STATUS
     except Exception:
         BASKET_V5_STATUS = "?"
-        TRADE_DEL_CICLO_STATUS = "?"
-        TRADE_DEL_CICLO_PNL_REALIZED = 0.0
 
     # ─── Active alerts (errors last 1h) ─────────────────────────────────────
     try:
@@ -161,12 +156,6 @@ async def build_status_block() -> str:
     lines.append(f"🎯 Basket v5: {BASKET_V5_STATUS}")
     if basket_active:
         lines.append(f"   ↳ Active SHORT positions: {basket_positions_count}")
-    lines.append(f"💎 Trade del Ciclo (Blofin): {TRADE_DEL_CICLO_STATUS}")
-    if TRADE_DEL_CICLO_STATUS == "CLOSED":
-        lines.append(
-            f"   Realized PnL last cycle: "
-            f"{_fmt_signed_usd(float(TRADE_DEL_CICLO_PNL_REALIZED or 0))}"
-        )
     lines.append("")
     lines.append(
         f"🌡 BTC: {_fmt_usd(btc)} | ETH: {_fmt_usd(eth)} | "

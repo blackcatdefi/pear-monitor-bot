@@ -192,7 +192,6 @@ Respondé EXCLUSIVAMENTE en este formato JSON (sin markdown, sin backticks, solo
     "super_basket_stage_6": {"status": "VALIDA|NEUTRO|INVALIDA", "detail": "dato específico corto", "action": "MANTENER|AGREGAR|REDUCIR|SALIR"},
     "hype_flywheel": {"status": "VALIDA|NEUTRO|INVALIDA", "detail": "dato específico corto", "action": "MANTENER|AGREGAR|REDUCIR|SALIR"},
     "fed_hawkish": {"status": "VALIDA|NEUTRO|INVALIDA", "detail": "dato específico corto", "action": "MANTENER|AGREGAR|REDUCIR|SALIR"},
-    "trade_del_ciclo": {"status": "VALIDA|NEUTRO|INVALIDA", "detail": "dato específico corto", "action": "MANTENER|AGREGAR|REDUCIR|SALIR"},
     "lmec_bear_invalidation": {"status": "VALIDA|NEUTRO|INVALIDA", "detail": "dato específico corto", "action": "MANTENER|AGREGAR|REDUCIR|SALIR"}
   },
   "overall_conviction": "1-10 (10=máxima convicción en la tesis)",
@@ -366,7 +365,7 @@ async def _update_thesis_state(
             ("super_basket_stage_6", "Super Basket Stage 6"),
             ("hype_flywheel", "HYPE Flywheel"),
             ("fed_hawkish", "Fed Hawkish"),
-            ("trade_del_ciclo", "Trade del Ciclo"),
+            # R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): Trade del Ciclo (Blofin) ELIMINADO.
             ("lmec_bear_invalidation", "LMEC Bear Invalidation"),
         ]:
             c = components.get(key, {})
@@ -459,8 +458,9 @@ async def generate_report(
     state = _load_thesis()
     prev_thesis = _thesis_context(state)
     # Fund-state block is injected at the TOP so the LLM sees it before any
-    # stale prose below. Ground truth: HF thresholds, Trade del Ciclo Blofin
-    # constants, basket status, flywheel pair trade design note.
+    # stale prose below. Ground truth: HF thresholds, basket status, flywheel
+    # pair trade design note. (R-NOPRELIQ + REMOVE BLOFIN 2026-05-15: Trade del
+    # Ciclo Blofin ELIMINADO de los inyectables.)
     # R-BOT-TERMINOLOGY-UNIFY (2026-05-07): pass market so the LMEC
     # bear-invalidation block uses live BTC for condition #1 / #4.
     full_system = (await _full_state_block(market)) + SYSTEM_PROMPT + prev_thesis

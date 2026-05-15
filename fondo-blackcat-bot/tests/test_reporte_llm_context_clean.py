@@ -52,7 +52,12 @@ def test_build_fund_state_block_no_legacy_basket_strings() -> None:
 
 
 def test_build_fund_state_block_keeps_legitimate_constants() -> None:
-    """HF thresholds, Trade del Ciclo, Flywheel, DCA plan SHOULD remain."""
+    """HF thresholds, Flywheel, DCA plan SHOULD remain.
+
+    R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): Trade del Ciclo (Blofin)
+    ELIMINADO. Las assertions sobre TRADE DEL CICLO / BLOFIN fueron
+    removidas; el bloque ya no debe inyectar esos strings.
+    """
     from templates.system_prompt import build_fund_state_block
 
     block = build_fund_state_block()
@@ -60,10 +65,13 @@ def test_build_fund_state_block_keeps_legitimate_constants() -> None:
     # These are non-stale, ground-truth constants — keep them.
     assert "HF THRESHOLDS" in block
     assert "1.10" in block  # HF_CRITICAL
-    assert "TRADE DEL CICLO" in block
-    assert "BLOFIN" in block.upper()
     assert "FLYWHEEL HYPERLEND" in block
     assert "PLAN DCA TRAMIFICADO" in block
+
+    # R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): regression guards — Blofin
+    # MUST NOT reappear in the LLM context.
+    assert "BLOFIN" not in block.upper()
+    assert "TRADE DEL CICLO" not in block.upper()
 
 
 def test_build_fund_state_block_points_to_onchain_block() -> None:

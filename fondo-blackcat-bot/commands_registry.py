@@ -41,8 +41,7 @@ COMMANDS: List[BotCommand] = [
     BotCommand("hf", "HyperLend Health Factor", "trading", "cmd_hf"),
     BotCommand("kill", "Kill scenarios per position", "trading", "cmd_kill"),
     BotCommand("kill_status", "Status of the 5 kill triggers (R17)", "trading", "cmd_kill_status"),
-    BotCommand("ciclo", "Cycle Trade status (Blofin manual)", "trading", "cmd_ciclo"),
-    BotCommand("ciclo_update", "Open/close Cycle Trade", "trading", "cmd_ciclo_update"),
+    # R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): /ciclo y /ciclo_update ELIMINADOS.
     BotCommand("dca", "Tiered DCA plan BTC/ETH/HYPE + current zone", "trading", "cmd_dca"),
     BotCommand("pnl", "Realized PnL 7D / 30D / YTD", "trading", "cmd_pnl"),
     BotCommand("pnlx", "Extended PnL by period + best/worst (R18)", "trading", "cmd_pnlx"),

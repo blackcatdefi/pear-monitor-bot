@@ -76,7 +76,7 @@ HF_WARN = 1.15         # Fund operative monitoring threshold
 HYPE_WARN = 34.0       # HYPE price (USD) warn
 HYPE_CRITICAL = 30.0
 BTC_WARN = 62_000.0
-LIQ_PROXIMITY_PCT = 0.10  # Alertar si posicion a <10% de liquidacion
+# LIQ_PROXIMITY_PCT removido R-NOPRELIQ 2026-05-15 — basket usa SL/TP nativos HL.
 
 POLL_INTERVAL_MIN = int(os.getenv("POLL_INTERVAL_MIN", "5"))
 ENABLE_ALERTS = os.getenv("ENABLE_ALERTS", "true").lower() == "true"

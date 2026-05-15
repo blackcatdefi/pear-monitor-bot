@@ -17,30 +17,9 @@ HF_LIQUIDATION = 1.00  # Real HyperLend liquidation threshold
 HF_CRITICAL = 1.10     # Fund operative action threshold (trigger action)
 HF_WARN = 1.15         # Fund operative monitoring threshold (trigger monitoreo)
 
-# ─── Trade del Ciclo (Blofin, managed outside bot) ─────────────────────────
-# BCD edita este bloque a mano cuando el trade abre/cierra. Todas las constantes
-# abajo se leen por templates/system_prompt.py + templates/formatters.py.
-TRADE_DEL_CICLO_STATUS = "CLOSED"   # "OPEN" | "CLOSED" — BCD edita
-TRADE_DEL_CICLO_PLATFORM = "blofin"
-TRADE_DEL_CICLO_LEVERAGE = 10        # 10x leverage
-TRADE_DEL_CICLO_LAST_ENTRY = 75298.70  # USD — último entry cuando estaba OPEN
-TRADE_DEL_CICLO_LAST_UPDATE = "2026-04-22T15:00:00Z"
-TRADE_DEL_CICLO_BLOFIN_BALANCE_USD = 2800.0  # USDT disponibles post-close (22 abr)
-
-# Realized PnL + close timestamp (only meaningful when STATUS == "CLOSED")
-TRADE_DEL_CICLO_PNL_REALIZED = 577.39     # USD consolidado 3 días
-TRADE_DEL_CICLO_LAST_CLOSE = "2026-04-22T15:00:00Z"
-BLOFIN_BALANCE_AVAILABLE = 2800.0         # USDT disponibles para próxima entrada
-
-TRADE_DEL_CICLO_NOTE = (
-    "Trade del Ciclo vive en Blofin (sin API pública). El bot NO lee esta "
-    "posición en tiempo real. Estado actual (manual): CERRADO el "
-    "2026-04-22 ~15:00 UTC con +$577.39 realizado. Copy-trading descopiado. "
-    "Balance Blofin disponible ~$2,800 USDT esperando nueva entrada. "
-    "NO reportar UPnL estimado cuando STATUS == 'CLOSED'. "
-    "Al reabrir: BCD debe setear TRADE_DEL_CICLO_STATUS='OPEN', actualizar "
-    "LAST_ENTRY, LAST_UPDATE, y vaciar LAST_CLOSE."
-)
+# ─── Trade del Ciclo / Blofin: ELIMINADO (R-NOPRELIQ + REMOVE BLOFIN 2026-05-15)
+# Blofin no expone API pública y BCD lo retiró del fondo. Cualquier referencia
+# residual en estados, alertas o reportes debe quedar fuera del bot.
 
 # ─── Basket SHORT status (Super Basket Stage 6) ────────────────────────────
 # R-BOT-TERMINOLOGY-UNIFY (2026-05-07): historical category name was
@@ -82,7 +61,7 @@ BASKET_V5_STATUS = "PENDING_CAPITAL"   # IDLE | PENDING_CAPITAL | DEPLOYING | AC
 BASKET_V5_PLAN: dict[str, object] = {
     "capital_target_usdt": 3050,
     "deploy_eta": "2026-04-24 to 2026-04-28",
-    "source": "blofin_withdrawal_post_bonus",
+    "source": "wallet_redeploy_post_bonus",
     "leverage_max": "3x",
     "notional_target_usdt": 9150,
     "logic": (
@@ -94,7 +73,6 @@ BASKET_V5_PLAN: dict[str, object] = {
         "HYPE toca $28K o $24.5K (BCD BUY LIMIT)",
         "Ceasefire permanente + Hormuz reabierto físicamente",
     ],
-    "bonus_blofin_unlock": "2026-04-24",  # $250 USDT libera
 }
 
 # ─── Flywheel HyperLend — by-design pair trade ─────────────────────────────

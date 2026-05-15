@@ -121,11 +121,7 @@ from modules.cryexc_intel import (
     mark_event_seen,
 )
 from fund_state import BCD_DCA_PLAN
-from modules.cycle_trade import (
-    apply_cycle_update,
-    parse_cycle_update_args,
-    render_cycle_status,
-)
+# R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): cycle_trade module ELIMINADO.
 from modules.intel_memory import format_intel_summary, cleanup_old as intel_cleanup, get_unprocessed_count
 from modules.intel_processor import process_pending_intel
 from modules import pnl_tracker, position_log
@@ -796,38 +792,8 @@ async def cmd_kill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
-@authorized
-@with_error_logging
-async def cmd_ciclo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = render_cycle_status()
-    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
-
-
-@authorized
-@with_error_logging
-async def cmd_ciclo_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    args = context.args or []
-    try:
-        status, entry = parse_cycle_update_args(args)
-    except ValueError as exc:
-        await update.message.reply_text(f"\u274c {exc}", reply_markup=MAIN_KEYBOARD)
-        return
-
-    await update.message.reply_text(
-        f"\u23f3 Applying /ciclo_update STATUS={status}"
-        + (f" entry=${entry:,.2f}" if entry is not None else "")
-        + "...",
-        reply_markup=MAIN_KEYBOARD,
-    )
-    result = apply_cycle_update(status, entry)
-    icon = "\u2705" if result.get("ok") else "\u274c"
-    pushed = "pushed" if result.get("pushed") else "NOT pushed"
-    text = (
-        f"{icon} /ciclo_update STATUS={status}\n"
-        f"   wrote={result.get('wrote')} · {pushed}\n\n"
-        f"{result.get('message', '')}"
-    )
-    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+# R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): cmd_ciclo y cmd_ciclo_update ELIMINADOS.
+# Trade del Ciclo (Blofin) ya no es un vehículo del fondo.
 
 
 @authorized
@@ -892,10 +858,7 @@ async def cmd_dca(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 @with_error_logging
 async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = context.args or []
-    if args and args[0].lower() == "ciclo":
-        text = pnl_tracker.build_cycle_summary()
-        await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
-        return
+    # R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): subcomando `/pnl ciclo` ELIMINADO.
 
     if args and args[0].lower() == "add":
         try:
@@ -2663,8 +2626,7 @@ HANDLER_MAP = {
     "debug_flywheel": cmd_debug_flywheel,
     "liqcalc": cmd_liqcalc,
     "kill": cmd_kill,
-    "ciclo": cmd_ciclo,
-    "ciclo_update": cmd_ciclo_update,
+    # R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): "ciclo" / "ciclo_update" ELIMINADOS.
     "dca": cmd_dca,
     "pnl": cmd_pnl,
     "log": cmd_log,

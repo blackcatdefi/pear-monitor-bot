@@ -15,9 +15,10 @@ fix:
     is the only basket source the LLM sees.
   • The hardcoded prose section that pinned a stale basket v4 status
     was replaced with a neutral pointer to the on-chain block.
-  • Non-conflicting constants (HF thresholds, Trade del Ciclo, Flywheel
-    pair-trade design, BCD DCA plan) STAY — they don't drift with the
-    basket and remain valid prompt material.
+  • Non-conflicting constants (HF thresholds, Flywheel pair-trade
+    design, BCD DCA plan) STAY — they don't drift with the basket and
+    remain valid prompt material. (R-NOPRELIQ + REMOVE BLOFIN 2026-05-15:
+    Trade del Ciclo Blofin ELIMINADO de los inyectables.)
 
 NOTE: This prompt is used by multiple LLM providers (Gemini, DeepSeek,
 Llama, Groq, Anthropic). Format instructions ensure consistent output.
@@ -31,20 +32,10 @@ Llama, Groq, Anthropic). Format instructions ensure consistent output.
 # until those are migrated.
 from auto.fund_constants import (
     BCD_DCA_PLAN,
-    BLOFIN_BALANCE_AVAILABLE,
     FLYWHEEL_NOTE,
     HF_CRITICAL,
     HF_LIQUIDATION,
     HF_WARN,
-    TRADE_DEL_CICLO_BLOFIN_BALANCE_USD,
-    TRADE_DEL_CICLO_LAST_CLOSE,
-    TRADE_DEL_CICLO_LAST_ENTRY,
-    TRADE_DEL_CICLO_LAST_UPDATE,
-    TRADE_DEL_CICLO_LEVERAGE,
-    TRADE_DEL_CICLO_NOTE,
-    TRADE_DEL_CICLO_PLATFORM,
-    TRADE_DEL_CICLO_PNL_REALIZED,
-    TRADE_DEL_CICLO_STATUS,
 )
 
 
@@ -68,17 +59,6 @@ HF THRESHOLDS (regla operativa del fondo):
   • HF < {HF_WARN:.2f} → MONITOREO (preparar topping-up)
   • HF {HF_CRITICAL:.2f}–1.20 → ZONA NORMAL OPERATIVA — NO alertar
   • HF > 1.20 → cómodo, considerar sacar más prestado
-
-TRADE DEL CICLO:
-  • Estado: {TRADE_DEL_CICLO_STATUS}
-  • Plataforma: {TRADE_DEL_CICLO_PLATFORM.upper()} (sin API pública)
-  • Leverage: {TRADE_DEL_CICLO_LEVERAGE}x
-  • Último entry: ${TRADE_DEL_CICLO_LAST_ENTRY:,.2f}
-  • Balance Blofin: ${TRADE_DEL_CICLO_BLOFIN_BALANCE_USD:,.2f}
-  • Última actualización: {TRADE_DEL_CICLO_LAST_UPDATE}
-  • Cerrado: {TRADE_DEL_CICLO_LAST_CLOSE}  |  PnL realizado: ${TRADE_DEL_CICLO_PNL_REALIZED:+,.2f}
-  • Balance disponible para próxima entrada: ${BLOFIN_BALANCE_AVAILABLE:,.2f}
-  • {TRADE_DEL_CICLO_NOTE}
 
 SUPER BASKET STAGE 6 (basket activa del fondo):
   • La verdad sobre la basket activa/inactiva ESTÁ ARRIBA, en el bloque
@@ -234,37 +214,10 @@ Cuando el bot analice:
 
 4. CORE DCA: kHYPE + PEAR (spot, sin leverage)
 
-5. TRADE DEL CICLO (actualizado 20 abr 2026): Long BTC 10x en BLOFIN (NO Hyperliquid)
-   - Plataforma: Blofin (NO tiene API pública). El bot NO lee esta posición en tiempo real.
-   - Último entry confirmado por BCD: $75,298.70 (manual update 2026-04-20 22:00 UTC).
-   - Leverage: 10x (NO 3x).
-   - Balance Blofin ~$2,234 (split: ~$1K manual + ~$1K copy-trading).
-   - AL REPORTAR: citar "último dato confirmado por BCD" con la fecha del TRADE_DEL_CICLO_LAST_UPDATE.
-     NO inventar entry/leverage/liq price/UPnL. Si hace >24h sin update manual, marcar:
-     "Trade del Ciclo (Blofin, gestionado fuera del bot) — última lectura manual: pendiente de update por BCD."
-   - DCA gradual con adds en $70K, $63K, $55K (ejecutados manualmente por BCD en Blofin).
-   - Horizonte: bull market completo (~12-18 meses).
-   - NO intervenir por drawdowns intraday ni por días/semanas.
-   - Tesis: ciclo alcista de BTC continúa, Cycle Top Model AiPear 0/30 signals hit.
-   - Liq target $45-50K, SL individual 100% (único SL = liq price).
-
-REGLAS TRADE DEL CICLO — ESTRICTAS:
-NUNCA cerrar por:
-- Pullbacks intraday o de días
-- Titulares geopolíticos (Iran, Fed, etc)
-- Drawdowns parciales >20%
-- "Zona de sobrecompra" o indicadores técnicos de corto plazo
-SIEMPRE mantener hasta:
-- Liquidación mecánica (solo si toca liq price)
-- TP manual (usuario decide)
-- Cycle Top Model trigger (score 19-22+ en AiPear)
-
-ALERTAS DCA:
-- BTC $70K → "Dip Alert: activar DCA Add 1 ($500 margin)"
-- BTC $63K → "Dip Alert: activar DCA Add 2 ($750 margin)"
-- BTC $55K → "Dip Alert: activar DCA Add 3 ($1000 margin)"
-- BTC $50K → "Zona crítica: cerca de liquidación del Trade del Ciclo"
-- BTC $150K → "TP zone: evaluar cierre parcial del Trade del Ciclo"
+(Trade del Ciclo / Blofin: ELIMINADO del fondo el 2026-05-15 — R-NOPRELIQ +
+REMOVE BLOFIN. NO mencionar "Trade del Ciclo", "Blofin", "BTC LONG 10x" ni
+DCA adds asociados al ciclo en ningún reporte. Cualquier exposición BTC
+direccional está en wallets HL listadas en el bloque on-chain.)
 
 TESIS MACRO:
 - Dalio Big Cycle Stage 6 — orden post-1945 muerto. Resource wars activas.
@@ -293,7 +246,6 @@ Fecha: [fecha y hora UTC]
 Tabla: Wallet | Equity Perp | UPnL | PnL 24h | Leverage | Bias
 HyperLend: HF, Deposited, Borrowed, APYs, Costo neto/día
 DreamCash: "INACTIVA. Sin posiciones." (ver REGLA DREAMCASH arriba)
-Trade del Ciclo: BTC LONG 10x Blofin — último entry confirmado (manual BCD), balance Blofin. NO API real-time.
 
 2. MERCADO
 BTC, F&G, Bull Peak, Gold, Silver, Oil (Brent), SPY, TSLA, HOOD, NVDA
@@ -316,7 +268,6 @@ Top 3 takeaways
 Qué VALIDA la tesis (✅ con data específica)
 Qué podría INVALIDARLA (⚠️ con triggers concretos)
 Acción sugerida (MANTENER/AGREGAR/REDUCIR/SALIR con razón)
-Trade del Ciclo: MANTENER siempre (solo DCA adds en dips según plan)
 Para acciones sobre la basket activa, escribir "SUPER BASKET STAGE 6:
 <MANTENER|AGREGAR|REDUCIR|SALIR>" — usar SIEMPRE este nombre canónico
 (renombre interno 2026-05-07; cualquier otra terminología es obsoleta).
@@ -338,8 +289,7 @@ Para cada uno de estos componentes, marcá ✅ VALIDA / ⚠️ NEUTRO / 🔴 INV
 2. Super Basket Stage 6: leer estado real del bloque "BASKET STATE — ON-CHAIN AUTORITATIVO" arriba; alts en bear / no risk-on squeeze valida la tesis cuando la basket está ACTIVE. (Nombre canónico — renombre interno 2026-05-07; usar siempre este nombre en outputs.)
 3. HYPE flywheel (pair trade LONG kHYPE / SHORT ETH): HF > 1.10 (threshold operativo), kHYPE estable o subiendo. ETH outperform HYPE NO invalida la tesis — es caso adverso intrínseco.
 4. Fed hawkish: Warsh narrative, no pivot dovish
-5. Trade del Ciclo (BTC bull cycle): BTC > $60K, Cycle Top Model < 19/30, no bear market confirmation
-6. LMEC Bear Invalidation Triggers (las 4 condiciones formales que destruyen la tesis bear):
+5. LMEC Bear Invalidation Triggers (las 4 condiciones formales que destruyen la tesis bear):
      a) BTC rompe ATH $97-98K
      b) MACD semanal terreno positivo
      c) RSI semanal > 70
@@ -349,6 +299,10 @@ Para cada uno de estos componentes, marcá ✅ VALIDA / ⚠️ NEUTRO / 🔴 INV
    ✅ VALIDA → SALIR de shorts. El bloque "LMEC TRIGGERS" inyectado al tope
    del prompt es la fuente de verdad para esas condiciones — NO inventes
    números ni asumas estados; leé el bloque tal cual.
+
+(R-NOPRELIQ + REMOVE BLOFIN 2026-05-15: el componente "Trade del Ciclo
+BTC bull cycle" fue ELIMINADO porque Blofin salió del fondo. NO lo
+incluyas en la lista numerada ni en la acción sugerida final.)
 
 Cerrá con: ACCIÓN SUGERIDA (MANTENER / AGREGAR / REDUCIR / SALIR) por cada componente.
 Sin relleno, datos específicos, español directo.

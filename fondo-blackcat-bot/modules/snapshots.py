@@ -1,9 +1,15 @@
 """Snapshot tracker — SQLite persistence for portfolio deltas.
 
 Every time /reporte or /posiciones runs, we:
-  1. Build a snapshot dict of equity-per-wallet + HyperLend + Bounce Tech + Trade del Ciclo.
+  1. Build a snapshot dict of equity-per-wallet + HyperLend + Bounce Tech.
   2. Save it to SQLite (DATA_DIR/snapshots.db).
   3. Expose a helper to compute deltas vs the PREVIOUS snapshot (OFFSET 1).
+
+R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): el componente "Trade del Ciclo"
+(Blofin) fue ELIMINADO del fondo. Se mantiene compatibilidad de firma en
+``build_snapshot`` y ``take_and_format`` para no romper call sites legacy
+pero el dato se ignora. Snapshots históricos con cycle_trade en el JSON
+no se renderizan más en el delta block.
 
 The delta formatter is rendered verbatim at the bottom of /posiciones and inside
 /reporte's "POSICIONES" section.
@@ -53,7 +59,7 @@ def build_snapshot(
     wallets: list[dict[str, Any]] | None,
     hyperlend: list[dict[str, Any]] | dict[str, Any] | None,
     bounce_tech: list[dict[str, Any]] | None = None,
-    cycle_trade: dict[str, Any] | None = None,
+    cycle_trade: dict[str, Any] | None = None,  # R-NOPRELIQ 2026-05-15: ignorado
 ) -> dict[str, Any]:
     """Normalize fetched data into a compact snapshot dict.
 
@@ -62,9 +68,12 @@ def build_snapshot(
       perps: { "<wallet_short>": {"label": str, "address": str, "equity": float, "upnl": float} }
       hyperlend: { "<wallet_short>": {"label": str, "address": str, "coll_usd": float, "debt_usd": float, "net_usd": float} }
       bounce_tech_total_usd: float
-      cycle_trade: { "active": bool, "margin_usd": float, "upnl_usd": float }
-      total_fund_usd: float  (perps + hyperlend_net + bt + cycle_margin+upnl)
+      total_fund_usd: float  (perps + hyperlend_net + bt)
+
+    ``cycle_trade`` parameter conserved for back-compat. R-NOPRELIQ 2026-05-15:
+    Blofin / Trade del Ciclo eliminados — el argumento se ignora.
     """
+    del cycle_trade  # noqa: F841 — argumento legacy retenido para compat de firma
     ts = datetime.now(timezone.utc).isoformat()
 
     perps: dict[str, Any] = {}
@@ -122,27 +131,13 @@ def build_snapshot(
             except (TypeError, ValueError):
                 pass
 
-    cycle_margin = 0.0
-    cycle_upnl = 0.0
-    cycle_active = False
-    if cycle_trade:
-        cycle_active = bool(cycle_trade.get("active"))
-        if cycle_active:
-            cycle_margin = float(cycle_trade.get("margin_usd") or 0.0)
-            cycle_upnl = float(cycle_trade.get("upnl_usd") or 0.0)
-
-    total_fund = total_perp_equity + total_hl_net + bt_total + cycle_margin + cycle_upnl
+    total_fund = total_perp_equity + total_hl_net + bt_total
 
     return {
         "ts": ts,
         "perps": perps,
         "hyperlend": hl_data,
         "bounce_tech_total_usd": bt_total,
-        "cycle_trade": {
-            "active": cycle_active,
-            "margin_usd": cycle_margin,
-            "upnl_usd": cycle_upnl,
-        },
         "total_fund_usd": total_fund,
     }
 
@@ -308,14 +303,8 @@ def format_delta_block(current: dict[str, Any], previous: dict[str, Any] | None)
         note = "position closed" if prev_bt > 0 and curr_bt == 0 else None
         lines.append(_fmt_row("Total BT", prev_bt, curr_bt, note=note))
 
-    # Trade del Ciclo
-    prev_cy = previous.get("cycle_trade", {}) or {}
-    curr_cy = current.get("cycle_trade", {}) or {}
-    if prev_cy.get("active") or curr_cy.get("active"):
-        lines.append("")
-        lines.append("TRADE DEL CICLO (Blofin):")
-        lines.append(_fmt_row("margin", float(prev_cy.get("margin_usd") or 0), float(curr_cy.get("margin_usd") or 0)))
-        lines.append(_fmt_row("UPnL", float(prev_cy.get("upnl_usd") or 0), float(curr_cy.get("upnl_usd") or 0)))
+    # (R-NOPRELIQ + REMOVE BLOFIN 2026-05-15) Trade del Ciclo (Blofin) removido
+    # del fondo. Snapshots históricos con cycle_trade en JSON ya no se renderizan.
 
     # Total
     prev_total = float(previous.get("total_fund_usd") or 0)
@@ -327,7 +316,7 @@ def format_delta_block(current: dict[str, Any], previous: dict[str, Any] | None)
 
     lines.append("")
     lines.append("─" * 35)
-    lines.append(f"TOTAL FONDO (perps + HL net + BT + Ciclo):")
+    lines.append(f"TOTAL FONDO (perps + HL net + BT):")
     lines.append(f"  Anterior: ${prev_total:,.0f}")
     lines.append(f"  Actual:   ${curr_total:,.0f}")
     lines.append(f"  Cambio:   {emoji} {sign}${diff_total:,.0f} ({sign}{pct_total:.2f}%)")
@@ -340,9 +329,12 @@ def take_and_format(
     wallets: list[dict[str, Any]] | None,
     hyperlend: list[dict[str, Any]] | dict[str, Any] | None,
     bounce_tech: list[dict[str, Any]] | None = None,
-    cycle_trade: dict[str, Any] | None = None,
+    cycle_trade: dict[str, Any] | None = None,  # R-NOPRELIQ 2026-05-15: ignorado
 ) -> str:
-    """Build+persist current snapshot, then return formatted delta block vs previous."""
+    """Build+persist current snapshot, then return formatted delta block vs previous.
+
+    ``cycle_trade`` argument retained for back-compat — Blofin removido del fondo.
+    """
     current = build_snapshot(wallets, hyperlend, bounce_tech, cycle_trade)
     previous = latest_snapshot()  # get previous BEFORE saving new
     save_snapshot(current)

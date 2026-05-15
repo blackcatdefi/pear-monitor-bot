@@ -114,12 +114,7 @@ async def _active_position_keys() -> set[str]:
     except Exception:
         log.exception("catalyst_scoring: hyperlend lookup failed")
 
-    try:
-        from fund_state import TRADE_DEL_CICLO_STATUS
-        if (TRADE_DEL_CICLO_STATUS or "").upper() == "OPEN":
-            keys.add("trade_ciclo")
-    except Exception:
-        pass
+    # R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): Trade del Ciclo (Blofin) ELIMINADO.
 
     return keys
 

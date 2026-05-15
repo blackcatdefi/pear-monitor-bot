@@ -7,8 +7,9 @@ cuando se abría/cerraba un basket. Esto causaba que el LLM dijera
 Comportamiento:
     - reconcile_fund_state() compara las wallets de basket vs declared status
     - render_discrepancies(...) formatea bonito para Telegram
-    - apply_basket_v5_status() reescribe el archivo + git commit/push (igual
-      que cycle_trade._git_commit_and_push)
+    - apply_basket_v5_status() reescribe el archivo + git commit/push.
+      (R-NOPRELIQ + REMOVE BLOFIN 2026-05-15: cycle_trade ELIMINADO; este
+      reconciler ahora opera solo sobre BASKET_V5_STATUS.)
 
 Reglas:
     1. Si BASKET_STATUS["active"]=False y existen posiciones SHORT con notional
@@ -249,7 +250,8 @@ def render_discrepancies(discrepancies: list[Discrepancy]) -> str:
 
 # ─── Apply (mutate fund_state.py + git push) ────────────────────────────────
 
-# Reuses the same regex patterns as cycle_trade
+# Regex patterns for in-place edits of fund_state.py
+# (R-NOPRELIQ + REMOVE BLOFIN 2026-05-15: cycle_trade ELIMINADO.)
 _BASKET_V5_RE = re.compile(
     r'(BASKET_V5_STATUS\s*=\s*")([^"]+)(")'
 )

@@ -115,10 +115,10 @@ async def _fund_snapshot_block() -> str:
         log.exception("pre_event_brief: HF snapshot failed")
 
     try:
-        from fund_state import BASKET_V5_STATUS, TRADE_DEL_CICLO_STATUS
+        # R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): Trade Ciclo (Blofin) ELIMINADO.
+        from fund_state import BASKET_V5_STATUS
         v5 = (BASKET_V5_STATUS or "IDLE").upper()
-        cyc = (TRADE_DEL_CICLO_STATUS or "CLOSED").upper()
-        lines.append(f"  Basket V5: {v5} · Trade Ciclo: {cyc}")
+        lines.append(f"  Basket V5: {v5}")
     except Exception:
         pass
 

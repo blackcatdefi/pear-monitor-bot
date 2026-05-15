@@ -191,112 +191,15 @@ def build_matrix_text(
     return "\n".join(lines)
 
 
-def _compute_cycle_section(wallets: list[dict[str, Any]]) -> str:
-    """BTC LONG scenarios for Trade del Ciclo positions."""
-    cycle_positions = []
-    for w in wallets:
-        if w.get("status") != "ok":
-            continue
-        d = w["data"]
-        for p in d.get("positions") or []:
-            if p.get("coin") == "BTC" and p.get("side") == "LONG":
-                p["_wallet_label"] = d.get("label", "?")
-                p["_wallet_short"] = (
-                    d.get("wallet", "")[0:6] + "…" + d.get("wallet", "")[-4:]
-                )
-                cycle_positions.append(p)
-
-    if not cycle_positions:
-        return ""
-
-    lines = [
-        "─" * 40,
-        "",
-        "🧮 LIQ CALCULATOR — Trade del Ciclo (BTC LONG)",
-    ]
-
-    for cp in cycle_positions:
-        entry = cp.get("entry_px", 0)
-        mark = cp.get("mark_px") or cp.get("position_value", 0)
-        size = cp.get("size", 0)
-        margin = cp.get("margin_used", 0)
-        leverage = cp.get("leverage", "?")
-        liq = cp.get("liq_px", 0)
-        label = cp.get("_wallet_label", "?")
-        wshort = cp.get("_wallet_short", "")
-
-        if entry <= 0 or size <= 0:
-            continue
-
-        # Estimate liq if not provided
-        if not liq and margin > 0 and size > 0:
-            # liq ≈ entry - margin/size (simplified)
-            liq = max(0, entry - margin / size)
-
-        lines.extend(
-            [
-                "",
-                f"[{label}] {wshort}",
-                f"  Position: {size:.4f} BTC LONG",
-                f"  Entry: ${entry:,.0f} | Mark: ${mark:,.0f}",
-                f"  Margin: {_fmt_dollars(margin)} | Leverage: {leverage}x",
-                f"  Liq estimada: ${liq:,.0f}" if liq else "  Liq estimada: —",
-                "",
-                "  Escenarios BTC:",
-            ]
-        )
-
-        # Scenarios
-        for pct in [-5, -10, -20, -30]:
-            scenario_px = (
-                mark * (1 + pct / 100) if mark else entry * (1 + pct / 100)
-            )
-            upnl = size * (scenario_px - entry)
-            margin_impact = (upnl / margin * 100) if margin > 0 else 0
-            icon = " ⚠️" if margin_impact < -80 else ""
-            lines.append(
-                f"    BTC {pct:+d}% (${scenario_px:,.0f}) → "
-                f"UPnL: ${upnl:+,.0f} ({margin_impact:+.0f}% margin){icon}"
-            )
-
-        # Liquidation line
-        if liq and mark:
-            liq_pct = ((mark - liq) / mark) * 100
-            lines.append(
-                f"    BTC -{liq_pct:.0f}% (${liq:,.0f}) → LIQUIDATION 💀"
-            )
-
-        # DCA plan
-        btc_current = mark or entry
-        dca_levels = [
-            (70_000, "DCA Add 1", "$500"),
-            (63_000, "DCA Add 2", "$750"),
-            (55_000, "DCA Add 3", "$1,000"),
-        ]
-
-        lines.extend(["", "  DCA plan (pre-definido):"])
-        for level_px, level_name, add_margin in dca_levels:
-            status = "✅ TRIGGERED" if btc_current <= level_px else "⏳ pending"
-            lines.append(
-                f"    BTC ${level_px:,} → add {add_margin} margin ({level_name}) [{status}]"
-            )
-
-        lines.extend(
-            [
-                "",
-                "  Liq post-DCA completo: ~$43,500",
-                "  TP zones: $130K (parcial 30%) | $150K (principal 50-100%)",
-            ]
-        )
-
-    return "\n".join(lines)
+# R-NOPRELIQ + REMOVE BLOFIN (2026-05-15) — _compute_cycle_section ELIMINADO.
+# Trade del Ciclo (Blofin) ya no forma parte del fondo.
 
 
 async def compute_liq_matrix() -> str:
-    """Full /liqcalc output: HYPE×DEUDA matrix + Trade del Ciclo BTC scenarios."""
+    """Full /liqcalc output: HYPE×DEUDA matrix (flywheel HyperLend)."""
     import asyncio
 
-    hl_list, wallets = await asyncio.gather(
+    hl_list, _wallets = await asyncio.gather(
         fetch_all_hyperlend(),
         fetch_all_wallets(),
     )
@@ -354,12 +257,6 @@ async def compute_liq_matrix() -> str:
 
     if not any_debt:
         blocks.append("— No active debt in any wallet.")
-
-    # Append Trade del Ciclo section
-    cycle_section = _compute_cycle_section(wallets)
-    if cycle_section:
-        blocks.append("")
-        blocks.append(cycle_section)
 
     return "\n".join(blocks)
 

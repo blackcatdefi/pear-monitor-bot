@@ -12,9 +12,12 @@ Manual event categories (legacy, merged into output):
 Commands:
     /pnl       → 7D / 30D / YTD / all-time summaries (auto-detected)
     /pnl add ... → record a manual event (legacy)
-    /pnl ciclo → Trade del Ciclo detailed report
 
 Storage: sqlite3 at DATA_DIR/pnl.db, single table `pnl_events`.
+
+R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): el subcomando ``/pnl ciclo`` y
+los helpers ``_query_cycle_events`` / ``build_cycle_summary`` fueron
+eliminados — Trade del Ciclo (Blofin) ya no es un vehículo del fondo.
 """
 
 from __future__ import annotations
@@ -98,37 +101,7 @@ def _sum_by_category(since: datetime | None) -> dict[str, float]:
         c.close()
 
 
-def _query_cycle_events(since: datetime | None = None) -> list[dict[str, Any]]:
-    """Query PnL events related to Trade del Ciclo."""
-    c = _conn()
-    try:
-        if since:
-            rows = c.execute(
-                "SELECT id,ts,category,asset,amount_usd,wallet_label,notes "
-                "FROM pnl_events WHERE (notes LIKE '%trade_del_ciclo%' OR notes LIKE '%Trade del Ciclo%') "
-                "AND ts >= ? ORDER BY ts DESC",
-                (since.isoformat(),),
-            ).fetchall()
-        else:
-            rows = c.execute(
-                "SELECT id,ts,category,asset,amount_usd,wallet_label,notes "
-                "FROM pnl_events WHERE notes LIKE '%trade_del_ciclo%' OR notes LIKE '%Trade del Ciclo%' "
-                "ORDER BY ts DESC",
-            ).fetchall()
-        return [
-            {
-                "id": r[0],
-                "ts": r[1],
-                "category": r[2],
-                "asset": r[3],
-                "amount_usd": r[4],
-                "wallet_label": r[5],
-                "notes": r[6],
-            }
-            for r in rows
-        ]
-    finally:
-        c.close()
+# R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): _query_cycle_events ELIMINADO.
 
 
 def _fmt_usd(v: float) -> str:
@@ -141,39 +114,7 @@ def _fmt_usd(v: float) -> str:
     return f"{sign}${av:.2f}"
 
 
-def build_cycle_summary() -> str:
-    """Build detailed Trade del Ciclo PnL report for /pnl ciclo."""
-    events = _query_cycle_events()
-    if not events:
-        return (
-            "📊 TRADE DEL CICLO — PNL\n"
-            + "─" * 40 + "\n"
-            "No events recorded yet.\n"
-            "Partial/full closes are recorded automatically.\n"
-            "Manual: /pnl add closed BTC <amount> trade_del_ciclo <notes>"
-        )
-
-    total_realized = sum(
-        e["amount_usd"] for e in events if e["category"] == EVENT_CLOSED
-    )
-
-    lines = [
-        "📊 TRADE DEL CICLO — PNL",
-        "─" * 40,
-        f"  Realized PnL total: {_fmt_usd(total_realized)} ({len(events)} events)",
-        "",
-        "  History:",
-    ]
-    for e in events[:20]:
-        ts_short = e["ts"][:16] if e.get("ts") else "?"
-        notes_short = (e.get("notes") or "")[:60]
-        lines.append(
-            f"    [{ts_short}] {e['category']} {e.get('asset', '')} {_fmt_usd(e['amount_usd'])}"
-        )
-        if notes_short:
-            lines.append(f"      {notes_short}")
-
-    return "\n".join(lines)
+# R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): build_cycle_summary ELIMINADO.
 
 
 def build_summary() -> str:
@@ -223,16 +164,7 @@ def build_summary() -> str:
             "(or the transfer / withdraw variants)."
         )
 
-    # Trade del Ciclo section
-    cycle_events = _query_cycle_events()
-    if cycle_events:
-        cycle_realized = sum(
-            e["amount_usd"] for e in cycle_events if e["category"] == EVENT_CLOSED
-        )
-        lines.append("")
-        lines.append("📊 TRADE DEL CICLO")
-        lines.append(f"  Realized PnL: {_fmt_usd(cycle_realized)} ({len(cycle_events)} eventos)")
-        lines.append("  Detalle completo: /pnl ciclo")
+    # (R-NOPRELIQ + REMOVE BLOFIN 2026-05-15) Trade del Ciclo eliminado.
 
     return "\n".join(lines)
 
@@ -258,7 +190,7 @@ def parse_manual_add(args: list[str]) -> dict[str, Any]:
     if len(args) > 3:
         # Check if args[3] looks like wallet_label or notes
         # If it contains known keywords, treat as notes; otherwise wallet_label
-        if args[3].lower() in ("trade_del_ciclo", "ciclo", "btc", "hype"):
+        if args[3].lower() in ("btc", "hype"):
             notes = " ".join(args[3:])
         else:
             wallet_label = args[3]

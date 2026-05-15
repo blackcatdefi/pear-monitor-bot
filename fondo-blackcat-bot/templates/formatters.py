@@ -11,15 +11,6 @@ from auto.wallet_labels import apply_wallet_label
 from fund_state import (
     ALT_SHORT_BLEED_WALLETS,
     BASKET_STATUS,
-    BLOFIN_BALANCE_AVAILABLE,
-    TRADE_DEL_CICLO_BLOFIN_BALANCE_USD,
-    TRADE_DEL_CICLO_LAST_CLOSE,
-    TRADE_DEL_CICLO_LAST_ENTRY,
-    TRADE_DEL_CICLO_LAST_UPDATE,
-    TRADE_DEL_CICLO_LEVERAGE,
-    TRADE_DEL_CICLO_PLATFORM,
-    TRADE_DEL_CICLO_PNL_REALIZED,
-    TRADE_DEL_CICLO_STATUS,
     classify_fill,
 )
 
@@ -195,67 +186,8 @@ def _current_usd_value(coin: str, amount: float, entry_ntl: float,
     return float(entry_ntl or 0)
 
 
-def _fmt_cycle_upnl_block(lines_out: list[str], market: dict[str, Any] | None) -> None:
-    """Append Trade del Ciclo block — handles OPEN (UPnL estimate) and CLOSED (realized)."""
-    status = (TRADE_DEL_CICLO_STATUS or "OPEN").upper()
-    lines_out.append("")
-    lines_out.append(
-        f"TRADE DEL CICLO (BTC LONG {TRADE_DEL_CICLO_LEVERAGE}x — {TRADE_DEL_CICLO_PLATFORM.upper()}) · {status}"
-    )
-    lines_out.append("  ⚠️ Blofin does not expose a public API — the bot does NOT read this position in real time.")
-
-    if status == "CLOSED":
-        lines_out.append(f"  ✅ CLOSED: {TRADE_DEL_CICLO_LAST_CLOSE}")
-        lines_out.append(
-            f"  Realized PnL: {_fmt_usd(TRADE_DEL_CICLO_PNL_REALIZED)} "
-            f"(from entry ${TRADE_DEL_CICLO_LAST_ENTRY:,.2f})"
-        )
-        lines_out.append(
-            f"  Available Blofin balance: {_fmt_usd(BLOFIN_BALANCE_AVAILABLE)} USDT "
-            "(copy-trading uncopied, waiting for new entry)"
-        )
-        lines_out.append(
-            "  Next entry: pending BCD manual order. "
-            "Edit fund_state.py → STATUS=OPEN + new LAST_ENTRY when reopening."
-        )
-        return
-
-    # STATUS == OPEN → render UPnL estimate
-    lines_out.append(f"  Last entry confirmed by BCD: ${TRADE_DEL_CICLO_LAST_ENTRY:,.2f}")
-    lines_out.append(f"  Blofin balance (manual + copy-trading): {_fmt_usd(TRADE_DEL_CICLO_BLOFIN_BALANCE_USD)}")
-    lines_out.append(f"  Last manual read: {TRADE_DEL_CICLO_LAST_UPDATE}")
-
-    btc_price: float | None = None
-    if isinstance(market, dict):
-        prices = (market.get("data") or {}).get("prices") or market.get("prices") or {}
-        btc_entry = prices.get("BTC") or {}
-        p = btc_entry.get("price_usd")
-        if p:
-            try:
-                btc_price = float(p)
-            except (TypeError, ValueError):
-                btc_price = None
-
-    if btc_price:
-        pct_move = (btc_price - TRADE_DEL_CICLO_LAST_ENTRY) / TRADE_DEL_CICLO_LAST_ENTRY
-        pct_pnl = pct_move * TRADE_DEL_CICLO_LEVERAGE
-        assumed_margin = TRADE_DEL_CICLO_BLOFIN_BALANCE_USD * 0.5
-        est_pnl_usd = assumed_margin * pct_pnl
-        lines_out.append(
-            f"  BTC current: ${btc_price:,.2f} | Underlying move: {pct_move*100:+.2f}%"
-        )
-        lines_out.append(
-            f"  Estimated PnL ({TRADE_DEL_CICLO_LEVERAGE}x on ~${assumed_margin:,.0f} margin): "
-            f"{pct_pnl*100:+.2f}% → {_fmt_usd(est_pnl_usd)}"
-        )
-        lines_out.append(
-            "  ⚠️ Estimate. Not confirmed by Blofin API — BCD must confirm real balance."
-        )
-    else:
-        lines_out.append("  UPnL: not calculable (BTC price feed unavailable).")
-
-    lines_out.append("  DCA plan: $70K Add 1 ($500) / $63K Add 2 ($750) / $55K Add 3 ($1,000)")
-    lines_out.append("  Individual SL = liq price (single SL). Manual TP in zone $130K–$150K.")
+# R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): _fmt_cycle_upnl_block ELIMINADO.
+# El vehículo Trade del Ciclo (Blofin) ya no forma parte del fondo.
 
 
 # ─── R-BOT-TERMINOLOGY-UNIFY (2026-05-07) — Bug #4 ───────────────────────────
@@ -660,7 +592,6 @@ def format_quick_positions(wallets: list[dict[str, Any]],
     total_fund_capital = 0.0
     total_upnl = 0.0
     all_spot: list[dict[str, Any]] = []
-    cycle_positions: list[dict[str, Any]] = []
 
     for w in wallets:
         if w.get("status") != "ok":
@@ -746,17 +677,10 @@ def format_quick_positions(wallets: list[dict[str, Any]],
             sb["_wallet_label"] = d["label"]
         all_spot.extend(spot)
 
-        # Detect Trade del Ciclo BTC LONG positions
-        for p in positions:
-            if p.get("coin") == "BTC" and p.get("side") == "LONG":
-                p["_wallet_label"] = d["label"]
-                p["_wallet_short"] = short
-                cycle_positions.append(p)
-
     lines.append(f"  TOTAL FONDO: Capital {_fmt_usd(total_fund_capital)} | UPnL {_fmt_usd(total_upnl)}")
 
-    # ── Trade del Ciclo (BTC LONG) — vive en Blofin, NO en Hyperliquid ──
-    _fmt_cycle_upnl_block(lines, market)
+    # (R-NOPRELIQ + REMOVE BLOFIN 2026-05-15) Trade del Ciclo (BTC LONG en
+    # Blofin) eliminado del fondo — no se renderiza más en /reporte.
 
     # ── Spot token balances (kHYPE, PEAR, etc.) con DUST threshold ──
     if all_spot:

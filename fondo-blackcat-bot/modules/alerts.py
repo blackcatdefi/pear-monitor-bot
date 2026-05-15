@@ -1,6 +1,11 @@
-"""Periodic alert checks (HF, liquidation proximity, HYPE/BTC crashes, Trade del Ciclo DCA).
+"""Periodic alert checks (HF flywheel, HYPE/BTC crashes, BCD DCA, margin stress).
 
 Edge-triggered: keeps last alert state in data/alert_state.json to avoid spam.
+
+R-NOPRELIQ (2026-05-15): basket per-leg pre-liq alerts ELIMINADOS.
+BCD pone SL/TP 100% nativo en HL por pata, no necesita pre-liq alerts en basket.
+Flywheel HF gates (1.10/1.05/1.02) y MARGIN_STRESS edge 90% wallet-level
+permanecen como red de seguridad.
 """
 from __future__ import annotations
 
@@ -18,7 +23,6 @@ from config import (
     HF_WARN,
     HYPE_CRITICAL,
     HYPE_WARN,
-    LIQ_PROXIMITY_PCT,
     TELEGRAM_CHAT_ID,
 )
 from fund_state import BCD_DCA_PLAN
@@ -29,15 +33,6 @@ from utils.telegram import send_bot_message
 log = logging.getLogger(__name__)
 
 STATE_FILE = os.path.join(DATA_DIR, "alert_state.json")
-
-# Trade del Ciclo DCA levels
-CYCLE_DCA_LEVELS = [
-    {"price": 70_000, "label": "DCA Add 1", "margin": "$500"},
-    {"price": 63_000, "label": "DCA Add 2", "margin": "$750"},
-    {"price": 55_000, "label": "DCA Add 3", "margin": "$1,000"},
-]
-CYCLE_CRITICAL = 50_000  # Near liquidation zone
-CYCLE_TP_ZONE = 150_000  # Take profit zone
 
 
 def _load_state() -> dict[str, Any]:
@@ -179,38 +174,8 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
         else:
             _clear(state, "btc_warn")
 
-    # 4. Trade del Ciclo — BTC DCA dip alerts
-    if btc_px is not None:
-        for level in CYCLE_DCA_LEVELS:
-            key = f"cycle_dca_{level['price']}"
-            if btc_px <= level["price"]:
-                await _emit(
-                    bot, key, state,
-                    f"\U0001f4c9 Cycle Trade Dip Alert: BTC @ ${btc_px:,.0f} \u2014 "
-                    f"activate {level['label']} ({level['margin']} margin)"
-                )
-            else:
-                _clear(state, key)
-
-        # Critical zone (near liquidation)
-        if btc_px <= CYCLE_CRITICAL:
-            await _emit(
-                bot, "cycle_critical", state,
-                f"\u26a0\ufe0f CRITICAL ZONE Cycle Trade: BTC @ ${btc_px:,.0f} \u2014 "
-                f"trade HF near liquidation!"
-            )
-        else:
-            _clear(state, "cycle_critical")
-
-        # TP zone
-        if btc_px >= CYCLE_TP_ZONE:
-            await _emit(
-                bot, "cycle_tp", state,
-                f"\U0001f3af TP Zone Cycle Trade: BTC @ ${btc_px:,.0f} \u2014 "
-                f"evaluate partial close"
-            )
-        else:
-            _clear(state, "cycle_tp")
+    # 4. (Removido R-NOPRELIQ 2026-05-15) Trade del Ciclo DCA alerts —
+    # Blofin trade vehicle eliminado del fondo, sin alertas asociadas.
 
     # 5b. UETH borrow APY watchdog (Round 13)
     # El flywheel es insostenible si UETH borrow APY > 6%. A 10% empieza a
@@ -249,31 +214,11 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
     except Exception:  # noqa: BLE001
         log.exception("UETH borrow APY check failed (non-fatal)")
 
-    # 6. Liquidation proximity (per position)
+    # 6. (Removido R-NOPRELIQ 2026-05-15) Per-leg basket pre-liquidation alerts.
+    # BCD pone SL/TP 100% nativo en HL por pata, no necesita pre-liq alerts en basket.
+    # Flywheel HF gates (1.10/1.05/1.02) y MARGIN_STRESS edge 90% wallet-level
+    # quedan como red de seguridad de fondo.
     wallets = await fetch_all_wallets()
-    for w in wallets:
-        if w.get("status") != "ok":
-            continue
-        d = w["data"]
-        for p in d.get("positions") or []:
-            liq_px = p.get("liq_px")
-            entry = p.get("entry_px")
-            if not liq_px or not entry or entry == 0:
-                continue
-            current = await get_spot_price(p["coin"]) or entry
-            if current == 0:
-                continue
-            distance = abs(current - liq_px) / current
-            short_addr = d["wallet"][:6] + "\u2026" + d["wallet"][-4:]
-            key = f"liq_{d['wallet']}_{p['coin']}"
-            if distance < LIQ_PROXIMITY_PCT:
-                msg = (
-                    f"\u26a0\ufe0f {p['coin']} {p['side']} in {d['label']} ({short_addr}) "
-                    f"{distance*100:.1f}% from liquidation (curr ${current:.4f} / liq ${liq_px:.4f})"
-                )
-                await _emit(bot, key, state, msg)
-            else:
-                _clear(state, key)
 
     # 6b. R-ONDEMAND (2026-05-09) — Margin stress watchdog.
     # Edge-triggered alert on any wallet whose ratio
