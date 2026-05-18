@@ -272,7 +272,7 @@ def format_event(event: dict[str, Any]) -> str:
         f"Equity:   ${event['prev_equity']:,.0f} → "
         f"${event['curr_equity']:,.0f} ({event['equity_growth_pct']:+.1f}%)\n"
         f"Positions: {event['positions_count']} unchanged\n"
-        f"Current effective leverage: {event['leverage_now']:.2f}x\n"
+        f"Current effective leverage: {event['leverage_now']:.1f}x\n"
         "BCD added capital to the active basket."
     )
 

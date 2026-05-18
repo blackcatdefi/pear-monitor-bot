@@ -662,12 +662,15 @@ def format_quick_positions(wallets: list[dict[str, Any]],
         if upnl_val != 0:
             lines.append(f"    UPnL: {_fmt_usd(upnl_val)}")
         # Show margin / withdrawable / leverage when there's an active perp position.
+        # R-LEVERAGE-AUTODETECT (2026-05-18): leverage SIEMPRE calculado
+        # dinámicamente como notional/equity_perp y redondeado a 1 decimal.
+        # NUNCA asumir un valor fijo (4x/5x/etc.) — la realidad on-chain manda.
         if ntl_pos > 50 or margin_used > 50:
-            lev = (ntl_pos / perp_eq) if perp_eq > 0.01 else 0.0
+            lev = round((ntl_pos / perp_eq), 1) if perp_eq > 0.01 else 0.0
             lines.append(
                 f"    Margin used: {_fmt_usd(margin_used)} | "
                 f"Withdrawable: {_fmt_usd(withdrawable)} | "
-                f"Notional: {_fmt_usd(ntl_pos)} (~{lev:.2f}x)"
+                f"Notional: {_fmt_usd(ntl_pos)} (~{lev:.1f}x)"
             )
         lines.append(f"    {pos_summary}")
 

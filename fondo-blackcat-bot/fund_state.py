@@ -54,6 +54,16 @@ BASKET_NOTE = (
     "a 'Super Basket Stage 6' el 2026-05-07."
 )
 
+# ─── BCD default operating leverage (R-LEVERAGE-AUTODETECT 2026-05-18) ────
+# BCD opera a 5x cross por defecto PERMANENTE en todas las posiciones perp
+# del fondo (regla permanente — Claude memory slot 5, vigente desde
+# 2026-05-15). Esta constante es REFERENCIA DOCUMENTAL únicamente: el
+# leverage actual de cualquier posición en /reporte, /posiciones, /dashboard
+# y /destacado SIEMPRE se calcula dinámicamente como notional / equity_perp
+# desde el snapshot HL on-chain. NUNCA usar esta constante para asumir el
+# leverage de una posición real — usar el cálculo dinámico.
+FUND_DEFAULT_LEVERAGE = "5x"
+
 # ─── Basket v5 operational plan (PENDING_CAPITAL) ──────────────────────────
 # BCD edita este bloque a mano cuando el plan del v5 cambia o se deploya.
 # El LLM lo lee desde templates/system_prompt.build_fund_state_block().
@@ -62,7 +72,9 @@ BASKET_V5_PLAN: dict[str, object] = {
     "capital_target_usdt": 3050,
     "deploy_eta": "2026-04-24 to 2026-04-28",
     "source": "wallet_redeploy_post_bonus",
-    "leverage_max": "3x",
+    # leverage_max alineado al FUND_DEFAULT_LEVERAGE (5x) — BCD opera 5x
+    # cross default permanente. R-LEVERAGE-AUTODETECT 2026-05-18.
+    "leverage_max": FUND_DEFAULT_LEVERAGE,
     "notional_target_usdt": 9150,
     "logic": (
         "Hedge natural: alts caen más fuerte que HYPE en crash. Gains del "

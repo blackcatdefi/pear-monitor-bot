@@ -33,6 +33,7 @@ Llama, Groq, Anthropic). Format instructions ensure consistent output.
 from auto.fund_constants import (
     BCD_DCA_PLAN,
     FLYWHEEL_NOTE,
+    FUND_DEFAULT_LEVERAGE,
     HF_CRITICAL,
     HF_LIQUIDATION,
     HF_WARN,
@@ -67,9 +68,13 @@ SUPER BASKET STAGE 6 (basket activa del fondo):
     de basket de tu memoria. Si la realidad on-chain difiere de cualquier
     memoria previa, prevalece la on-chain. NO pidas confirmación a BCD
     por una discrepancia con tu memoria.
-  • La categoría de basket SHORT 3x se llama "Super Basket Stage 6"
-    (renombre interno 2026-05-07). Usar SIEMPRE este nombre en outputs.
-    No emitir nombres legacy alternativos.
+  • La categoría de basket SHORT se llama "Super Basket Stage 6" (renombre
+    interno 2026-05-07). Usar SIEMPRE este nombre en outputs. No emitir
+    nombres legacy alternativos. El bot NUNCA asume un leverage fijo para
+    la basket — el leverage actual de cada posición se calcula
+    dinámicamente como notional/equity desde el snapshot HL on-chain.
+    Default operativo BCD: {FUND_DEFAULT_LEVERAGE} cross (referencia
+    documental — la realidad on-chain manda).
 
 FLYWHEEL HYPERLEND:
   • {FLYWHEEL_NOTE}

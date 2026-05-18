@@ -6,6 +6,7 @@ import logging
 import math
 from typing import Any
 
+from auto.fund_constants import FUND_DEFAULT_LEVERAGE
 from modules.hyperlend import fetch_all_hyperlend
 from modules.portfolio import get_spot_price
 
@@ -24,7 +25,12 @@ async def compute_kill_scenarios() -> str:
     eth_px = await get_spot_price("ETH")
 
     # 1. Super Basket Stage 6 (canonical name since 2026-05-07)
-    lines.append("1\ufe0f\u20e3 SUPER BASKET STAGE 6 (SHORT basket 3x)")
+    # Leverage label = FUND_DEFAULT_LEVERAGE (referencia documental — BCD opera
+    # 5x cross default permanente). El leverage REAL de cada leg se calcula
+    # dinámicamente en /reporte y /posiciones desde notional/equity.
+    lines.append(
+        f"1\ufe0f\u20e3 SUPER BASKET STAGE 6 (SHORT basket {FUND_DEFAULT_LEVERAGE})"
+    )
     lines.append("   Kill scenario: Ceasefire + dovish Fed \u2192 risk-on alt squeeze")
     lines.append("   Triggers concretos:")
     lines.append("   \u2022 Ceasefire confirmado Iran/Israel (no solo rumores)")
