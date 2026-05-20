@@ -145,6 +145,15 @@ def _selftest_summary() -> dict:
         return {"counts": {}, "total": 0, "ts_utc": 0}
 
 
+def _pat_status_safe() -> dict:
+    """Best-effort PAT expiry snapshot for /health — cached-only, no network."""
+    try:
+        from modules.pat_status import health_pat_block
+        return health_pat_block()
+    except Exception:  # noqa: BLE001
+        return {"_error": "pat_status unavailable"}
+
+
 def _cron_state_safe() -> dict:
     """Best-effort cron-state snapshot — never raises into /health."""
     try:
@@ -173,4 +182,6 @@ def health_payload(commands_count: int) -> dict:
         "selftest_last": _selftest_summary(),
         # R-ONDEMAND (2026-05-09): proactive cron gates + safety thresholds.
         "cron_state": _cron_state_safe(),
+        # R-PAT-RENEW (2026-05-20): GitHub PAT expiry telemetry.
+        "pat_status": _pat_status_safe(),
     }

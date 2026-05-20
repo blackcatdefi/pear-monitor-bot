@@ -110,6 +110,7 @@ COMMANDS: List[BotCommand] = [
     BotCommand("export", "Export CSV <type> <period> (fills|pnl|positions|intel|errors × 7d|30d|90d|ytd|all)", "admin", "cmd_export"),
     BotCommand("scheduler_health", "Scheduler health table (R18 add-on)", "admin", "cmd_scheduler_health"),
     BotCommand("silent", "Toggle silent mode (on/off/status) — R-SILENT denoise", "admin", "cmd_silent"),
+    BotCommand("pat_status", "GitHub PAT expiry — días restantes + verdict (R-PAT-RENEW)", "admin", "cmd_pat_status"),
 
     BotCommand("lmec_status", "LMEC bear-invalidation telemetry (R-BOT-LMEC-AUTOFEED)", "trading", "cmd_lmec_status"),
 

@@ -912,6 +912,19 @@ async def cmd_version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 @authorized
 @with_error_logging
+async def cmd_pat_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PAT-RENEW: GitHub PAT expiry readout (days left + verdict)."""
+    try:
+        from modules.pat_status import get_pat_status, format_pat_status_block
+        status = get_pat_status(force_refresh=True)
+        text = format_pat_status_block(status)
+    except Exception as exc:  # noqa: BLE001
+        text = f"\U0001f511 GitHub PAT status\n\u26a0\ufe0f No disponible: {str(exc)[:200]}"
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
 async def cmd_errors(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Round 16: last 20 captured errors from errors_log SQLite table."""
     text = format_recent_errors(limit=20)
@@ -1838,6 +1851,40 @@ async def _weekly_summary_job(application: Application) -> None:
         log.exception("weekly summary job failed")
 
 
+async def _pat_expiry_job(application: Application) -> None:
+    """R-PAT-RENEW: daily — alert when the GitHub PAT is <=14d from expiry.
+
+    SAFETY gate (PAT_ALERT_ENABLED, default true): the fund cannot operate
+    with the bot blind to its own deploy credentials, so this stays on by
+    default like HF_PRELIQ. Deduped to once per UTC day.
+    """
+    try:
+        from modules.pat_status import (
+            get_pat_status,
+            should_send_alert,
+            record_alert_sent,
+            format_pat_status_block,
+        )
+    except Exception:  # noqa: BLE001
+        log.exception("pat_expiry job: module import failed")
+        return
+    try:
+        status = get_pat_status(force_refresh=True)
+        if should_send_alert(status):
+            msg = (
+                "\U0001f6a8 ALERTA — GitHub PAT por expirar\n\n"
+                f"{format_pat_status_block(status)}\n\n"
+                "Acción: renovar el PAT y actualizar GITHUB_TOKEN en Railway. "
+                "Sin esto el push autónomo y el backup a GitHub se caen."
+            )
+            if TELEGRAM_CHAT_ID:
+                await send_bot_message(application.bot, TELEGRAM_CHAT_ID, msg)
+            record_alert_sent()
+            log.warning("PAT expiry alert sent (days_left=%s)", status.get("days_left"))
+    except Exception:  # noqa: BLE001
+        log.exception("pat_expiry job failed")
+
+
 # ─── R-PERFECT Phase 4 scheduler jobs ───────────────────────────────────────
 
 
@@ -2282,6 +2329,21 @@ async def post_init(application: Application) -> None:
             coalesce=True,
         )
 
+        # R-PAT-RENEW: daily GitHub PAT expiry check at 09:00 UTC.
+        # SAFETY job — fires a Telegram alert when the deploy PAT is
+        # <=PAT_ALERT_THRESHOLD_DAYS (14) from expiry. Deduped once/UTC-day.
+        scheduler.add_job(
+            _pat_expiry_job,
+            "cron",
+            hour=9,
+            minute=0,
+            args=[application],
+            id="pat_expiry_check",
+            max_instances=1,
+            coalesce=True,
+            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=3),
+        )
+
         # R-BOT-LMEC-AUTOFEED: weekly LMEC recheck — Sunday 00:00 UTC.
         # Aligns with weekly chart close. Emits flip-to-VALIDA alerts.
         if os.getenv("LMEC_AUTOFEED_ENABLED", "true").strip().lower() != "false":
@@ -2632,6 +2694,8 @@ HANDLER_MAP = {
     "log": cmd_log,
     # Round 16
     "version": cmd_version,
+    # R-PAT-RENEW
+    "pat_status": cmd_pat_status,
     "errors": cmd_errors,
     "metrics": cmd_metrics,
     "test_alerts": cmd_test_alerts,
