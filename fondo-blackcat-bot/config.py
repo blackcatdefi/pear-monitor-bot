@@ -81,6 +81,18 @@ BTC_WARN = 62_000.0
 POLL_INTERVAL_MIN = int(os.getenv("POLL_INTERVAL_MIN", "5"))
 ENABLE_ALERTS = os.getenv("ENABLE_ALERTS", "true").lower() == "true"
 
+# ─── Variational ("Farm the DUMP") ─────────────────────────────────────────
+# Read-only, keyless. Scanner flags perps whose ANNUALIZED funding ≤ threshold;
+# watches fire when funding reverts to baseline × reversion-fraction.
+VARIATIONAL_FUNDING_THRESHOLD = float(os.getenv("VARIATIONAL_FUNDING_THRESHOLD", "-500") or -500)
+VARIATIONAL_REVERSION_FRACTION = float(os.getenv("VARIATIONAL_REVERSION_FRACTION", "0.5") or 0.5)
+VARIATIONAL_API_BASE = os.getenv(
+    "VARIATIONAL_API_BASE",
+    "https://omni-client-api.prod.ap-northeast-1.variational.io",
+)
+# Master switch for the periodic reversion-alert scheduler job (default on).
+VARIATIONAL_ALERTS_ENABLED = os.getenv("VARIATIONAL_ALERTS_ENABLED", "true").lower() == "true"
+
 # ─── Wallet fetch retry configuration ──────────────────────────────────────
 WALLET_FETCH_TIMEOUT = int(os.getenv("WALLET_FETCH_TIMEOUT", "10"))  # seconds
 

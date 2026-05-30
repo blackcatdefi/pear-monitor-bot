@@ -1777,6 +1777,176 @@ async def _weekly_cleanup_job() -> None:
         log.exception("Weekly cleanup failed")
 
 
+# ─── R-VARIATIONAL — Farm the DUMP funding scanner + reversion watches ───────
+
+
+@authorized
+@with_error_logging
+async def cmd_variationalfunding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Scan Variational perps for funding ≤ VARIATIONAL_FUNDING_THRESHOLD (anual)."""
+    from modules import variational as _var
+
+    threshold = _var.funding_threshold()
+    await update.message.reply_text(
+        f"⏳ Escaneando Variational (funding ≤ {threshold:,.0f}% anual)...",
+        reply_markup=MAIN_KEYBOARD,
+    )
+    try:
+        markets = await _var.fetch_markets()
+    except _var.VariationalError as exc:
+        await update.message.reply_text(
+            f"⚠️ Variational n/a — {exc}", reply_markup=MAIN_KEYBOARD
+        )
+        return
+    except Exception as exc:  # noqa: BLE001
+        log.exception("/variationalfunding failed")
+        await update.message.reply_text(
+            f"❌ Error inesperado: {str(exc)[:200]}", reply_markup=MAIN_KEYBOARD
+        )
+        return
+
+    qualifying = _var.scan_negative_funding(markets, threshold)
+    text = _var.format_funding_scan(qualifying, threshold, len(markets))
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+def _variational_usage() -> str:
+    return (
+        "Usage:\n"
+        "  /variationalalerts <TICKER>   — registrar watch (baseline = funding actual)\n"
+        "  /variationalalerts list       — ver watches activos\n"
+        "  /variationalalerts remove <TICKER>\n"
+        "  /variationalalerts clear      — borrar todos\n"
+        "Ej: /variationalalerts PORTAL"
+    )
+
+
+@authorized
+@with_error_logging
+async def cmd_variationalalerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Register / manage mean-reversion watches on Variational funding."""
+    from modules import variational as _var
+    from modules import variational_alerts as _va
+
+    args = [a.strip() for a in (context.args or []) if a.strip()]
+    fraction = _va.reversion_fraction()
+
+    # No arg → usage + current list.
+    if not args:
+        watches = await asyncio.to_thread(_va.list_watches, True)
+        text = _variational_usage() + "\n\n" + _va.format_watch_list(watches, fraction)
+        await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+        return
+
+    sub = args[0].lower()
+
+    if sub == "list":
+        watches = await asyncio.to_thread(_va.list_watches, True)
+        await send_long_message(
+            update, _va.format_watch_list(watches, fraction), reply_markup=MAIN_KEYBOARD
+        )
+        return
+
+    if sub == "clear":
+        n = await asyncio.to_thread(_va.clear)
+        await update.message.reply_text(
+            f"🗑 {n} watch(es) borrado(s).", reply_markup=MAIN_KEYBOARD
+        )
+        return
+
+    if sub == "remove":
+        if len(args) < 2:
+            await update.message.reply_text(
+                "Usage: /variationalalerts remove <TICKER>", reply_markup=MAIN_KEYBOARD
+            )
+            return
+        ok = await asyncio.to_thread(_va.remove, args[1])
+        msg = f"🗑 Watch {args[1].upper()} eliminado." if ok else f"No había watch para {args[1].upper()}."
+        await update.message.reply_text(msg, reply_markup=MAIN_KEYBOARD)
+        return
+
+    # Otherwise: treat first arg as a ticker to register.
+    ticker = sub.upper()
+    try:
+        market = await _var.get_market(ticker)
+    except _var.VariationalError as exc:
+        await update.message.reply_text(
+            f"⚠️ No pude leer funding de Variational — {exc}", reply_markup=MAIN_KEYBOARD
+        )
+        return
+
+    if market is None:
+        await update.message.reply_text(
+            f"❌ {ticker} no figura en Variational ahora mismo. Verificá el ticker "
+            f"o probá /variationalfunding para ver los activos listados.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+
+    baseline = market.annualized_pct
+    watch = await asyncio.to_thread(_va.register, ticker, baseline)
+    target = _va.reversion_target(baseline, fraction)
+    await update.message.reply_text(
+        "✅ Watch registrado — Farm the DUMP\n\n"
+        f"{ticker}\n"
+        f"Baseline funding: {baseline:,.1f}% anual\n"
+        f"Disparo cuando funding ≥ {target:,.1f}% (baseline × {fraction:g})\n"
+        f"Mark actual: {market.mark_price if market.mark_price is not None else 'n/a'}\n\n"
+        f"Te aviso una vez cuando revierta. /variationalalerts list para ver todos.",
+        reply_markup=MAIN_KEYBOARD,
+    )
+
+
+async def _variational_alerts_job(application: Application) -> None:
+    """Every ~30 min — fire ONE alert per watch when funding reverts to half.
+
+    These alerts are user-requested and material, so they fire regardless of
+    silent mode (no other noise is added). Fully wrapped: a Variational
+    outage or DB hiccup logs and returns, never crashing the scheduler.
+    """
+    from config import VARIATIONAL_ALERTS_ENABLED
+    if not VARIATIONAL_ALERTS_ENABLED:
+        return
+    from modules import variational as _var
+    from modules import variational_alerts as _va
+
+    chat_id = TELEGRAM_CHAT_ID
+    if not chat_id:
+        return
+    try:
+        active = await asyncio.to_thread(_va.list_watches, False)  # untriggered only
+    except Exception:  # noqa: BLE001
+        log.exception("variational alerts: list_watches failed")
+        return
+    if not active:
+        return
+
+    try:
+        markets = await _var.fetch_markets()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("variational alerts: market fetch n/a (%s) — skipping cycle", exc)
+        return
+
+    by_ticker = {m.ticker: m for m in markets}
+    fraction = _va.reversion_fraction()
+    for w in active:
+        m = by_ticker.get(w.ticker)
+        if m is None:
+            continue  # ticker temporarily delisted — keep watching
+        current = m.annualized_pct
+        try:
+            if _va.has_reverted(w.baseline_funding, current, fraction):
+                msg = _va.format_reversion_alert(w, current, fraction, m.mark_price)
+                await send_bot_message(application.bot, chat_id, msg)
+                await asyncio.to_thread(_va.mark_triggered, w.ticker, current)
+                log.info("variational reversion fired: %s base=%.1f cur=%.1f",
+                         w.ticker, w.baseline_funding, current)
+            else:
+                await asyncio.to_thread(_va.update_current, w.ticker, current)
+        except Exception:  # noqa: BLE001
+            log.exception("variational alerts: eval failed for %s", w.ticker)
+
+
 # ─── Round 17 scheduler jobs ────────────────────────────────────────────────
 
 
@@ -2397,6 +2567,24 @@ async def post_init(application: Application) -> None:
         else:
             log.info("Cryexc monitor scheduler DISABLED (CRYEXC_MONITOR_ENABLED=false)")
 
+        # R-VARIATIONAL: mean-reversion watch checker — every 30 min.
+        # Fires ONE material alert per registered watch when funding reverts to
+        # baseline × VARIATIONAL_REVERSION_FRACTION. Gated by VARIATIONAL_ALERTS_ENABLED.
+        if os.getenv("VARIATIONAL_ALERTS_ENABLED", "true").strip().lower() != "false":
+            scheduler.add_job(
+                _variational_alerts_job,
+                "interval",
+                minutes=30,
+                args=[application],
+                id="variational_alerts",
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now(timezone.utc) + timedelta(minutes=3),
+            )
+            log.info("Variational reversion-alert scheduler ENABLED (every 30 min)")
+        else:
+            log.info("Variational reversion-alert scheduler DISABLED (VARIATIONAL_ALERTS_ENABLED=false)")
+
         # HOTFIX 2 (2026-04-27): proactive portfolio_snapshot refresh.
         # Keeps the dashboard cache warm so users never see an empty
         # screen waiting on a cold-start fetch. Disable via
@@ -2725,6 +2913,9 @@ HANDLER_MAP = {
     "dashboard": cmd_dashboard,
     # R-BOT-LMEC-AUTOFEED
     "lmec_status": cmd_lmec_status,
+    # R-VARIATIONAL — Farm the DUMP
+    "variationalfunding": cmd_variationalfunding,
+    "variationalalerts": cmd_variationalalerts,
     # R-INTEL30 Phase 1 — 11 new free intel sources
     "etfs": cmd_etfs,
     "macro": cmd_macro,

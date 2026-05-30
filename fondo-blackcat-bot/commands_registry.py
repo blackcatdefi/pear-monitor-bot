@@ -114,6 +114,10 @@ COMMANDS: List[BotCommand] = [
 
     BotCommand("lmec_status", "LMEC bear-invalidation telemetry (R-BOT-LMEC-AUTOFEED)", "trading", "cmd_lmec_status"),
 
+    # ─── R-VARIATIONAL — Farm the DUMP ───
+    BotCommand("variationalfunding", "Scan Variational perps: funding anualizado ≤ umbral (-500% def)", "trading", "cmd_variationalfunding"),
+    BotCommand("variationalalerts", "Watch ticker → alerta cuando funding revierte a mitad del baseline", "trading", "cmd_variationalalerts"),
+
     # ─── DEBUG / OBSERVABILITY ───
     BotCommand("debug_x", "X/Twitter connectivity diagnostic", "debug", "cmd_debug_x"),
     BotCommand("x_status", "X API status (R15+ live + counters + cache)", "debug", "cmd_x_status"),
