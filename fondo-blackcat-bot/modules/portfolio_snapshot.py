@@ -228,6 +228,12 @@ class PortfolioSnapshot:
     # reader). Folded into the dashboard's TOTAL EQUITY headline by
     # ``auto.capital_calc.compute_net_capital``. Defaults to 0.0.
     pear_staked_total: float = 0.0
+    # R-VAULTDEP (2026-05-30): fund capital deposited INTO HL vaults
+    # (e.g. "Systemic Strategies HyperGrowth"). Lives under the vault
+    # address, not in any fund wallet, so the per-wallet aggregation omits
+    # it. Read live via modules.vault_deposits (keyless userVaultEquities)
+    # and folded into TOTAL EQUITY by compute_net_capital. Defaults to 0.0.
+    vault_deposits_total: float = 0.0
 
 
 # ─── Aggregator ─────────────────────────────────────────────────────────────
@@ -813,6 +819,18 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
     except (TypeError, ValueError):
         pear_staked_total = 0.0
 
+    # R-VAULTDEP (2026-05-30): fund capital deposited INTO HL vaults. Read
+    # via the keyless userVaultEquities endpoint. The reader is synchronous
+    # (stdlib urllib + 45s cache) and null-safe (returns 0.0 on any failure),
+    # so we run it off-loop and never crash the snapshot build.
+    try:
+        from modules.vault_deposits import get_vault_deposits_total
+
+        vault_deposits_total = await asyncio.to_thread(get_vault_deposits_total)
+    except Exception as _e:  # noqa: BLE001
+        log.warning("vault_deposits read failed in snapshot: %s", _e)
+        vault_deposits_total = 0.0
+
     return PortfolioSnapshot(
         wallets=wallet_snaps,
         capital_total=capital_total,
@@ -833,4 +851,5 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
         fetch_attempts=1,
         last_error=None,
         pear_staked_total=pear_staked_total,
+        vault_deposits_total=vault_deposits_total,
     )

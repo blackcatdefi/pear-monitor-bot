@@ -66,6 +66,63 @@ FUND_WALLETS: dict[str, str] = _load_fund_wallets()
 # Wallet usada para HyperLend flywheel (colateral kHYPE) — env-driven
 HYPERLEND_WALLET = os.getenv("HYPERLEND_WALLET", "").strip().lower()
 
+# ─── BlackCat vault DEPOSITS (capital del fondo DENTRO de vaults HL) ────────
+# R-VAULTDEP (2026-05-30): el fondo depositó $5,000 USDC en el vault HL
+# "Systemic Strategies HyperGrowth". Ese capital vive bajo la dirección del
+# vault (NO en las wallets del fondo), así que la paridad-Rabby por-wallet lo
+# omitía. Este tracker lee la equity viva del depositante vía el endpoint
+# público keyless ``userVaultEquities`` y la suma al TOTAL EQUITY como línea
+# propia (nunca contra margen perp ni USDC de wallet).
+#
+# Formato env ``BLACKCAT_VAULT_DEPOSITS`` = JSON list de objetos:
+#   [{"vault_address": "0x..", "depositor_address": "0x..",
+#     "label": "Nombre legible", "cost_basis": 5000}]
+# Agregar más depósitos = editar la env var, sin tocar código.
+def _load_vault_deposits() -> list[dict]:
+    raw = os.getenv("BLACKCAT_VAULT_DEPOSITS", "").strip()
+    if not raw:
+        # Seed por defecto: el depósito HyperGrowth confirmado on-chain
+        # (depositante = wallet BlackCatDeFi EVM trading 0xc7ae…1505).
+        return [
+            {
+                "vault_address": "0xd6e56265890b76413d1d527eb9b75e334c0c5b42",
+                "depositor_address": "0xc7ae23316b47f7e75f455f53ad37873a18351505",
+                "label": "Systemic Strategies HyperGrowth",
+                "cost_basis": 5000.0,
+            }
+        ]
+    try:
+        import json as _json
+
+        parsed = _json.loads(raw)
+        if not isinstance(parsed, list):
+            print("⚠️ BLACKCAT_VAULT_DEPOSITS no es una lista JSON — ignorado.")
+            return []
+        out: list[dict] = []
+        for e in parsed:
+            if not isinstance(e, dict):
+                continue
+            va = str(e.get("vault_address", "")).strip().lower()
+            da = str(e.get("depositor_address", "")).strip().lower()
+            if not (va.startswith("0x") and da.startswith("0x")):
+                continue
+            try:
+                cb = float(e.get("cost_basis", 0) or 0)
+            except (TypeError, ValueError):
+                cb = 0.0
+            out.append({
+                "vault_address": va,
+                "depositor_address": da,
+                "label": str(e.get("label") or "Vault deposit"),
+                "cost_basis": cb,
+            })
+        return out
+    except Exception as _e:  # noqa: BLE001
+        print(f"⚠️ BLACKCAT_VAULT_DEPOSITS parse error: {_e} — ignorado.")
+        return []
+
+BLACKCAT_VAULT_DEPOSITS: list[dict] = _load_vault_deposits()
+
 # ─── Thresholds & alerts ────────────────────────────────────────────────────
 # HyperLend real liquidation happens at HF < 1.00.
 # Fund operative rules: monitor at 1.15, act at 1.10. Zone 1.10-1.20 is normal

@@ -902,6 +902,10 @@ async def _build_state() -> dict[str, Any]:
         # surfaced via env var (or future on-chain reader) and folded into
         # the TOTAL EQUITY headline by ``auto.capital_calc.compute_net_capital``.
         "pear_staked_total": getattr(snap, "pear_staked_total", 0.0),
+        # R-VAULTDEP (2026-05-30): fund capital deposited INTO HL vaults,
+        # folded into TOTAL EQUITY by compute_net_capital. Read live via
+        # the keyless userVaultEquities endpoint in the snapshot builder.
+        "vault_deposits_total": getattr(snap, "vault_deposits_total", 0.0),
         # R-DASH-FIX Bug 2: use fresh UPnL — same source as /posiciones.
         "upnl_perp_total": upnl_fresh if fresh_wallets else snap.upnl_perp_total,
         "main_flywheel": _ws_to_dict(snap.main_flywheel),

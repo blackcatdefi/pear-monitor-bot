@@ -117,6 +117,13 @@ class NetCapital:
     # staked, etc.) that don't show up in HL/perp/spot endpoints. Surfaced
     # as a separate line and folded into ``total_equity_usd``.
     pear_staked_usd: float = 0.0
+    # R-VAULTDEP (2026-05-30): fund capital deposited INTO HL vaults (e.g.
+    # "Systemic Strategies HyperGrowth"). Lives under the vault address, NOT
+    # in any fund wallet, so the wallet/Rabby-parity total omits it. Read
+    # live via modules.vault_deposits (userVaultEquities, keyless). Surfaced
+    # as its own line and folded into ``total_equity_usd``. NEVER added to
+    # perp margin or wallet USDC (no double-count).
+    vault_deposits_usd: float = 0.0
 
     @property
     def spot_non_usdc_usd(self) -> float:
@@ -132,14 +139,16 @@ class NetCapital:
     def total_equity_usd(self) -> float:
         """Total fund equity — matches Rabby's "Total" headline.
 
-        Includes stables (cash equivalent) AND any external DeFi positions
-        (Pear staked) on top of the post-leverage NET. This is the number
-        BCD wants to see at the top of the dashboard.
+        Includes stables (cash equivalent), external DeFi positions
+        (Pear staked) AND fund capital deposited INTO HL vaults
+        (vault_deposits) on top of the post-leverage NET. This is the
+        number BCD wants to see at the top of the dashboard.
         """
         return (
             self.net_total_usd
             + self.spot_stables_usd
             + self.pear_staked_usd
+            + self.vault_deposits_usd
         )
 
 
@@ -159,6 +168,8 @@ def _coerce_floats(d: dict[str, Any]) -> dict[str, float]:
         "upnl_perp_total",
         # R-DASHBOARD-RABBY-PARITY: external DeFi (Pear Protocol staked).
         "pear_staked_total",
+        # R-VAULTDEP: fund capital deposited INTO HL vaults.
+        "vault_deposits_total",
     ):
         try:
             out[key] = float(d.get(key) or 0.0)
@@ -191,6 +202,7 @@ def compute_net_capital(snap: Any) -> NetCapital:
         stables = f["spot_stables_total"]
         upnl = f["upnl_perp_total"]
         pear_staked = f["pear_staked_total"]
+        vault_deposits = f["vault_deposits_total"]
     else:
         def _get(name: str) -> float:
             try:
@@ -209,6 +221,8 @@ def compute_net_capital(snap: Any) -> NetCapital:
         # R-DASHBOARD-RABBY-PARITY: Pear staked surfaced via env or future
         # on-chain reader. Defaults to 0 when not present.
         pear_staked = _get("pear_staked_total")
+        # R-VAULTDEP: fund capital deposited INTO HL vaults. Defaults to 0.
+        vault_deposits = _get("vault_deposits_total")
 
     hl_net = hl_coll - hl_debt
     # NET = post-leverage capital exposure. UPnL is NOT added separately
@@ -222,11 +236,11 @@ def compute_net_capital(snap: Any) -> NetCapital:
     # GROSS = pre-leverage view (the old "Total" line). Kept informative.
     gross = hl_coll + perp + spot
 
-    total_equity = net + stables + pear_staked
+    total_equity = net + stables + pear_staked + vault_deposits
     log.info(
         "capital_calc: hl_coll=%.2f hl_debt=%.2f hl_net=%.2f perp=%.2f "
-        "spot_non_stable=%.2f spot_stables=%.2f pear_staked=%.2f upnl=%.2f "
-        "-> net=%.2f total_equity=%.2f gross=%.2f",
+        "spot_non_stable=%.2f spot_stables=%.2f pear_staked=%.2f "
+        "vault_deposits=%.2f upnl=%.2f -> net=%.2f total_equity=%.2f gross=%.2f",
         hl_coll,
         hl_debt,
         hl_net,
@@ -234,6 +248,7 @@ def compute_net_capital(snap: Any) -> NetCapital:
         spot,
         stables,
         pear_staked,
+        vault_deposits,
         upnl,
         net,
         total_equity,
@@ -251,6 +266,7 @@ def compute_net_capital(snap: Any) -> NetCapital:
         hl_collateral_usd=hl_coll,
         hl_debt_usd=hl_debt,
         pear_staked_usd=pear_staked,
+        vault_deposits_usd=vault_deposits,
     )
 
 
@@ -312,18 +328,19 @@ def format_net_capital_telegram(net: NetCapital) -> str:
     lines.append(
         f"│   └─ Spot non-stable: {_fmt_usd(net.spot_non_stable_usd)}"
     )
-    if net.spot_stables_usd > 0.01 or net.pear_staked_usd > 0.01:
-        if net.spot_stables_usd > 0.01:
-            tee = "├─" if net.pear_staked_usd > 0.01 else "└─"
-            lines.append(
-                f"{tee} Spot stables (cash equiv): "
-                f"{_fmt_usd(net.spot_stables_usd)}"
-            )
-        if net.pear_staked_usd > 0.01:
-            lines.append(
-                f"└─ Pear Protocol staked: "
-                f"{_fmt_usd(net.pear_staked_usd)}"
-            )
+    # Optional sibling sub-lines (only rendered when > $0.01). The LAST
+    # present sibling gets the └─ connector. R-VAULTDEP adds the HL vault
+    # deposits line here so it's visibly folded into TOTAL EQUITY.
+    _siblings: list[tuple[str, float]] = []
+    if net.spot_stables_usd > 0.01:
+        _siblings.append(("Spot stables (cash equiv)", net.spot_stables_usd))
+    if net.pear_staked_usd > 0.01:
+        _siblings.append(("Pear Protocol staked", net.pear_staked_usd))
+    if net.vault_deposits_usd > 0.01:
+        _siblings.append(("Vault Deposits (HL)", net.vault_deposits_usd))
+    for _i, (_lbl, _val) in enumerate(_siblings):
+        _tee = "└─" if _i == len(_siblings) - 1 else "├─"
+        lines.append(f"{_tee} {_lbl}: {_fmt_usd(_val)}")
     lines.append("")
     lines.append(
         f"UPnL perp (already en perp account): "
@@ -376,6 +393,12 @@ def render_net_capital_html(
         extra_lines.append(
             f"<p>&nbsp;&nbsp;Pear Protocol staked: "
             f"{fmt_compact_usd(net.pear_staked_usd)}</p>"
+        )
+    # R-VAULTDEP: fund capital inside HL vaults (separate from wallets).
+    if net.vault_deposits_usd > 0.01:
+        extra_lines.append(
+            f"<p>&nbsp;&nbsp;Vault Deposits (HL): "
+            f"{fmt_compact_usd(net.vault_deposits_usd)}</p>"
         )
     extra_block = "".join(extra_lines)
 

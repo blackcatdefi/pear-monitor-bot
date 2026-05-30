@@ -400,6 +400,13 @@ def format_report_header(
             pear_total = float(os.getenv("PEAR_STAKED_USD", "0") or 0)
         except (TypeError, ValueError):
             pear_total = 0.0
+        # R-VAULTDEP: fund capital deposited INTO HL vaults (keyless read,
+        # 0.0 on failure — never inflates, never crashes).
+        try:
+            from modules.vault_deposits import get_vault_deposits_total
+            vault_dep_total = get_vault_deposits_total()
+        except Exception:  # noqa: BLE001
+            vault_dep_total = 0.0
         net = compute_net_capital({
             "hl_collateral_total": hl_coll,
             "hl_debt_total": hl_debt,
@@ -408,6 +415,7 @@ def format_report_header(
             "spot_stables_total": spot_stables,
             "upnl_perp_total": 0.0,  # already in perp accountValue
             "pear_staked_total": pear_total,
+            "vault_deposits_total": vault_dep_total,
         })
         # NetCapital dataclass — total_equity_usd is the Rabby-parity headline.
         try:
@@ -518,6 +526,23 @@ def format_quick_positions(wallets: list[dict[str, Any]],
             _pear_total = float(os.getenv("PEAR_STAKED_USD", "0") or 0)
         except (TypeError, ValueError):
             _pear_total = 0.0
+        # R-VAULTDEP: fund capital deposited INTO HL vaults — keyless live
+        # read, folded into TOTAL EQUITY as its own line (never against perp
+        # margin / wallet USDC). Detail block (label + PnL vs cost basis +
+        # lockup) appended right after the capital tree below.
+        _vault_result = None
+        _vault_dep_total = 0.0
+        try:
+            from modules.vault_deposits import (
+                fetch_vault_deposits,
+                format_vault_deposits_telegram,
+                get_vault_deposits_total,
+            )
+            _vault_result = fetch_vault_deposits()
+            _vault_dep_total = get_vault_deposits_total()
+        except Exception:  # noqa: BLE001
+            _vault_result = None
+            _vault_dep_total = 0.0
         _net = compute_net_capital({
             "hl_collateral_total": _hl_coll_total,
             "hl_debt_total": _hl_debt_total,
@@ -528,8 +553,19 @@ def format_quick_positions(wallets: list[dict[str, Any]],
             "spot_stables_total": _spot_stables_total,
             "upnl_perp_total": _upnl_total,
             "pear_staked_total": _pear_total,
+            "vault_deposits_total": _vault_dep_total,
         })
         lines.append(format_net_capital_telegram(_net))
+        # R-VAULTDEP detail block (label, current equity, PnL vs cost basis,
+        # lockup). Only rendered when there's something to show; "n/a" on
+        # read failure — never crashes the report.
+        try:
+            _vault_block = format_vault_deposits_telegram(_vault_result)
+            if _vault_block:
+                lines.append("")
+                lines.append(_vault_block)
+        except Exception:  # noqa: BLE001
+            pass
         lines.append("")
     except Exception:  # noqa: BLE001
         # Never break the formatter — capital banner is best-effort.
