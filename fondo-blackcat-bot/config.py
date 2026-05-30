@@ -93,6 +93,40 @@ VARIATIONAL_API_BASE = os.getenv(
 # Master switch for the periodic reversion-alert scheduler job (default on).
 VARIATIONAL_ALERTS_ENABLED = os.getenv("VARIATIONAL_ALERTS_ENABLED", "true").lower() == "true"
 
+# ─── R-FARMDUMP — pre-trade "Farm the DUMP" 5-check filter ──────────────────
+# When a Variational reversion watch fires, the bot auto-runs the fund's
+# mandatory short filter and appends a GO / CAUTION / NO-GO verdict. All
+# thresholds are env-tunable; the verdict is a RECOMMENDATION only — BCD
+# always makes the final call and executes manually. The bot never trades.
+#
+# Check 1 (funding reverted / not crowded):
+#   FARMDUMP_FUNDING_MEAN_CEIL  — at or above this annualized %, funding is
+#       considered "back near mean" → PASS gate (default -100).
+#   FARMDUMP_FUNDING_CROWDED_FLOOR — at or below this, funding is still deeply
+#       negative = crowded short / squeeze risk → FAIL (default -300).
+#   FARMDUMP_FUNDING_SKIP_HIGH  — at or above this positive %, funding fully
+#       reversed (overshoot) → FAIL, skip the trade (default +200).
+# Check 2 (24h price action):
+#   FARMDUMP_UPTREND_24H_WARN — +%24h at/above this = ripping → WARN (default 10).
+#   FARMDUMP_UPTREND_24H_FAIL — +%24h at/above this = vertical, squeeze bait
+#       to short into → FAIL (default 20).
+# Check 3 (OI vs volume / liquidity):
+#   FARMDUMP_MIN_VOL_USD — 24h USD volume below this = illiquid shitcoin =
+#       self-liquidation / slippage risk → FAIL (default 1_000_000). Between
+#       this and 2× it → WARN (borderline thin).
+# Check 4 (daily trend): uses FARMDUMP_TREND_SMA_DAYS daily closes (default 7)
+#   from Hyperliquid candles; FARMDUMP_TREND_UPTREND_PCT — multi-day % gain
+#       above which a price > SMA counts as a strong uptrend → WARN/FAIL
+#       (default 10).
+FARMDUMP_FUNDING_MEAN_CEIL = float(os.getenv("FARMDUMP_FUNDING_MEAN_CEIL", "-100") or -100)
+FARMDUMP_FUNDING_CROWDED_FLOOR = float(os.getenv("FARMDUMP_FUNDING_CROWDED_FLOOR", "-300") or -300)
+FARMDUMP_FUNDING_SKIP_HIGH = float(os.getenv("FARMDUMP_FUNDING_SKIP_HIGH", "200") or 200)
+FARMDUMP_UPTREND_24H_WARN = float(os.getenv("FARMDUMP_UPTREND_24H_WARN", "10") or 10)
+FARMDUMP_UPTREND_24H_FAIL = float(os.getenv("FARMDUMP_UPTREND_24H_FAIL", "20") or 20)
+FARMDUMP_MIN_VOL_USD = float(os.getenv("FARMDUMP_MIN_VOL_USD", "1000000") or 1_000_000)
+FARMDUMP_TREND_SMA_DAYS = int(float(os.getenv("FARMDUMP_TREND_SMA_DAYS", "7") or 7))
+FARMDUMP_TREND_UPTREND_PCT = float(os.getenv("FARMDUMP_TREND_UPTREND_PCT", "10") or 10)
+
 # ─── Wallet fetch retry configuration ──────────────────────────────────────
 WALLET_FETCH_TIMEOUT = int(os.getenv("WALLET_FETCH_TIMEOUT", "10"))  # seconds
 

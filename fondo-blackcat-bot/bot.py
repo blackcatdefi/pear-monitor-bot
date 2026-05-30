@@ -1937,6 +1937,12 @@ async def _variational_alerts_job(application: Application) -> None:
         try:
             if _va.has_reverted(w.baseline_funding, current, fraction):
                 msg = _va.format_reversion_alert(w, current, fraction, m.mark_price)
+                # R-FARMDUMP — auto-run the 5 pre-trade checks and append a
+                # GO/CAUTION/NO-GO verdict. Fully wrapped: a failure here must
+                # never block the (material) reversion alert from firing.
+                enriched = await _farmdump_block(w, m, current, fraction)
+                if enriched:
+                    msg = msg + "\n\n" + enriched
                 await send_bot_message(application.bot, chat_id, msg)
                 await asyncio.to_thread(_va.mark_triggered, w.ticker, current)
                 log.info("variational reversion fired: %s base=%.1f cur=%.1f",
@@ -1945,6 +1951,108 @@ async def _variational_alerts_job(application: Application) -> None:
                 await asyncio.to_thread(_va.update_current, w.ticker, current)
         except Exception:  # noqa: BLE001
             log.exception("variational alerts: eval failed for %s", w.ticker)
+
+
+async def _farmdump_block(w, m, current_funding: float, fraction: float) -> str:
+    """Build the appended '5 CHECKS' block for a fired/queried reversion.
+
+    Returns the rendered block, or '' if the checks engine fails entirely (the
+    bare reversion alert still fires). Never raises.
+    """
+    from modules import farmdump_checks as _fd
+    from modules import variational_alerts as _va
+
+    try:
+        pct_rev = _va.pct_reverted(w.baseline_funding, current_funding)
+        result = await _fd.run_checks_safe(
+            w.ticker,
+            w.baseline_funding,
+            current_funding,
+            var_price=getattr(m, "mark_price", None),
+            var_vol_24h=getattr(m, "volume_24h", None),
+            var_oi_usd=getattr(m, "open_interest_usd", None),
+            pct_reverted=pct_rev,
+        )
+        if result is None:
+            return ""
+        return _fd.format_checks_block(result)
+    except Exception:  # noqa: BLE001
+        log.exception("farmdump: _farmdump_block failed for %s", getattr(w, "ticker", "?"))
+        return ""
+
+
+@authorized
+@with_error_logging
+async def cmd_variationalcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Run the 5 Farm-the-DUMP pre-trade checks on demand for a ticker.
+
+    Uses the ticker's CURRENT Variational funding as both the live reading and
+    (absent a registered watch) the baseline, so BCD can vet a setup any time.
+    If a watch exists, its registered baseline is used for the documentation
+    line. Recommendation only — the bot never trades.
+    """
+    from modules import variational as _var
+    from modules import variational_alerts as _va
+
+    args = [a.strip() for a in (context.args or []) if a.strip()]
+    if not args:
+        await update.message.reply_text(
+            "Usage: /variationalcheck <TICKER>\nEj: /variationalcheck PORTAL",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+
+    ticker = args[0].upper()
+    await update.message.reply_text(
+        f"⏳ Corriendo los 5 checks Farm the DUMP para {ticker}...",
+        reply_markup=MAIN_KEYBOARD,
+    )
+    try:
+        market = await _var.get_market(ticker)
+    except _var.VariationalError as exc:
+        await update.message.reply_text(
+            f"⚠️ Variational n/a — {exc}", reply_markup=MAIN_KEYBOARD
+        )
+        return
+    except Exception as exc:  # noqa: BLE001
+        log.exception("/variationalcheck failed")
+        await update.message.reply_text(
+            f"❌ Error inesperado: {str(exc)[:200]}", reply_markup=MAIN_KEYBOARD
+        )
+        return
+
+    if market is None:
+        await update.message.reply_text(
+            f"❌ {ticker} no figura en Variational ahora mismo. Verificá el ticker "
+            f"o probá /variationalfunding.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+
+    current = market.annualized_pct
+    watch = await asyncio.to_thread(_va.get_watch, ticker)
+    baseline = watch.baseline_funding if watch is not None else current
+
+    # Reuse the shared block builder via a lightweight shim object for the watch.
+    class _W:  # noqa: N801 — tiny adapter, not a public type
+        pass
+    w = _W()
+    w.ticker = ticker
+    w.baseline_funding = baseline
+
+    fraction = _va.reversion_fraction()
+    block = await _farmdump_block(w, market, current, fraction)
+    header = (
+        f"🔎 VARIATIONAL CHECK — {ticker}\n"
+        f"Baseline: {baseline:,.0f}%  →  Current: {current:,.0f}% anual\n"
+    )
+    if not block:
+        await update.message.reply_text(
+            header + "\n⚠️ No pude correr los checks (datos n/a).",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    await send_long_message(update, header + "\n" + block, reply_markup=MAIN_KEYBOARD)
 
 
 # ─── Round 17 scheduler jobs ────────────────────────────────────────────────
@@ -2916,6 +3024,8 @@ HANDLER_MAP = {
     # R-VARIATIONAL — Farm the DUMP
     "variationalfunding": cmd_variationalfunding,
     "variationalalerts": cmd_variationalalerts,
+    # R-FARMDUMP — on-demand 5-check pre-trade filter
+    "variationalcheck": cmd_variationalcheck,
     # R-INTEL30 Phase 1 — 11 new free intel sources
     "etfs": cmd_etfs,
     "macro": cmd_macro,

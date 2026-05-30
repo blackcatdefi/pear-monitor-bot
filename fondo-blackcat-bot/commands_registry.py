@@ -117,6 +117,7 @@ COMMANDS: List[BotCommand] = [
     # ─── R-VARIATIONAL — Farm the DUMP ───
     BotCommand("variationalfunding", "Scan Variational perps: funding anualizado ≤ umbral (-500% def)", "trading", "cmd_variationalfunding"),
     BotCommand("variationalalerts", "Watch ticker → alerta cuando funding revierte a mitad del baseline", "trading", "cmd_variationalalerts"),
+    BotCommand("variationalcheck", "Corre los 5 checks Farm the DUMP on-demand → veredicto GO/CAUTION/NO-GO", "trading", "cmd_variationalcheck"),
 
     # ─── DEBUG / OBSERVABILITY ───
     BotCommand("debug_x", "X/Twitter connectivity diagnostic", "debug", "cmd_debug_x"),
