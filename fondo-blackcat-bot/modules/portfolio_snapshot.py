@@ -234,6 +234,10 @@ class PortfolioSnapshot:
     # it. Read live via modules.vault_deposits (keyless userVaultEquities)
     # and folded into TOTAL EQUITY by compute_net_capital. Defaults to 0.0.
     vault_deposits_total: float = 0.0
+    # R-VAULTDEP dashboard: per-vault breakdown (label, equity, cost_basis,
+    # pnl, pnl_pct, found + evolution metrics) so the dashboard can render a
+    # dedicated vault card with the evolution line. Empty on read failure.
+    vault_deposits_detail: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ─── Aggregator ─────────────────────────────────────────────────────────────
@@ -823,13 +827,47 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
     # via the keyless userVaultEquities endpoint. The reader is synchronous
     # (stdlib urllib + 45s cache) and null-safe (returns 0.0 on any failure),
     # so we run it off-loop and never crash the snapshot build.
+    vault_deposits_detail: list[dict[str, Any]] = []
     try:
-        from modules.vault_deposits import get_vault_deposits_total
+        from modules.vault_deposits import fetch_vault_deposits
 
-        vault_deposits_total = await asyncio.to_thread(get_vault_deposits_total)
+        def _read_vault_detail():
+            res = fetch_vault_deposits()
+            if not getattr(res, "ok", False):
+                return 0.0, []
+            from modules.vault_history import (
+                compute_vault_evolution,
+                record_vault_snapshot,
+            )
+
+            detail: list[dict[str, Any]] = []
+            for d in res.deposits:
+                ev = compute_vault_evolution(d)
+                detail.append({
+                    "label": d.label,
+                    "vault_address": d.vault_address,
+                    "equity_usd": d.equity_usd,
+                    "cost_basis_usd": d.cost_basis_usd,
+                    "pnl_usd": d.pnl_usd,
+                    "pnl_pct": ev["pnl_all_pct"],
+                    "found": d.found,
+                    "locked_until_ts": d.locked_until_ts,
+                    "has_prev": ev["has_prev"],
+                    "prev_label": ev["prev_label"],
+                    "delta_prev_usd": ev["delta_prev_usd"],
+                    "delta_prev_pct": ev["delta_prev_pct"],
+                })
+            # Persist today's equity AFTER reading evolution (prior-day delta).
+            record_vault_snapshot(res.deposits)
+            return float(res.total_usd), detail
+
+        vault_deposits_total, vault_deposits_detail = await asyncio.to_thread(
+            _read_vault_detail
+        )
     except Exception as _e:  # noqa: BLE001
         log.warning("vault_deposits read failed in snapshot: %s", _e)
         vault_deposits_total = 0.0
+        vault_deposits_detail = []
 
     return PortfolioSnapshot(
         wallets=wallet_snaps,
@@ -852,4 +890,5 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
         last_error=None,
         pear_staked_total=pear_staked_total,
         vault_deposits_total=vault_deposits_total,
+        vault_deposits_detail=vault_deposits_detail,
     )

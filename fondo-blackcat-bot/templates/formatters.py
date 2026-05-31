@@ -566,6 +566,18 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                 lines.append(_vault_block)
         except Exception:  # noqa: BLE001
             pass
+        # R-VAULTDEP evolution: persist today's equity + show all-time vs cost
+        # and delta vs the prior-day snapshot. Best-effort; never crashes.
+        try:
+            if _vault_result is not None and getattr(_vault_result, "ok", False):
+                from modules.vault_history import format_vault_evolution_block
+
+                _vault_evo = format_vault_evolution_block(_vault_result)
+                if _vault_evo:
+                    lines.append("")
+                    lines.append(_vault_evo)
+        except Exception:  # noqa: BLE001
+            pass
         lines.append("")
     except Exception:  # noqa: BLE001
         # Never break the formatter — capital banner is best-effort.

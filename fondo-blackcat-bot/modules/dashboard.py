@@ -519,6 +519,59 @@ def _render_html(state: dict[str, Any]) -> str:
             "</div>"
         )
 
+    # ─── Vault Deposits (R-VAULTDEP) ─────────────────────────────────────
+    # Fund capital deposited INTO HL vaults (e.g. "Systemic Strategies
+    # HyperGrowth"). Lives under the vault address, NOT in any fund wallet,
+    # so it would be invisible without this card. Equity is read live via the
+    # keyless userVaultEquities endpoint and is already folded into the
+    # TOTAL EQUITY headline by compute_net_capital. The card shows the full
+    # breakdown (label, current equity, cost basis, unrealized PnL USD/%) plus
+    # an evolution line (all-time vs cost + delta vs the prior-day snapshot).
+    vault_card_html = ""
+    _vault_detail = [
+        d for d in (state.get("vault_deposits_detail") or [])
+        if d.get("found")
+    ]
+    _vault_total = float(state.get("vault_deposits_total") or 0.0)
+    if _vault_detail:
+        _vrows: list[str] = []
+        for d in _vault_detail:
+            _pnl_cls, _pnl_fmt = _signed(d.get("pnl_usd"))
+            try:
+                _pnl_pct = float(d.get("pnl_pct") or 0.0)
+            except (TypeError, ValueError):
+                _pnl_pct = 0.0
+            _pct_sign = "+" if _pnl_pct >= 0 else ""
+            _evo = ""
+            if d.get("has_prev"):
+                _dlt_cls, _dlt_fmt = _signed(d.get("delta_prev_usd"))
+                _evo = (
+                    f"<p class='dim'>Evolución: <span class='{_esc(_dlt_cls)}'>"
+                    f"{_esc(_dlt_fmt)}</span> vs {_esc(d.get('prev_label'))}</p>"
+                )
+            else:
+                _evo = (
+                    "<p class='dim'>Evolución: baseline guardado "
+                    "(sin snapshot previo todavía)</p>"
+                )
+            _vrows.append(
+                "<p><strong>" + _esc(d.get("label")) + "</strong> · "
+                "<strong>" + _esc(_fmt_usd(d.get("equity_usd"))) + "</strong></p>"
+                "<p class='dim'>Cost basis: " + _esc(_fmt_usd(d.get("cost_basis_usd")))
+                + " · PnL: <span class='" + _esc(_pnl_cls) + "'>" + _esc(_pnl_fmt)
+                + " (" + _pct_sign + f"{_pnl_pct:.2f}%" + ")</span></p>"
+                + _evo
+            )
+        vault_card_html = (
+            "<div class='card'>"
+            "<h2>Vault Deposits (HL)</h2>"
+            + "".join(_vrows)
+            + "<p class='dim'>Total folded into TOTAL EQUITY: "
+            + _esc(_fmt_compact_usd(_vault_total))
+            + " · keyless userVaultEquities (read-only).</p>"
+            "</div>"
+        )
+
     # ─── Próximos catalysts (macro calendar) ──────────────────────────────
     upcoming_rows: list[str] = []
     for ev in state.get("upcoming") or []:
@@ -700,6 +753,8 @@ def _render_html(state: dict[str, Any]) -> str:
         {closed_html}
 
         {pear_card_html}
+
+        {vault_card_html}
 
         <div class="card">
             <h2>Active basket (autodetect)</h2>
@@ -906,6 +961,9 @@ async def _build_state() -> dict[str, Any]:
         # folded into TOTAL EQUITY by compute_net_capital. Read live via
         # the keyless userVaultEquities endpoint in the snapshot builder.
         "vault_deposits_total": getattr(snap, "vault_deposits_total", 0.0),
+        # R-VAULTDEP dashboard: per-vault breakdown (label, equity, cost basis,
+        # PnL USD/%, evolution vs prior snapshot) feeding the dedicated card.
+        "vault_deposits_detail": getattr(snap, "vault_deposits_detail", []) or [],
         # R-DASH-FIX Bug 2: use fresh UPnL — same source as /posiciones.
         "upnl_perp_total": upnl_fresh if fresh_wallets else snap.upnl_perp_total,
         "main_flywheel": _ws_to_dict(snap.main_flywheel),
