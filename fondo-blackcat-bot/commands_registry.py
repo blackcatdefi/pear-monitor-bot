@@ -126,6 +126,9 @@ COMMANDS: List[BotCommand] = [
     # ─── R-UNLOCK — basket-entry-unlock regime monitor ───
     BotCommand("unlockcheck", "Estado A/B/C de desbloqueo de canasta (BTC stab + re-correlación alts + breadth) → re-screen 5/5 manual", "trading", "cmd_unlockcheck"),
 
+    # ─── R-SIGNAL — per-name short signals (orthogonal to the >=4 ladder) ───
+    BotCommand("signals", "R-SIGNAL: nombres que pasan el filtro short de 5 gates AHORA (confirmá c/u 5/5 AiPear) — ortogonal al ladder >=4", "trading", "cmd_signals"),
+
     # ─── DEBUG / OBSERVABILITY ───
     BotCommand("debug_x", "X/Twitter connectivity diagnostic", "debug", "cmd_debug_x"),
     BotCommand("x_status", "X API status (R15+ live + counters + cache)", "debug", "cmd_x_status"),

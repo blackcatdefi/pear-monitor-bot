@@ -2231,6 +2231,37 @@ async def cmd_unlockcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
 
+@authorized
+@with_error_logging
+async def cmd_signals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-SIGNAL — per-name short signals (orthogonal to the >=4 R-UNLOCK ladder).
+
+    Runs the SAME R-UNLOCK-PRECISION 5-sub-gate engine and returns the CURRENT
+    set of watchlist names that pass ALL five gates right now (z>=+1.00
+    persistent, Hurst<=0.47, squeeze CLEAR, funding>=0, data>=90%). Fires on ANY
+    individual qualifier — the fund confirms each 5/5 with AiPear before adding
+    it to the short book one at a time. If zero qualify, says so with the count.
+    Read-only and recommendation-only — the bot never selects tokens or sizes.
+    Pure read: does NOT advance the debounce counters nor burn the announce edge.
+    """
+    from modules import unlock_monitor as _ul
+    from modules import signal_monitor as _sig
+
+    await update.message.reply_text(
+        "⏳ Calculando señales por nombre (filtro 5-gates)…", reply_markup=MAIN_KEYBOARD
+    )
+    try:
+        snap = await _ul.compute_snapshot(advance_state=False)
+        res = _sig.evaluate_signals(snap, advance_state=False)
+        await send_long_message(update, _sig.format_signals(res), reply_markup=MAIN_KEYBOARD)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("/signals failed")
+        await update.message.reply_text(
+            f"❌ Error calculando R-SIGNAL: {str(exc)[:200]}",
+            reply_markup=MAIN_KEYBOARD,
+        )
+
+
 async def _unlock_monitor_job(application: Application) -> None:
     """R-UNLOCK — basket-unlock watchdog (edge-triggered, R-SILENT aware).
 
@@ -2271,7 +2302,7 @@ async def _unlock_monitor_job(application: Application) -> None:
                 msg = _ul.format_alert(snap, prev)
                 await send_bot_message(application.bot, chat_id, msg)
                 log.info("R-UNLOCK alert fired: %s → %s (triggered=%d)",
-                         prev, new_level, snap.n_triggered)
+                         prev, new_level, snap.n_counts)
             else:
                 log.info("R-UNLOCK %s suppressed by silent mode (min_break=%s)",
                          new_level, min_break)
@@ -2284,6 +2315,25 @@ async def _unlock_monitor_job(application: Application) -> None:
                            cur.get("vol_series", []), cur.get("btcd_series", []))
         except Exception:  # noqa: BLE001
             log.exception("R-UNLOCK: level persist failed")
+
+        # ── R-SIGNAL (orthogonal per-name trigger) ─────────────────────────
+        # Reuse the SAME snapshot — no second data pull. Advances each name's
+        # debounce streak + announce flag and fires ONE alert (breaking
+        # R-SILENT) only when >=1 name NEWLY passes all 5 gates. Independent of
+        # whether the >=4 UNLOCK ladder fired above; fully wrapped.
+        try:
+            if os.getenv("SIGNAL_MONITOR_ENABLED", "true").strip().lower() != "false":
+                from modules import signal_monitor as _sig
+
+                res = _sig.evaluate_signals(snap, advance_state=True)
+                if res.fire:
+                    await send_bot_message(
+                        application.bot, chat_id, _sig.format_alert(res)
+                    )
+                    log.info("R-SIGNAL alert fired: new=%s total_qual=%d",
+                             ",".join(res.new_names), len(res.qualifying))
+        except Exception:  # noqa: BLE001
+            log.exception("R-SIGNAL emission failed (non-fatal)")
     except Exception:  # noqa: BLE001
         log.exception("R-UNLOCK monitor job failed")
 
@@ -3303,6 +3353,8 @@ HANDLER_MAP = {
     "vaults": cmd_vaults,
     # R-UNLOCK — basket-entry-unlock regime monitor (on-demand state)
     "unlockcheck": cmd_unlockcheck,
+    # R-SIGNAL — per-name short signals (orthogonal to the >=4 unlock ladder)
+    "signals": cmd_signals,
     # R-INTEL30 Phase 1 — 11 new free intel sources
     "etfs": cmd_etfs,
     "macro": cmd_macro,
