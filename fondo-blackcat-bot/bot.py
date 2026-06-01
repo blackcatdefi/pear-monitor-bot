@@ -2202,21 +2202,26 @@ async def cmd_vaults(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 @authorized
 @with_error_logging
 async def cmd_unlockcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """R-UNLOCK — current A/B/C state of the basket-entry-unlock monitor.
+    """R-UNLOCK-PRECISION — current five-sub-gate state of the basket-unlock monitor.
 
-    Computes BTC stabilization (A), alt re-correlation vs BTC (B, the 5/5-unlock
-    signal), and regime breadth (C) on demand, with a per-watchlist breakdown.
-    Read-only and recommendation-only — the bot never selects tokens, sizes, or
-    trades. Cointegration figures are a labelled rolling-correlation PROXY.
+    Runs the squeeze-first 5-check pre-filter on each watchlist name (data-quality,
+    z>=floor+persistence, Hurst<0.5, squeeze/momentum guard, funding>=0) and shows
+    a per-name sub-gate table with COUNTS YES/NO + binding reason. On UNLOCK,
+    appends a machine-readable AiPear confirmation block. Read-only and
+    recommendation-only — the bot never selects tokens, sizes, or trades.
+    Cointegration is a labelled CONTEXT-ONLY proxy that does not gate.
     """
     from modules import unlock_monitor as _ul
 
     await update.message.reply_text(
-        "⏳ Calculando estado de desbloqueo (A/B/C)…", reply_markup=MAIN_KEYBOARD
+        "⏳ Calculando estado de desbloqueo (5 sub-gates)…", reply_markup=MAIN_KEYBOARD
     )
     try:
-        snap = await _ul.compute_snapshot()
+        # Pure read: do NOT advance the persistence counters on a manual check.
+        snap = await _ul.compute_snapshot(advance_state=False)
         text = _ul.format_unlockcheck(snap)
+        if snap.level == _ul.UNLOCK:
+            text += "\n\n" + _ul.aipear_block(snap)
         await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
     except Exception as exc:  # noqa: BLE001
         log.exception("/unlockcheck failed")
