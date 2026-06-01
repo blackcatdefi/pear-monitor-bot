@@ -554,12 +554,27 @@ def _render_html(state: dict[str, Any]) -> str:
                     "<p class='dim'>Evolución: baseline guardado "
                     "(sin snapshot previo todavía)</p>"
                 )
+            # R-PMCORE: max drawdown + auto-discovery tag per vault.
+            try:
+                _mdd = float(d.get("mdd_pct") or 0.0)
+            except (TypeError, ValueError):
+                _mdd = 0.0
+            _mdd_html = (
+                f"<p class='dim'>Max drawdown: -{_mdd:.1f}%</p>" if _mdd > 0.0 else ""
+            )
+            if d.get("auto_discovered"):
+                _cb_html = "<p class='dim'>Cost basis: auto-descubierto (sin costo configurado)</p>"
+            else:
+                _cb_html = (
+                    "<p class='dim'>Cost basis: " + _esc(_fmt_usd(d.get("cost_basis_usd")))
+                    + " · PnL: <span class='" + _esc(_pnl_cls) + "'>" + _esc(_pnl_fmt)
+                    + " (" + _pct_sign + f"{_pnl_pct:.2f}%" + ")</span></p>"
+                )
             _vrows.append(
                 "<p><strong>" + _esc(d.get("label")) + "</strong> · "
                 "<strong>" + _esc(_fmt_usd(d.get("equity_usd"))) + "</strong></p>"
-                "<p class='dim'>Cost basis: " + _esc(_fmt_usd(d.get("cost_basis_usd")))
-                + " · PnL: <span class='" + _esc(_pnl_cls) + "'>" + _esc(_pnl_fmt)
-                + " (" + _pct_sign + f"{_pnl_pct:.2f}%" + ")</span></p>"
+                + _cb_html
+                + _mdd_html
                 + _evo
             )
         vault_card_html = (
@@ -570,6 +585,34 @@ def _render_html(state: dict[str, Any]) -> str:
             + _esc(_fmt_compact_usd(_vault_total))
             + " · keyless userVaultEquities (read-only).</p>"
             "</div>"
+        )
+
+    # ─── Portfolio Margin (R-PMCORE) ─────────────────────────────────────
+    pm_card_html = ""
+    _pm = state.get("pm_state")
+    if _pm is not None and getattr(_pm, "collateral_usd", 0.0) > 0:
+        _status = getattr(_pm, "status", "CALM")
+        _status_cls = {
+            "CALM": "pos", "WARN": "warn", "STRESS": "warn", "LIQ": "neg",
+        }.get(_status, "dim")
+        _naked = (
+            "<p class='neg'><strong>🚨 HEDGE MISSING</strong> — USDC debt vs HYPE "
+            "con shorts en 0: naked leveraged long.</p>"
+            if getattr(_pm, "naked_long", False) else ""
+        )
+        pm_card_html = (
+            "<div class='card'>"
+            "<h2>Portfolio Margin (cuenta primaria)</h2>"
+            "<p>Colateral HYPE: <strong>" + _esc(_fmt_usd(getattr(_pm, "collateral_usd", 0.0)))
+            + "</strong></p>"
+            "<p class='dim'>Deuda (USDC/USDH): " + _esc(_fmt_usd(getattr(_pm, "debt_usd", 0.0)))
+            + " · Capacidad: " + _esc(_fmt_usd(getattr(_pm, "capacity_usd", 0.0)))
+            + " · disponible: " + _esc(_fmt_usd(getattr(_pm, "available_usd", 0.0))) + "</p>"
+            "<p>Margin ratio: <span class='" + _esc(_status_cls) + "'><strong>"
+            + f"{getattr(_pm, 'ratio', 0.0) * 100:.1f}% {_esc(_status)}"
+            + "</strong></span> <span class='dim'>(WARN 40% · STRESS 70% · LIQ 95%)</span></p>"
+            + _naked
+            + "</div>"
         )
 
     # ─── Próximos catalysts (macro calendar) ──────────────────────────────
@@ -742,6 +785,8 @@ def _render_html(state: dict[str, Any]) -> str:
             <h2>Capital</h2>
             {capital_block_html}
         </div>
+
+        {pm_card_html}
 
         <div class="card">
             <h2>Main flywheel</h2>
@@ -964,6 +1009,8 @@ async def _build_state() -> dict[str, Any]:
         # R-VAULTDEP dashboard: per-vault breakdown (label, equity, cost basis,
         # PnL USD/%, evolution vs prior snapshot) feeding the dedicated card.
         "vault_deposits_detail": getattr(snap, "vault_deposits_detail", []) or [],
+        # R-PMCORE (2026-06-01): Portfolio Margin state of the primary account.
+        "pm_state": getattr(snap, "pm_state", None),
         # R-DASH-FIX Bug 2: use fresh UPnL — same source as /posiciones.
         "upnl_perp_total": upnl_fresh if fresh_wallets else snap.upnl_perp_total,
         "main_flywheel": _ws_to_dict(snap.main_flywheel),

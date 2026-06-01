@@ -151,6 +151,73 @@ def get_previous_snapshot(
         return None
 
 
+def get_all_snapshots(
+    vault_address: str,
+    *,
+    db_path: str | None = None,
+) -> list[dict]:
+    """All snapshots for ``vault_address`` ordered by date ASC. NEVER raises."""
+    va = str(vault_address or "").lower()
+    if not va:
+        return []
+    try:
+        with _conn(db_path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM vault_snapshots WHERE vault_address = ? "
+                "ORDER BY snap_date ASC",
+                (va,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+    except Exception as e:  # noqa: BLE001
+        log.warning("vault_history.get_all_snapshots failed: %s", e)
+        return []
+
+
+def compute_max_drawdown(
+    vault_address: str,
+    *,
+    current_equity: float | None = None,
+    db_path: str | None = None,
+) -> dict:
+    """Max peak-to-trough drawdown of a vault's equity since first snapshot.
+
+    Walks the persisted daily equity series (plus the live ``current_equity``
+    if provided) tracking the running peak and the largest % decline from any
+    peak. Returns ``{mdd_pct, mdd_usd, peak_usd, has_data}``. NEVER raises.
+    A vault that only ever rose has mdd 0.0.
+    """
+    out = {"mdd_pct": 0.0, "mdd_usd": 0.0, "peak_usd": 0.0, "has_data": False}
+    try:
+        series = [
+            _safe_float(r.get("equity_usd"))
+            for r in get_all_snapshots(vault_address, db_path=db_path)
+        ]
+        if current_equity is not None:
+            series.append(_safe_float(current_equity))
+        series = [s for s in series if s > 0]
+        if len(series) < 2:
+            return out
+        peak = series[0]
+        mdd_pct = 0.0
+        mdd_usd = 0.0
+        peak_at_mdd = peak
+        for eq in series[1:]:
+            if eq > peak:
+                peak = eq
+            decline = peak - eq
+            pct = (decline / peak * 100.0) if peak > 0 else 0.0
+            if pct > mdd_pct:
+                mdd_pct = pct
+                mdd_usd = decline
+                peak_at_mdd = peak
+        out.update(
+            mdd_pct=mdd_pct, mdd_usd=mdd_usd, peak_usd=peak_at_mdd, has_data=True
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("vault_history.compute_max_drawdown failed: %s", e)
+    return out
+
+
 def _fmt_usd(v: float) -> str:
     return f"${v:,.0f}"
 
@@ -198,12 +265,28 @@ def compute_vault_evolution(
     """
     equity = _safe_float(getattr(deposit, "equity_usd", 0.0))
     cost = _safe_float(getattr(deposit, "cost_basis_usd", 0.0))
-    pnl_all = _safe_float(getattr(deposit, "pnl_usd", equity - cost))
+    va = str(getattr(deposit, "vault_address", ""))
+    cost_basis_known = bool(getattr(deposit, "cost_basis_known", cost > 0))
+    # R-PMCORE: auto-discovered vaults have no configured cost basis. Use the
+    # FIRST recorded snapshot's equity as the all-time baseline so the return
+    # is still meaningful (tracked from when the bot first saw the vault).
+    basis_source = "cost"
+    if not cost_basis_known or cost <= 0:
+        snaps = get_all_snapshots(va, db_path=db_path)
+        if snaps:
+            cost = _safe_float(snaps[0].get("equity_usd")) or cost
+            basis_source = "first_snapshot"
+        else:
+            basis_source = "none"
+    pnl_all = (equity - cost) if cost > 0 else 0.0
     pnl_all_pct = (pnl_all / cost * 100.0) if cost > 0 else 0.0
+    mdd = compute_max_drawdown(va, current_equity=equity, db_path=db_path)
     out: dict[str, Any] = {
         "label": str(getattr(deposit, "label", "") or "Vault deposit"),
+        "vault_address": va,
         "equity_usd": equity,
         "cost_basis_usd": cost,
+        "basis_source": basis_source,  # cost | first_snapshot | none
         "pnl_all_usd": pnl_all,
         "pnl_all_pct": pnl_all_pct,
         "has_prev": False,
@@ -211,11 +294,12 @@ def compute_vault_evolution(
         "prev_label": None,
         "delta_prev_usd": 0.0,
         "delta_prev_pct": 0.0,
+        "mdd_pct": mdd["mdd_pct"],
+        "mdd_usd": mdd["mdd_usd"],
+        "mdd_has_data": mdd["has_data"],
     }
     today = _utc_today(now)
-    prev = get_previous_snapshot(
-        str(getattr(deposit, "vault_address", "")), now=now, db_path=db_path
-    )
+    prev = get_previous_snapshot(va, now=now, db_path=db_path)
     if prev is not None:
         prev_eq = _safe_float(prev.get("equity_usd"))
         if prev_eq > 0:
@@ -245,15 +329,22 @@ def format_vault_evolution_line(
     except Exception as e:  # noqa: BLE001
         log.warning("format_vault_evolution_line failed: %s", e)
         return ""
-    base = (
-        f"📈 {ev['label']}: {_fmt_usd(ev['equity_usd'])} "
-        f"({_fmt_signed(ev['pnl_all_usd'])} / "
-        f"{_fmt_signed_pct(ev['pnl_all_pct'])} all-time"
-    )
+    if ev.get("basis_source") == "none":
+        # No cost basis and no history yet → show equity only (first sighting).
+        base = f"📈 {ev['label']}: {_fmt_usd(ev['equity_usd'])} (baseline nuevo"
+    else:
+        at_label = "all-time" if ev.get("basis_source") == "cost" else "desde 1er snapshot"
+        base = (
+            f"📈 {ev['label']}: {_fmt_usd(ev['equity_usd'])} "
+            f"({_fmt_signed(ev['pnl_all_usd'])} / "
+            f"{_fmt_signed_pct(ev['pnl_all_pct'])} {at_label}"
+        )
     if ev["has_prev"]:
         base += (
             f" | {_fmt_signed(ev['delta_prev_usd'])} vs {ev['prev_label']}"
         )
+    if ev.get("mdd_has_data") and ev.get("mdd_pct", 0.0) > 0.0:
+        base += f" | MDD -{ev['mdd_pct']:.1f}%"
     return base + ")"
 
 

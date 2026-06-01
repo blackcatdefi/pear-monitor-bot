@@ -66,6 +66,60 @@ FUND_WALLETS: dict[str, str] = _load_fund_wallets()
 # Wallet usada para HyperLend flywheel (colateral kHYPE) — env-driven
 HYPERLEND_WALLET = os.getenv("HYPERLEND_WALLET", "").strip().lower()
 
+# ─── R-PMCORE (2026-06-01) — POST-MIGRACIÓN a HyperLiquid Portfolio Margin ──
+# El fondo migró el 100% del capital FUERA de HyperLend y DENTRO de
+# HyperLiquid Portfolio Margin. El "flywheel" viejo (colateral WHYPE/kHYPE +
+# deuda UETH en HyperLend) YA NO EXISTE. El core del fondo ahora es el balance
+# spot de HYPE en la wallet PRIMARIA (0xc7ae) que bajo Portfolio Margin
+# funciona como colateral cross. Esta sección parametriza la nueva realidad.
+#
+# Wallet PRIMARIA (label "BlackCatDeFi EVM"): tiene el HYPE spot que ES el
+# colateral del fondo. Default = la dirección on-chain confirmada; override
+# por env si BCD rota la wallet primaria.
+PM_PRIMARY_WALLET = os.getenv(
+    "PM_PRIMARY_WALLET",
+    "0xc7ae23316b47f7e75f455f53ad37873a18351505",
+).strip().lower()
+
+# Portfolio Margin: HYPE LTV = 0.50 → capacidad de borrow = 0.5 × colateral.
+# El activo borrowable en PM es SOLO USDC/USDH (NO existe borrow de UETH).
+PM_HYPE_LTV = float(os.getenv("PM_HYPE_LTV", "0.50") or 0.50)
+# Margin ratio = deuda / capacidad-de-borrow. Umbrales (utilización de la
+# capacidad): WARN 0.40, STRESS 0.70, LIQUIDACIÓN 0.95.
+PM_WARN_RATIO = float(os.getenv("PM_WARN_RATIO", "0.40") or 0.40)
+PM_STRESS_RATIO = float(os.getenv("PM_STRESS_RATIO", "0.70") or 0.70)
+PM_LIQ_RATIO = float(os.getenv("PM_LIQ_RATIO", "0.95") or 0.95)
+# Activos PM-elegibles como colateral spot además de HYPE (valuados a precio).
+# Stablecoins NUNCA se cuentan como colateral de exposición (son cash/deuda).
+PM_COLLATERAL_ASSETS = [
+    s.strip().upper()
+    for s in os.getenv("PM_COLLATERAL_ASSETS", "HYPE").split(",")
+    if s.strip()
+]
+
+# Flywheel HyperLend DEPRECADO: las wallets 0xa44e ("DDS/Main") y 0xcddf
+# ("Secondary") están CERRADAS — todo el HYPE migró afuera. Su cache on-chain
+# quedó STALE (HF 1.429 de hace 600+ h, colateral/deuda residual). Con el flag
+# en true (default), su colateral/deuda NO se cuenta en TOTAL EQUITY (evita
+# inflar con residuo stale y evita doble-conteo: el HYPE real vive en spot).
+# Se muestran como CERRADO/legacy si se muestran. Rollback: setear "false".
+FLYWHEEL_DEPRECATED = os.getenv("FLYWHEEL_DEPRECATED", "true").lower() == "true"
+LEGACY_FLYWHEEL_WALLETS = frozenset(
+    w.strip().lower()
+    for w in os.getenv(
+        "LEGACY_FLYWHEEL_WALLETS",
+        "0xa44e,0xcddf",  # prefijos legibles; el matcheo es por startswith
+    ).split(",")
+    if w.strip()
+)
+
+# Vault deposits: auto-descubrir TODOS los vaults donde la wallet del fondo
+# tiene equity (vía userVaultEquities) — no solo los configurados a mano.
+# Cada vault se trackea por separado (su propia serie temporal SQLite).
+VAULT_AUTODISCOVER = os.getenv("VAULT_AUTODISCOVER", "true").lower() == "true"
+# Equity mínima (USD) para considerar un vault deposit como real (no dust).
+VAULT_DUST_USD = float(os.getenv("VAULT_DUST_USD", "1.0") or 1.0)
+
 # ─── BlackCat vault DEPOSITS (capital del fondo DENTRO de vaults HL) ────────
 # R-VAULTDEP (2026-05-30): el fondo depositó $5,000 USDC en el vault HL
 # "Systemic Strategies HyperGrowth". Ese capital vive bajo la dirección del

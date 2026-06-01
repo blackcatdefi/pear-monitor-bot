@@ -29,8 +29,11 @@ _ENTRY = {
 }
 
 
-def _patch_config(monkeypatch, entries):
+def _patch_config(monkeypatch, entries, autodiscover=False):
     monkeypatch.setattr(vd, "BLACKCAT_VAULT_DEPOSITS", entries)
+    # R-PMCORE: default these config-only tests to autodiscover OFF so they
+    # exercise the configured-deposit path deterministically (no live scan).
+    monkeypatch.setattr(vd, "VAULT_AUTODISCOVER", autodiscover)
 
 
 # ─── happy path ────────────────────────────────────────────────────────────
@@ -186,6 +189,40 @@ def test_capital_calc_folds_vault_no_double_count():
     # NET (post-leverage exposure) and perp are NOT touched by the vault.
     assert with_v.net_total_usd == without.net_total_usd
     assert with_v.perp_equity_usd == without.perp_equity_usd
+
+
+# ─── R-PMCORE: auto-discover ALL vaults the fund holds ──────────────────────
+def test_autodiscover_enumerates_all_vaults(monkeypatch):
+    """With autodiscover ON, every vault the depositor holds is tracked
+    independently — even ones absent from BLACKCAT_VAULT_DEPOSITS."""
+    monkeypatch.setattr(vd, "BLACKCAT_VAULT_DEPOSITS", [_ENTRY])
+    monkeypatch.setattr(vd, "VAULT_AUTODISCOVER", True)
+    monkeypatch.setattr(vd, "PM_PRIMARY_WALLET", _ENTRY["depositor_address"])
+    monkeypatch.setattr(vd, "FUND_WALLETS", {})
+    monkeypatch.setattr(vd, "_resolve_vault_name", lambda va: "Vault " + va[:6])
+    monkeypatch.setattr(
+        vd, "_post_user_vault_equities",
+        lambda dep: [
+            {"vaultAddress": _ENTRY["vault_address"], "equity": "5155.0"},
+            {"vaultAddress": "0xedge", "equity": "4968.0"},
+            {"vaultAddress": "0xbredo", "equity": "1581.0"},
+            {"vaultAddress": "0xdust", "equity": "0.5"},  # below dust → skip
+        ],
+    )
+    r = vd.fetch_vault_deposits(force=True)
+    assert r.ok is True
+    # 1 configured (found) + 2 auto (edge, bredo); dust excluded.
+    found = [d for d in r.deposits if d.found]
+    assert len(found) == 3
+    addrs = {d.vault_address for d in found}
+    assert "0xedge" in addrs and "0xbredo" in addrs
+    # configured one keeps its label + cost basis; auto ones don't.
+    cfg = next(d for d in found if d.vault_address == _ENTRY["vault_address"])
+    assert cfg.cost_basis_known is True and cfg.auto_discovered is False
+    auto = next(d for d in found if d.vault_address == "0xedge")
+    assert auto.auto_discovered is True and auto.cost_basis_known is False
+    # total = sum of all found equities (each counted once, no aggregation).
+    assert round(r.total_usd, 2) == round(5155.0 + 4968.0 + 1581.0, 2)
 
 
 def test_capital_calc_backward_compat_no_vault_key():

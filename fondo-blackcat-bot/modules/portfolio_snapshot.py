@@ -238,6 +238,10 @@ class PortfolioSnapshot:
     # pnl, pnl_pct, found + evolution metrics) so the dashboard can render a
     # dedicated vault card with the evolution line. Empty on read failure.
     vault_deposits_detail: list[dict[str, Any]] = field(default_factory=list)
+    # R-PMCORE (2026-06-01): Portfolio Margin state for the primary account
+    # (modules.portfolio_margin.PMState or None). Carries collateral / debt /
+    # capacity / ratio / naked-long for the dashboard + /reporte PM block.
+    pm_state: Any = None
 
 
 # ─── Aggregator ─────────────────────────────────────────────────────────────
@@ -596,6 +600,26 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
             fg_value = None
         fg_label = fg.get("classification") or fg.get("label")
 
+    # R-PMCORE (2026-06-01): overlay HL oracle prices so HYPE (the fund's core
+    # PM collateral) is ALWAYS priced even when CoinGecko rate-limits / fails.
+    # Without this overlay, the spot valuation silently fell back to entryNtl
+    # (which is 0.0 for the migrated HYPE balance) → TOTAL EQUITY read ~$13K
+    # instead of ~$94K. Oracle wins on conflict (it's what HL uses for PM).
+    try:
+        from modules.hl_prices import get_oracle_prices
+        _oracle = get_oracle_prices()
+        if _oracle:
+            merged = dict(prices) if isinstance(prices, dict) else {}
+            for _c, _px in _oracle.items():
+                try:
+                    if float(_px) > 0:
+                        merged[_c] = {"price_usd": float(_px)}
+                except (TypeError, ValueError):
+                    continue
+            prices = merged
+    except Exception as _e:  # noqa: BLE001
+        log.warning("portfolio_snapshot: oracle price overlay failed: %s", _e)
+
     def _px(sym: str) -> float | None:
         entry = prices.get(sym) or prices.get(sym.upper()) or {}
         if isinstance(entry, dict):
@@ -808,6 +832,20 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
     hl_debt_total = sum(ws.hl_debt_usd for ws in wallet_snaps)
     perp_equity_total = sum(ws.perp_equity for ws in wallet_snaps)
     spot_usd_total = sum(ws.spot_usd for ws in wallet_snaps)
+    # R-PMCORE (2026-06-01): the HyperLend flywheel is CLOSED (fund migrated
+    # 100% into Portfolio Margin). Its on-chain cache is stale residual. When
+    # FLYWHEEL_DEPRECATED is on we drop HL collateral/debt from the equity
+    # aggregates so stale data neither inflates TOTAL EQUITY nor double-counts
+    # the HYPE (which now lives in spot and is counted there). The per-wallet
+    # snapshots still carry the (stale) HL figures for the CLOSED/legacy badge.
+    try:
+        from config import FLYWHEEL_DEPRECATED as _FLY_DEP_S
+    except Exception:  # noqa: BLE001
+        _FLY_DEP_S = True
+    if _FLY_DEP_S:
+        capital_total = max(0.0, capital_total - hl_collateral_total)
+        hl_collateral_total = 0.0
+        hl_debt_total = 0.0
     # R-DASHBOARD-SPOT-FIX: aggregate stable-spot bucket across all wallets.
     spot_stables_total = sum(ws.spot_stables_usd for ws in wallet_snaps)
     upnl_perp_total = sum(ws.upnl_perp for ws in wallet_snaps)
@@ -856,6 +894,10 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
                     "prev_label": ev["prev_label"],
                     "delta_prev_usd": ev["delta_prev_usd"],
                     "delta_prev_pct": ev["delta_prev_pct"],
+                    # R-PMCORE: per-vault max drawdown + auto-discovery flags.
+                    "mdd_pct": ev.get("mdd_pct", 0.0),
+                    "auto_discovered": getattr(d, "auto_discovered", False),
+                    "cost_basis_known": getattr(d, "cost_basis_known", True),
                 })
             # Persist today's equity AFTER reading evolution (prior-day delta).
             record_vault_snapshot(res.deposits)
@@ -868,6 +910,35 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
         log.warning("vault_deposits read failed in snapshot: %s", _e)
         vault_deposits_total = 0.0
         vault_deposits_detail = []
+
+    # ─── R-PMCORE: Portfolio Margin state for the primary account ──────────
+    pm_state = None
+    try:
+        from config import PM_PRIMARY_WALLET as _PMW
+        from modules.portfolio_margin import compute_pm_state
+        _oracle_simple = {}
+        try:
+            from modules.hl_prices import get_oracle_prices
+            _oracle_simple = get_oracle_prices() or {}
+        except Exception:  # noqa: BLE001
+            _oracle_simple = {}
+        _pmw = (_PMW or "").lower()
+        _primary = None
+        if isinstance(wallets, list):
+            for _w in wallets:
+                if isinstance(_w, dict) and _w.get("status") == "ok":
+                    _d = _w.get("data") or {}
+                    if (_d.get("wallet") or "").lower() == _pmw:
+                        _primary = _d
+                        break
+        if _primary is not None:
+            pm_state = compute_pm_state(
+                _primary.get("spot_balances") or [],
+                _primary.get("positions") or [],
+                _oracle_simple,
+            )
+    except Exception as _e:  # noqa: BLE001
+        log.warning("portfolio_snapshot: PM state compute failed: %s", _e)
 
     return PortfolioSnapshot(
         wallets=wallet_snaps,
@@ -891,4 +962,5 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
         pear_staked_total=pear_staked_total,
         vault_deposits_total=vault_deposits_total,
         vault_deposits_detail=vault_deposits_detail,
+        pm_state=pm_state,
     )

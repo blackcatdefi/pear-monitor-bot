@@ -1953,6 +1953,62 @@ async def _variational_alerts_job(application: Application) -> None:
             log.exception("variational alerts: eval failed for %s", w.ticker)
 
 
+_pm_alert_state: dict[str, str] = {"last_status": "CALM", "last_naked": "0"}
+
+
+async def _pm_monitor_job(application: Application) -> None:
+    """R-PMCORE — Portfolio Margin watchdog (edge-triggered, R-SILENT aware).
+
+    Under R-SILENT the bot is silent by default. This job BREAKS SILENCE only
+    when the PM margin ratio crosses WARN (0.40) — escalating language at
+    STRESS/LIQ — or when a naked-leveraged-long (debt drawn, no shorts) is
+    detected. Below WARN with no naked-long it stays silent. Edge-triggered:
+    one alert per status transition (no repeat spam while it stays elevated).
+    """
+    if os.getenv("PM_MONITOR_ENABLED", "true").strip().lower() == "false":
+        return
+    chat_id = TELEGRAM_CHAT_ID
+    if not chat_id:
+        return
+    try:
+        from config import PM_PRIMARY_WALLET
+        from modules.portfolio import fetch_all_wallets
+        from modules.portfolio_margin import compute_pm_state, pm_alert
+        from modules.hl_prices import get_oracle_prices
+
+        wallets = await fetch_all_wallets()
+        prices = get_oracle_prices()
+        pmw = (PM_PRIMARY_WALLET or "").lower()
+        primary = None
+        for w in wallets:
+            if isinstance(w, dict) and w.get("status") == "ok":
+                d = w.get("data") or {}
+                if (d.get("wallet") or "").lower() == pmw:
+                    primary = d
+                    break
+        if primary is None:
+            return
+        pm = compute_pm_state(
+            primary.get("spot_balances") or [],
+            primary.get("positions") or [],
+            prices,
+        )
+        should, msg = pm_alert(pm)
+        # Edge-trigger: only alert on a transition to a new elevated state.
+        prev_status = _pm_alert_state.get("last_status", "CALM")
+        prev_naked = _pm_alert_state.get("last_naked", "0")
+        cur_naked = "1" if pm.naked_long else "0"
+        changed = (pm.status != prev_status) or (cur_naked != prev_naked)
+        _pm_alert_state["last_status"] = pm.status
+        _pm_alert_state["last_naked"] = cur_naked
+        if should and changed:
+            await send_bot_message(application.bot, chat_id, msg)
+            log.info("PM alert fired: status=%s naked=%s ratio=%.3f",
+                     pm.status, cur_naked, pm.ratio)
+    except Exception:  # noqa: BLE001
+        log.exception("PM monitor job failed")
+
+
 async def _farmdump_block(w, m, current_funding: float, fraction: float) -> str:
     """Build the appended '5 CHECKS' block for a fired/queried reversion.
 
@@ -2053,6 +2109,80 @@ async def cmd_variationalcheck(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
     await send_long_message(update, header + "\n" + block, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_pm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PMCORE — Portfolio Margin state of the primary account.
+
+    Shows HYPE collateral value, debt drawn, borrow capacity (LTV 0.50),
+    margin ratio with WARN/STRESS/LIQ thresholds, and the naked-long hedge
+    guard. Read-only; the bot never trades.
+    """
+    from config import PM_PRIMARY_WALLET
+    from modules.portfolio import fetch_all_wallets
+    from modules.portfolio_margin import compute_pm_state, format_pm_state_telegram
+    from modules.hl_prices import get_oracle_prices
+
+    await update.message.reply_text("⏳ Leyendo Portfolio Margin...", reply_markup=MAIN_KEYBOARD)
+    try:
+        wallets = await fetch_all_wallets()
+        prices = get_oracle_prices()
+        pmw = (PM_PRIMARY_WALLET or "").lower()
+        primary = None
+        for w in wallets:
+            if isinstance(w, dict) and w.get("status") == "ok":
+                d = w.get("data") or {}
+                if (d.get("wallet") or "").lower() == pmw:
+                    primary = d
+                    break
+        if primary is None:
+            await update.message.reply_text(
+                "⚠️ No encontré la wallet primaria de Portfolio Margin.",
+                reply_markup=MAIN_KEYBOARD,
+            )
+            return
+        pm = compute_pm_state(
+            primary.get("spot_balances") or [],
+            primary.get("positions") or [],
+            prices,
+        )
+        block = format_pm_state_telegram(pm) or "⚠️ Sin datos de Portfolio Margin."
+        await send_long_message(update, block, reply_markup=MAIN_KEYBOARD)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("/pm failed")
+        await update.message.reply_text(
+            f"❌ Error leyendo Portfolio Margin: {str(exc)[:200]}",
+            reply_markup=MAIN_KEYBOARD,
+        )
+
+
+@authorized
+@with_error_logging
+async def cmd_vaults(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-PMCORE — per-vault breakdown + evolution, each vault tracked alone."""
+    from modules.vault_deposits import fetch_vault_deposits, format_vault_deposits_telegram
+    from modules.vault_history import format_vault_evolution_block
+
+    await update.message.reply_text("⏳ Leyendo vault deposits...", reply_markup=MAIN_KEYBOARD)
+    try:
+        result = await asyncio.to_thread(fetch_vault_deposits, True)
+        parts = [format_vault_deposits_telegram(result)]
+        try:
+            evo = format_vault_evolution_block(result)
+            if evo:
+                parts.append("")
+                parts.append(evo)
+        except Exception:  # noqa: BLE001
+            pass
+        text = "\n".join(p for p in parts if p) or "Sin vault deposits configurados/encontrados."
+        await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("/vaults failed")
+        await update.message.reply_text(
+            f"❌ Error leyendo vaults: {str(exc)[:200]}", reply_markup=MAIN_KEYBOARD
+        )
 
 
 # ─── Round 17 scheduler jobs ────────────────────────────────────────────────
@@ -2693,6 +2823,25 @@ async def post_init(application: Application) -> None:
         else:
             log.info("Variational reversion-alert scheduler DISABLED (VARIATIONAL_ALERTS_ENABLED=false)")
 
+        # R-PMCORE: Portfolio Margin watchdog — every 15 min. Edge-triggered,
+        # breaks R-SILENT only at WARN (ratio 0.40) / naked-long. Gated by
+        # PM_MONITOR_ENABLED.
+        if os.getenv("PM_MONITOR_ENABLED", "true").strip().lower() != "false":
+            scheduler.add_job(
+                _pm_monitor_job,
+                "interval",
+                minutes=int(os.getenv("PM_MONITOR_INTERVAL_MIN", "15")),
+                args=[application],
+                id="pm_monitor",
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now(timezone.utc) + timedelta(minutes=4),
+            )
+            log.info("PM monitor scheduler ENABLED (every %s min)",
+                     os.getenv("PM_MONITOR_INTERVAL_MIN", "15"))
+        else:
+            log.info("PM monitor scheduler DISABLED (PM_MONITOR_ENABLED=false)")
+
         # HOTFIX 2 (2026-04-27): proactive portfolio_snapshot refresh.
         # Keeps the dashboard cache warm so users never see an empty
         # screen waiting on a cold-start fetch. Disable via
@@ -3026,6 +3175,9 @@ HANDLER_MAP = {
     "variationalalerts": cmd_variationalalerts,
     # R-FARMDUMP — on-demand 5-check pre-trade filter
     "variationalcheck": cmd_variationalcheck,
+    # R-PMCORE — Portfolio Margin state + per-vault breakdown
+    "pm": cmd_pm,
+    "vaults": cmd_vaults,
     # R-INTEL30 Phase 1 — 11 new free intel sources
     "etfs": cmd_etfs,
     "macro": cmd_macro,

@@ -83,6 +83,18 @@ def render_dashboard_telegram(state: dict[str, Any]) -> str:
         log.exception("dashboard_telegram: capital_calc failed (non-fatal)")
         lines.append(f"Total: {_fmt_compact_usd(state.get('capital_total'))}")
 
+    # ── Portfolio Margin (R-PMCORE) ───────────────────────────────
+    try:
+        _pm = state.get("pm_state")
+        if _pm is not None and getattr(_pm, "collateral_usd", 0.0) > 0:
+            from modules.portfolio_margin import format_pm_state_telegram
+            _pm_block = format_pm_state_telegram(_pm)
+            if _pm_block:
+                lines.append("")
+                lines.append(_pm_block)
+    except Exception:  # noqa: BLE001
+        log.exception("dashboard_telegram: PM block failed (non-fatal)")
+
     # ── Main flywheel ─────────────────────────────────────────────
     lines.append("")
     lines.append("🔄 MAIN FLYWHEEL")

@@ -119,6 +119,10 @@ COMMANDS: List[BotCommand] = [
     BotCommand("variationalalerts", "Watch ticker → alerta cuando funding revierte a mitad del baseline", "trading", "cmd_variationalalerts"),
     BotCommand("variationalcheck", "Corre los 5 checks Farm the DUMP on-demand → veredicto GO/CAUTION/NO-GO", "trading", "cmd_variationalcheck"),
 
+    # ─── R-PMCORE — Portfolio Margin (post-migración HyperLend→PM) ───
+    BotCommand("pm", "Portfolio Margin: colateral HYPE / deuda / capacidad / margin ratio + naked-long guard", "trading", "cmd_pm"),
+    BotCommand("vaults", "Breakdown por vault (cada uno separado): equity, PnL, all-time, MDD, evolución", "trading", "cmd_vaults"),
+
     # ─── DEBUG / OBSERVABILITY ───
     BotCommand("debug_x", "X/Twitter connectivity diagnostic", "debug", "cmd_debug_x"),
     BotCommand("x_status", "X API status (R15+ live + counters + cache)", "debug", "cmd_x_status"),

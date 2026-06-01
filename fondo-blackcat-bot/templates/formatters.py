@@ -108,8 +108,72 @@ _STABLECOINS = frozenset({
 })
 
 
+def _price_lookup(prices: dict[str, Any] | None, coin: str) -> float | None:
+    """Resolve a USD price for ``coin`` from a flexible ``prices`` map.
+
+    Accepts either the oracle shape ``{COIN: 71.7}`` or the market shape
+    ``{COIN: {"price_usd": 71.7}}``. kHYPE → HYPE proxy. None if unknown.
+    """
+    if not prices:
+        return None
+    c = (coin or "").upper()
+    lookup = c[1:] if c.startswith("K") and len(c) > 1 else c
+    for key in (lookup, c):
+        v = prices.get(key)
+        if isinstance(v, dict):
+            v = v.get("price_usd") or v.get("usd")
+        try:
+            if v is not None:
+                f = float(v)
+                if f > 0:
+                    return f
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _build_price_map(market: dict[str, Any] | None = None) -> dict[str, float]:
+    """Build a robust ``{COIN: price_usd}`` map for spot valuation.
+
+    Primary source = HL oracle prices (keyless, always available). Secondary
+    = the CoinGecko-backed ``market`` map (fills coins HL doesn't list). The
+    oracle wins on conflict because it is what HL itself uses to value
+    Portfolio Margin collateral. NEVER raises — returns {} in the worst case.
+    """
+    out: dict[str, float] = {}
+    # Secondary first so oracle overwrites it.
+    try:
+        if isinstance(market, dict):
+            mprices = (market.get("data") or {}).get("prices") or market.get("prices") or {}
+            for k, v in (mprices or {}).items():
+                px = None
+                if isinstance(v, dict):
+                    px = v.get("price_usd") or v.get("usd")
+                else:
+                    px = v
+                try:
+                    if px is not None and float(px) > 0:
+                        out[str(k).upper()] = float(px)
+                except (TypeError, ValueError):
+                    continue
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from modules.hl_prices import get_oracle_prices
+        for k, v in (get_oracle_prices() or {}).items():
+            try:
+                if float(v) > 0:
+                    out[str(k).upper()] = float(v)
+            except (TypeError, ValueError):
+                continue
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 def _estimate_spot_split(spot_balances: list[dict[str, Any]],
-                          perp_account_value: float = 0.0) -> tuple[float, float]:
+                          perp_account_value: float = 0.0,
+                          prices: dict[str, Any] | None = None) -> tuple[float, float]:
     """Return ``(non_stable_usd, stables_usd)`` for a wallet's spot bag.
 
     R-DASHBOARD-SPOT-FIX: replaces the legacy ``_estimate_spot_usd`` that
@@ -124,42 +188,59 @@ def _estimate_spot_split(spot_balances: list[dict[str, Any]],
     top of perp accountValue. When idle, all stables fold into the cash
     bucket 1:1.
 
-    Non-stable tokens use entry_ntl (cost basis) as rough USD proxy — a
-    more accurate valuation requires the full price map and is done by
-    the snapshot aggregator in
-    ``modules.portfolio_snapshot._spot_split_value``.
+    R-PMCORE (2026-06-01) — CRITICAL POST-MIGRATION FIX:
+    Non-stable tokens are now valued at ``amount × live_price`` first
+    (``prices`` = HL oracle map, with CoinGecko as secondary). The old
+    behaviour fell back to ``entry_ntl`` (cost basis) ONLY — but for the
+    fund's migrated HYPE balance ``entryNtl`` is **0.0** from HyperCore, so
+    ~$75K of HYPE collateral was valued at **$0** and TOTAL EQUITY read
+    ~$13K instead of Rabby's ~$94K. ``entry_ntl`` is now a last-resort
+    proxy used only when no live price is available for the coin.
     """
     has_active_perp = perp_account_value > 0.01
     non_stable = 0.0
     stables = 0.0
     for sb in spot_balances:
         coin = (sb.get("coin") or "").upper()
-        amount = sb.get("total", 0) or 0
+        try:
+            amt = float(sb.get("total", 0) or 0)
+        except (TypeError, ValueError):
+            amt = 0.0
         # ALL stablecoins are part of Unified Account margin when perp
         # is active. Skip them entirely. When idle, fold into cash bucket.
         if coin in _STABLECOINS:
             if has_active_perp:
                 continue
-            stables += amount
+            stables += amt
             continue
-        # Non-stable: entry_ntl (cost basis) as rough USD estimate.
+        # Non-stable: value at LIVE price first (HYPE oracle), cost basis last.
+        px = _price_lookup(prices, coin)
+        if px and amt:
+            non_stable += amt * px
+            continue
         entry_ntl = sb.get("entry_ntl", 0) or 0
+        try:
+            entry_ntl = float(entry_ntl)
+        except (TypeError, ValueError):
+            entry_ntl = 0.0
         if entry_ntl > 0:
             non_stable += entry_ntl
     return non_stable, stables
 
 
 def _estimate_spot_usd(spot_balances: list[dict[str, Any]],
-                       perp_account_value: float = 0.0) -> float:
+                       perp_account_value: float = 0.0,
+                       prices: dict[str, Any] | None = None) -> float:
     """Backward-compatible wrapper — returns NON-STABLE only.
 
     Pre-R-DASHBOARD-SPOT-FIX this returned non-stable + stablecoins
     lumped together, which inflated the "Spot non-USDC" line in
     /reporte and the dashboard. After the fix it returns ONLY the real
-    market exposure half. Use ``_estimate_spot_split`` directly when
-    you also need the stables bucket for display.
+    market exposure half. R-PMCORE: forwards ``prices`` so non-stable
+    (HYPE) is valued at live oracle price, not cost basis.
+    Use ``_estimate_spot_split`` directly when you also need the stables.
     """
-    non_stable, _stables = _estimate_spot_split(spot_balances, perp_account_value)
+    non_stable, _stables = _estimate_spot_split(spot_balances, perp_account_value, prices)
     return non_stable
 
 
@@ -205,6 +286,15 @@ def _flywheel_hf_for_header(hyperlend: list[dict[str, Any]] | dict[str, Any]) ->
     the highest-collateral OK entry; falls back to last_known cache for
     UNKNOWN; returns "—" if nothing is usable.
     """
+    # R-PMCORE (2026-06-01): the HyperLend flywheel is CLOSED — the fund
+    # migrated 100% into Portfolio Margin. When deprecated, never surface a
+    # stale flywheel HF as if live; the header line reads CLOSED.
+    try:
+        from config import FLYWHEEL_DEPRECATED as _FLY_DEP_HF
+    except Exception:  # noqa: BLE001
+        _FLY_DEP_HF = True
+    if _FLY_DEP_HF:
+        return "CERRADO", "flywheel migrado a Portfolio Margin"
     hl_list = hyperlend if isinstance(hyperlend, list) else [hyperlend] if hyperlend else []
     best_ok: dict[str, Any] | None = None
     best_ok_coll: float = -1.0
@@ -378,9 +468,18 @@ def format_report_header(
                     hl_debt += float(hd.get("total_debt_usd") or 0.0)
                 except (TypeError, ValueError):
                     pass
+        # R-PMCORE: flywheel HyperLend deprecado → no contar HL stale en equity.
+        try:
+            from config import FLYWHEEL_DEPRECATED as _FLY_DEP_H
+        except Exception:  # noqa: BLE001
+            _FLY_DEP_H = True
+        if _FLY_DEP_H:
+            hl_coll = 0.0
+            hl_debt = 0.0
         perp_total = 0.0
         spot_non_stable = 0.0
         spot_stables = 0.0
+        _price_map = _build_price_map(market)
         for w in wallets:
             if not isinstance(w, dict) or w.get("status") != "ok":
                 continue
@@ -391,7 +490,9 @@ def format_report_header(
                 pe = 0.0
             perp_total += pe
             try:
-                ns, st = _estimate_spot_split(d.get("spot_balances") or [], pe)
+                ns, st = _estimate_spot_split(
+                    d.get("spot_balances") or [], pe, _price_map
+                )
                 spot_non_stable += float(ns)
                 spot_stables += float(st)
             except Exception:  # noqa: BLE001
@@ -491,10 +592,23 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                 except (TypeError, ValueError):
                     pass
 
+        # R-PMCORE (2026-06-01): flywheel HyperLend deprecado — su
+        # colateral/deuda stale NO debe contar en TOTAL EQUITY (el HYPE real
+        # vive en spot y se cuenta abajo). Cuando FLYWHEEL_DEPRECATED=true se
+        # zeroean las contribuciones HL para evitar inflar/doble-contar.
+        try:
+            from config import FLYWHEEL_DEPRECATED as _FLY_DEP
+        except Exception:  # noqa: BLE001
+            _FLY_DEP = True
+        if _FLY_DEP:
+            _hl_coll_total = 0.0
+            _hl_debt_total = 0.0
+
         _perp_total = 0.0
         _spot_non_stable_total = 0.0
         _spot_stables_total = 0.0
         _upnl_total = 0.0
+        _price_map_qp = _build_price_map(market)
         for _w in wallets:
             if not isinstance(_w, dict) or _w.get("status") != "ok":
                 continue
@@ -508,7 +622,10 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                 # R-DASHBOARD-SPOT-FIX: split into non-stable vs stables
                 # so the banner labels exposure accurately and surfaces
                 # stable cash equivalents separately.
-                _ns, _st = _estimate_spot_split(_d.get("spot_balances") or [], _pe)
+                # R-PMCORE: value non-stable (HYPE) at LIVE oracle price.
+                _ns, _st = _estimate_spot_split(
+                    _d.get("spot_balances") or [], _pe, _price_map_qp
+                )
                 _spot_non_stable_total += float(_ns)
                 _spot_stables_total += float(_st)
             except Exception:  # noqa: BLE001
@@ -556,6 +673,37 @@ def format_quick_positions(wallets: list[dict[str, Any]],
             "vault_deposits_total": _vault_dep_total,
         })
         lines.append(format_net_capital_telegram(_net))
+        # R-PMCORE (2026-06-01): Portfolio Margin state of the primary account
+        # (HYPE collateral / debt / borrow capacity / margin ratio + naked-long
+        # guard). The HYPE spot value is the bulk of TOTAL EQUITY now, so the
+        # PM block sits right under the capital banner. Best-effort; the report
+        # never breaks if PM can't be computed.
+        try:
+            from config import PM_PRIMARY_WALLET as _PMW
+            from modules.portfolio_margin import (
+                compute_pm_state,
+                format_pm_state_telegram,
+            )
+            _pmw = (_PMW or "").lower()
+            _primary = None
+            for _w in wallets:
+                if isinstance(_w, dict) and _w.get("status") == "ok":
+                    _wd = _w.get("data") or {}
+                    if (_wd.get("wallet") or "").lower() == _pmw:
+                        _primary = _wd
+                        break
+            if _primary is not None:
+                _pm = compute_pm_state(
+                    _primary.get("spot_balances") or [],
+                    _primary.get("positions") or [],
+                    _price_map_qp,
+                )
+                _pm_block = format_pm_state_telegram(_pm)
+                if _pm_block:
+                    lines.append("")
+                    lines.append(_pm_block)
+        except Exception:  # noqa: BLE001
+            pass
         # R-VAULTDEP detail block (label, current equity, PnL vs cost basis,
         # lockup). Only rendered when there's something to show; "n/a" on
         # read failure — never crashes the report.
@@ -584,14 +732,20 @@ def format_quick_positions(wallets: list[dict[str, Any]],
         pass
 
     # ── Build HyperLend collateral map: wallet_addr (lower) → data ──
+    # R-PMCORE: flywheel deprecado → no contar colateral/deuda HL stale en el
+    # capital por-wallet (el HYPE real vive en spot y se cuenta ahí).
+    try:
+        from config import FLYWHEEL_DEPRECATED as _FLY_DEP_W
+    except Exception:  # noqa: BLE001
+        _FLY_DEP_W = True
     hl_list = hyperlend if isinstance(hyperlend, list) else [hyperlend]
     hl_by_wallet: dict[str, dict[str, float]] = {}
     for hl in hl_list:
         if hl.get("status") == "ok":
             h = hl["data"]
             addr = (h.get("wallet") or "").lower()
-            coll = h.get("total_collateral_usd", 0.0) or 0.0
-            debt = h.get("total_debt_usd", 0.0) or 0.0
+            coll = (h.get("total_collateral_usd", 0.0) or 0.0) if not _FLY_DEP_W else 0.0
+            debt = (h.get("total_debt_usd", 0.0) or 0.0) if not _FLY_DEP_W else 0.0
             if addr:
                 hl_by_wallet[addr] = {
                     "collateral_usd": coll,
@@ -600,13 +754,16 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                 }
 
     # ── Compute total capital per wallet (perp + spot + HyperLend collateral) ──
+    # R-PMCORE: value non-stable spot (HYPE) at live oracle price so the
+    # per-wallet "Capital Total" matches the banner (was $0 via cost basis).
+    _price_map_pw = _build_price_map(market)
     for w in wallets:
         if w.get("status") != "ok":
             continue
         d = w["data"]
         wallet_addr = (d.get("wallet") or "").lower()
         perp_eq = d.get("account_value") or 0.0
-        spot_usd = _estimate_spot_usd(d.get("spot_balances") or [], perp_eq)
+        spot_usd = _estimate_spot_usd(d.get("spot_balances") or [], perp_eq, _price_map_pw)
         hl_data = hl_by_wallet.get(wallet_addr, {})
         hl_coll = hl_data.get("collateral_usd", 0.0)
         hl_debt = hl_data.get("debt_usd", 0.0)

@@ -42,14 +42,28 @@ from datetime import datetime, timezone
 from typing import Any
 
 try:
-    from config import BLACKCAT_VAULT_DEPOSITS, HYPERLIQUID_API
+    from config import (
+        BLACKCAT_VAULT_DEPOSITS,
+        HYPERLIQUID_API,
+        VAULT_AUTODISCOVER,
+        VAULT_DUST_USD,
+        PM_PRIMARY_WALLET,
+        FUND_WALLETS,
+    )
 except Exception:  # noqa: BLE001 — keep importable in isolated tests
     BLACKCAT_VAULT_DEPOSITS = []
     HYPERLIQUID_API = "https://api.hyperliquid.xyz"
+    VAULT_AUTODISCOVER = True
+    VAULT_DUST_USD = 1.0
+    PM_PRIMARY_WALLET = "0xc7ae23316b47f7e75f455f53ad37873a18351505"
+    FUND_WALLETS = {}
 
 log = logging.getLogger(__name__)
 
 _INFO_URL = f"{HYPERLIQUID_API}/info"
+# Vault name cache: {vault_address_lower: name}. Resolved lazily via
+# vaultDetails (keyless), cached for the process lifetime.
+_name_cache: dict[str, str] = {}
 # Browser UA — some HL edge nodes 1010 a bare urllib UA (CF challenge).
 _UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -64,7 +78,7 @@ _cache: dict[str, Any] = {"ts": 0.0, "result": None}
 
 @dataclass(frozen=True)
 class VaultDeposit:
-    """One configured deposit and its live valuation."""
+    """One deposit (configured or auto-discovered) and its live valuation."""
 
     label: str
     vault_address: str
@@ -74,6 +88,12 @@ class VaultDeposit:
     pnl_usd: float
     locked_until_ts: int  # epoch ms (0 = unknown / unlocked)
     found: bool  # True iff the depositor actually holds equity in this vault
+    # R-PMCORE (2026-06-01): auto-discovered vaults have no configured cost
+    # basis. cost_basis_known=False → PnL vs cost is suppressed and the
+    # all-time return is computed from the FIRST recorded snapshot instead
+    # (see modules.vault_history). auto_discovered tags how we found it.
+    cost_basis_known: bool = True
+    auto_discovered: bool = False
 
 
 @dataclass(frozen=True)
@@ -117,6 +137,58 @@ def _safe_float(v: Any) -> float:
         return 0.0
 
 
+def _short_addr(a: str) -> str:
+    a = a or ""
+    return (a[:6] + "…" + a[-4:]) if len(a) >= 12 else (a or "?")
+
+
+def _resolve_vault_name(vault_address: str) -> str:
+    """Best-effort human name for a vault via ``vaultDetails`` (keyless).
+
+    Cached for the process lifetime. NEVER raises — falls back to the short
+    address on any failure. Separated out so tests can monkeypatch it.
+    """
+    va = (vault_address or "").lower()
+    if not va:
+        return "?"
+    if va in _name_cache:
+        return _name_cache[va]
+    name = _short_addr(va)
+    try:
+        body = json.dumps({"type": "vaultDetails", "vaultAddress": va}).encode()
+        req = urllib.request.Request(
+            _INFO_URL, data=body, method="POST",
+            headers={"Content-Type": "application/json", "User-Agent": _UA},
+        )
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_SEC) as r:
+            d = json.load(r)
+        nm = (d or {}).get("name") if isinstance(d, dict) else None
+        if nm:
+            # Strip decorative junk some vaults use (brackets, infinity emoji).
+            name = str(nm).replace("[", "").replace("]", "").replace("♾️", "").strip() or _short_addr(va)
+    except Exception as e:  # noqa: BLE001 — best-effort
+        log.debug("vault name resolve failed for %s: %s", va, e)
+    _name_cache[va] = name
+    return name
+
+
+def _fund_depositor_wallets() -> set[str]:
+    """Wallets to auto-scan for vault deposits: PM primary + all fund wallets."""
+    out: set[str] = set()
+    try:
+        if PM_PRIMARY_WALLET:
+            out.add(PM_PRIMARY_WALLET.lower())
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        for w in (FUND_WALLETS or {}):
+            if w:
+                out.add(str(w).lower())
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 def _safe_int(v: Any) -> int:
     try:
         return int(v or 0)
@@ -139,14 +211,20 @@ def fetch_vault_deposits(force: bool = False) -> VaultDepositsResult:
         return _cache["result"]  # type: ignore[return-value]
 
     entries = list(BLACKCAT_VAULT_DEPOSITS or [])
-    if not entries:
+    # R-PMCORE (2026-06-01): even with zero configured entries we still
+    # auto-discover every vault the fund's wallets are in. With autodiscover
+    # off AND no config, there's nothing to do.
+    if not entries and not VAULT_AUTODISCOVER:
         result = VaultDepositsResult(ok=True, total_usd=0.0, deposits=[])
         _cache.update(ts=now, result=result)
         return result
 
-    # Query each unique depositor once → {depositor_lower: {vault_lower: row}}
+    # Depositors to query: configured depositors UNION (if autodiscover on)
+    # the fund's own wallets. Query each unique depositor once.
     depositors = {str(e.get("depositor_address", "")).lower() for e in entries}
     depositors.discard("")
+    if VAULT_AUTODISCOVER:
+        depositors |= _fund_depositor_wallets()
     equities_by_depositor: dict[str, dict[str, dict]] = {}
     queries_ok = 0
     last_err: str | None = None
@@ -168,11 +246,14 @@ def fetch_vault_deposits(force: bool = False) -> VaultDepositsResult:
 
     deposits: list[VaultDeposit] = []
     total = 0.0
+    seen: set[tuple[str, str]] = set()
+    # ── 1. Configured deposits first (keep their labels + cost basis) ──
     for e in entries:
         va = str(e.get("vault_address", "")).lower()
         dep = str(e.get("depositor_address", "")).lower()
         label = str(e.get("label") or "Vault deposit")
         cost_basis = _safe_float(e.get("cost_basis"))
+        seen.add((dep, va))
         row = equities_by_depositor.get(dep, {}).get(va)
         if row is not None:
             equity = _safe_float(row.get("equity"))
@@ -187,6 +268,8 @@ def fetch_vault_deposits(force: bool = False) -> VaultDepositsResult:
                     pnl_usd=equity - cost_basis,
                     locked_until_ts=locked,
                     found=True,
+                    cost_basis_known=cost_basis > 0,
+                    auto_discovered=False,
                 )
             )
             total += equity
@@ -202,8 +285,37 @@ def fetch_vault_deposits(force: bool = False) -> VaultDepositsResult:
                     pnl_usd=0.0,
                     locked_until_ts=0,
                     found=False,
+                    cost_basis_known=cost_basis > 0,
+                    auto_discovered=False,
                 )
             )
+
+    # ── 2. Auto-discovered deposits (every vault the fund holds, > dust) ──
+    if VAULT_AUTODISCOVER:
+        for dep, by_vault in equities_by_depositor.items():
+            for va, row in by_vault.items():
+                if (dep, va) in seen:
+                    continue
+                seen.add((dep, va))
+                equity = _safe_float(row.get("equity"))
+                if equity <= VAULT_DUST_USD:
+                    continue  # dust / closed — skip
+                locked = _safe_int(row.get("lockedUntilTimestamp"))
+                deposits.append(
+                    VaultDeposit(
+                        label=_resolve_vault_name(va),
+                        vault_address=va,
+                        depositor_address=dep,
+                        cost_basis_usd=0.0,
+                        equity_usd=equity,
+                        pnl_usd=0.0,  # unknown basis → PnL deferred to history
+                        locked_until_ts=locked,
+                        found=True,
+                        cost_basis_known=False,
+                        auto_discovered=True,
+                    )
+                )
+                total += equity
 
     # ok=False only when we have entries but EVERY depositor query failed.
     ok = queries_ok > 0
@@ -273,20 +385,39 @@ def format_vault_deposits_telegram(
     if not result.deposits:
         return ""  # nothing configured → render nothing
 
+    # Show found deposits (each vault on its OWN line — never aggregated).
+    shown = [d for d in result.deposits if d.found or not getattr(d, "auto_discovered", False)]
+    if not any(d.found for d in result.deposits):
+        # nothing actually held — keep report clean unless a configured
+        # vault explicitly wasn't found (surfaced below).
+        if not result.deposits:
+            return ""
     lines: list[str] = []
     lines.append(
         "🏦 VAULT DEPOSITS (capital DENTRO de protocolo HL — "
-        "separado de balances de wallet)"
+        "cada vault por separado, fuera de los balances de wallet)"
     )
-    n = len(result.deposits)
-    for i, d in enumerate(result.deposits):
+    n = len(shown)
+    grand = 0.0
+    for i, d in enumerate(shown):
         tee = "└─" if i == n - 1 else "├─"
         if not d.found:
             lines.append(f"{tee} {d.label}: n/a (depositante no encontrado)")
             continue
-        pnl_txt = f"PnL {_fmt_signed_exact(d.pnl_usd)} vs {_fmt_usd_exact(d.cost_basis_usd)}"
+        grand += d.equity_usd
+        if getattr(d, "cost_basis_known", True) and d.cost_basis_usd > 0:
+            pnl_txt = (
+                f"PnL {_fmt_signed_exact(d.pnl_usd)} vs "
+                f"{_fmt_usd_exact(d.cost_basis_usd)}"
+            )
+        else:
+            # Auto-discovered: no configured cost basis → show equity only,
+            # evolution/PnL comes from the SQLite history baseline.
+            pnl_txt = "costo no configurado"
         lines.append(
             f"{tee} {d.label}: {_fmt_usd_exact(d.equity_usd)}  "
             f"({pnl_txt}{_fmt_lockup(d.locked_until_ts)})"
         )
+    if sum(1 for d in shown if d.found) > 1:
+        lines.append(f"   Σ vaults: {_fmt_usd_exact(grand)}")
     return "\n".join(lines)

@@ -536,7 +536,24 @@ def _build_degraded_report(
                 lines.append(f"  \u2022 {label}: Equity ${eq:,.0f} | UPnL ${upnl:,.0f}")
         lines.append("")
 
-    if hyperlend and isinstance(hyperlend, list):
+    # R-PMCORE (2026-06-01): el flywheel HyperLend está CERRADO — el fondo
+    # migró 100% a HyperLiquid Portfolio Margin. Avisar al LLM para que NO
+    # razone sobre colateral/HF/deuda stale como posición viva.
+    try:
+        from config import FLYWHEEL_DEPRECATED as _FLY_DEP_AN
+    except Exception:  # noqa: BLE001
+        _FLY_DEP_AN = True
+    if _FLY_DEP_AN:
+        lines.append("HYPERLEND: CERRADO (flywheel migrado a Portfolio Margin).")
+        lines.append(
+            "  El core del fondo ahora es HYPE spot como colateral cross en "
+            "Portfolio Margin (cuenta primaria 0xc7ae). Cualquier "
+            "colateral/HF/deuda de HyperLend es CACHE STALE de wallets "
+            "cerradas — NO contar como posición viva ni en equity."
+        )
+        lines.append("")
+
+    if hyperlend and isinstance(hyperlend, list) and not _FLY_DEP_AN:
         # R-HF-RENDER (3 may 2026): respect hf_status from cache-aware
         # reader so the LLM context never sees raw "HF nan" / "HF inf"
         # — render the same UNKNOWN fallback the user-facing /reporte uses.
