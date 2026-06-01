@@ -123,6 +123,9 @@ COMMANDS: List[BotCommand] = [
     BotCommand("pm", "Portfolio Margin: colateral HYPE / deuda / capacidad / margin ratio + naked-long guard", "trading", "cmd_pm"),
     BotCommand("vaults", "Breakdown por vault (cada uno separado): equity, PnL, all-time, MDD, evolución", "trading", "cmd_vaults"),
 
+    # ─── R-UNLOCK — basket-entry-unlock regime monitor ───
+    BotCommand("unlockcheck", "Estado A/B/C de desbloqueo de canasta (BTC stab + re-correlación alts + breadth) → re-screen 5/5 manual", "trading", "cmd_unlockcheck"),
+
     # ─── DEBUG / OBSERVABILITY ───
     BotCommand("debug_x", "X/Twitter connectivity diagnostic", "debug", "cmd_debug_x"),
     BotCommand("x_status", "X API status (R15+ live + counters + cache)", "debug", "cmd_x_status"),

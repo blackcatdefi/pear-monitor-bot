@@ -2185,6 +2185,90 @@ async def cmd_vaults(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
 
 
+@authorized
+@with_error_logging
+async def cmd_unlockcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-UNLOCK — current A/B/C state of the basket-entry-unlock monitor.
+
+    Computes BTC stabilization (A), alt re-correlation vs BTC (B, the 5/5-unlock
+    signal), and regime breadth (C) on demand, with a per-watchlist breakdown.
+    Read-only and recommendation-only — the bot never selects tokens, sizes, or
+    trades. Cointegration figures are a labelled rolling-correlation PROXY.
+    """
+    from modules import unlock_monitor as _ul
+
+    await update.message.reply_text(
+        "⏳ Calculando estado de desbloqueo (A/B/C)…", reply_markup=MAIN_KEYBOARD
+    )
+    try:
+        snap = await _ul.compute_snapshot()
+        text = _ul.format_unlockcheck(snap)
+        await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("/unlockcheck failed")
+        await update.message.reply_text(
+            f"❌ Error calculando R-UNLOCK: {str(exc)[:200]}",
+            reply_markup=MAIN_KEYBOARD,
+        )
+
+
+async def _unlock_monitor_job(application: Application) -> None:
+    """R-UNLOCK — basket-unlock watchdog (edge-triggered, R-SILENT aware).
+
+    Every ~30 min: recompute the A/B/C state and fire ONE alert when the level
+    ESCALATES (NONE→WATCH→APPROACHING→UNLOCK). Never spams the same level; a
+    retreat resets the stored level silently so the next genuine flip can fire.
+
+    R-SILENT: while silent mode is on, only levels >= the configured
+    break-silence threshold (default UNLOCK) are emitted; softer transitions
+    advance the stored state silently. Fully wrapped — never crashes the
+    scheduler.
+    """
+    if os.getenv("UNLOCK_MONITOR_ENABLED", "true").strip().lower() == "false":
+        return
+    chat_id = TELEGRAM_CHAT_ID
+    if not chat_id:
+        return
+    try:
+        from modules import unlock_monitor as _ul
+
+        prev = _ul.load_state().get("level", _ul.NONE)
+        snap = await _ul.compute_snapshot()
+        new_level = snap.level
+        fire = _ul.should_fire(new_level, prev)
+
+        if fire:
+            # R-SILENT gate: soft levels stay silent while silent mode is on.
+            silent = False
+            try:
+                from auto.silent_mode import is_silent
+                silent = is_silent()
+            except Exception:  # noqa: BLE001
+                silent = False
+            rank = _ul._LEVEL_RANK
+            min_break = _ul.alert_breaks_silence_level()
+            allowed = (not silent) or (rank.get(new_level, 0) >= rank.get(min_break, 3))
+            if allowed:
+                msg = _ul.format_alert(snap, prev)
+                await send_bot_message(application.bot, chat_id, msg)
+                log.info("R-UNLOCK alert fired: %s → %s (triggered=%d)",
+                         prev, new_level, snap.n_triggered)
+            else:
+                log.info("R-UNLOCK %s suppressed by silent mode (min_break=%s)",
+                         new_level, min_break)
+
+        # Persist the level transition (escalation OR silent retreat) without
+        # disturbing the rolling series already saved by compute_snapshot().
+        try:
+            cur = _ul.load_state()
+            _ul.save_state(new_level, cur.get("btc_z_deep", False),
+                           cur.get("vol_series", []), cur.get("btcd_series", []))
+        except Exception:  # noqa: BLE001
+            log.exception("R-UNLOCK: level persist failed")
+    except Exception:  # noqa: BLE001
+        log.exception("R-UNLOCK monitor job failed")
+
+
 # ─── Round 17 scheduler jobs ────────────────────────────────────────────────
 
 
@@ -2842,6 +2926,26 @@ async def post_init(application: Application) -> None:
         else:
             log.info("PM monitor scheduler DISABLED (PM_MONITOR_ENABLED=false)")
 
+        # R-UNLOCK: basket-entry-unlock watchdog — every 30 min. Edge-triggered
+        # (only on escalation NONE→WATCH→APPROACHING→UNLOCK), R-SILENT aware
+        # (soft levels stay silent while silent mode is on; UNLOCK breaks it).
+        # Gated by UNLOCK_MONITOR_ENABLED.
+        if os.getenv("UNLOCK_MONITOR_ENABLED", "true").strip().lower() != "false":
+            scheduler.add_job(
+                _unlock_monitor_job,
+                "interval",
+                minutes=int(os.getenv("UNLOCK_MONITOR_INTERVAL_MIN", "30")),
+                args=[application],
+                id="unlock_monitor",
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now(timezone.utc) + timedelta(minutes=5),
+            )
+            log.info("R-UNLOCK monitor scheduler ENABLED (every %s min)",
+                     os.getenv("UNLOCK_MONITOR_INTERVAL_MIN", "30"))
+        else:
+            log.info("R-UNLOCK monitor scheduler DISABLED (UNLOCK_MONITOR_ENABLED=false)")
+
         # HOTFIX 2 (2026-04-27): proactive portfolio_snapshot refresh.
         # Keeps the dashboard cache warm so users never see an empty
         # screen waiting on a cold-start fetch. Disable via
@@ -3178,6 +3282,8 @@ HANDLER_MAP = {
     # R-PMCORE — Portfolio Margin state + per-vault breakdown
     "pm": cmd_pm,
     "vaults": cmd_vaults,
+    # R-UNLOCK — basket-entry-unlock regime monitor (on-demand state)
+    "unlockcheck": cmd_unlockcheck,
     # R-INTEL30 Phase 1 — 11 new free intel sources
     "etfs": cmd_etfs,
     "macro": cmd_macro,
