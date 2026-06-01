@@ -33,6 +33,7 @@ try:
         PM_HYPE_LTV,
         PM_WARN_RATIO,
         PM_STRESS_RATIO,
+        PM_CRITICAL_RATIO,
         PM_LIQ_RATIO,
         PM_COLLATERAL_ASSETS,
     )
@@ -40,6 +41,7 @@ except Exception:  # noqa: BLE001 — importable in isolated tests
     PM_HYPE_LTV = 0.50
     PM_WARN_RATIO = 0.40
     PM_STRESS_RATIO = 0.70
+    PM_CRITICAL_RATIO = 0.85
     PM_LIQ_RATIO = 0.95
     PM_COLLATERAL_ASSETS = ["HYPE"]
 
@@ -179,11 +181,30 @@ def _fmt_usd(v: float) -> str:
 _STATUS_EMOJI = {"CALM": "🟢", "WARN": "🟡", "STRESS": "🟠", "LIQ": "🔴"}
 
 
+def _display_band(ratio: float) -> tuple[str, str]:
+    """R-PMALERT 4-level DISPLAY label for the ratio line: CALM/WARN/STRESS/
+    LIQ-RISK with the 0.85 pre-liq tier mapped to 🔴. This is the rendering
+    label only; ``PMState.status`` (the R-PMCORE classifier) is unchanged and
+    still flips to LIQ at 0.95. NEVER raises.
+    """
+    try:
+        r = float(ratio)
+    except (TypeError, ValueError):
+        return "🟢", "CALM"
+    if r >= PM_CRITICAL_RATIO:
+        return "🔴", "LIQ-RISK"
+    if r >= PM_STRESS_RATIO:
+        return "🟠", "STRESS"
+    if r >= PM_WARN_RATIO:
+        return "🟡", "WARN"
+    return "🟢", "CALM"
+
+
 def format_pm_state_telegram(pm: PMState) -> str:
     """Telegram block for the Portfolio Margin state. NEVER raises."""
     if pm is None or not pm.has_data or pm.collateral_usd <= 0:
         return ""
-    emoji = _STATUS_EMOJI.get(pm.status, "🟢")
+    emoji, band_label = _display_band(pm.ratio)
     lines = ["⚖️ PORTFOLIO MARGIN (cuenta primaria — HYPE como colateral cross)"]
     hype_line = f"├─ Colateral: {_fmt_usd(pm.collateral_usd)}"
     if pm.hype_qty > 0 and pm.hype_px > 0:
@@ -195,9 +216,9 @@ def format_pm_state_telegram(pm: PMState) -> str:
         f"  | disponible: {_fmt_usd(pm.available_usd)}"
     )
     lines.append(
-        f"├─ Margin ratio: {pm.ratio * 100:.1f}%  {emoji} {pm.status}  "
+        f"├─ Margin ratio: {pm.ratio * 100:.1f}%  {emoji} {band_label}  "
         f"(WARN {PM_WARN_RATIO*100:.0f}% · STRESS {PM_STRESS_RATIO*100:.0f}% · "
-        f"LIQ {PM_LIQ_RATIO*100:.0f}%)"
+        f"CRÍTICO {PM_CRITICAL_RATIO*100:.0f}% · LIQ {PM_LIQ_RATIO*100:.0f}%)"
     )
     if pm.shorts_notional > 0:
         lines.append(

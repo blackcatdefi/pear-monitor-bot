@@ -1953,17 +1953,21 @@ async def _variational_alerts_job(application: Application) -> None:
             log.exception("variational alerts: eval failed for %s", w.ticker)
 
 
-_pm_alert_state: dict[str, str] = {"last_status": "CALM", "last_naked": "0"}
-
-
 async def _pm_monitor_job(application: Application) -> None:
-    """R-PMCORE — Portfolio Margin watchdog (edge-triggered, R-SILENT aware).
+    """R-PMCORE + R-PMALERT — Portfolio Margin watchdog (edge-triggered, SQLite,
+    R-SILENT aware).
 
-    Under R-SILENT the bot is silent by default. This job BREAKS SILENCE only
-    when the PM margin ratio crosses WARN (0.40) — escalating language at
-    STRESS/LIQ — or when a naked-leveraged-long (debt drawn, no shorts) is
-    detected. Below WARN with no naked-long it stays silent. Edge-triggered:
-    one alert per status transition (no repeat spam while it stays elevated).
+    Recompute the primary-account PM state each tick (~15 min) and fire ONE
+    alert when the borrow-capacity utilisation ratio CROSSES UP into a higher
+    band: 🟢 CALM <0.40 · 🟡 WARN >=0.40 · 🟠 STRESS >=0.70 · 🔴 LIQ-RISK >=0.85
+    (0.95 = liquidation). The same band never re-alerts; a retreat resets the
+    SQLite state silently so the next genuine cross re-fires. The naked-long
+    guard (debt drawn, no shorts) fires on its own edge regardless of band.
+
+    R-SILENT: only LIQ-RISK (CRITICAL) and the naked-long alert break silence
+    unconditionally; WARN/STRESS are suppressed while silent mode is on (state
+    still advances silently). This is the SINGLE PM monitor — R-PMALERT extends
+    it, it does not add a competing job. Fully wrapped — never crashes.
     """
     if os.getenv("PM_MONITOR_ENABLED", "true").strip().lower() == "false":
         return
@@ -1973,7 +1977,8 @@ async def _pm_monitor_job(application: Application) -> None:
     try:
         from config import PM_PRIMARY_WALLET
         from modules.portfolio import fetch_all_wallets
-        from modules.portfolio_margin import compute_pm_state, pm_alert
+        from modules.portfolio_margin import compute_pm_state
+        from modules import pm_alert_monitor as _pma
         from modules.hl_prices import get_oracle_prices
 
         wallets = await fetch_all_wallets()
@@ -1993,18 +1998,27 @@ async def _pm_monitor_job(application: Application) -> None:
             primary.get("positions") or [],
             prices,
         )
-        should, msg = pm_alert(pm)
-        # Edge-trigger: only alert on a transition to a new elevated state.
-        prev_status = _pm_alert_state.get("last_status", "CALM")
-        prev_naked = _pm_alert_state.get("last_naked", "0")
-        cur_naked = "1" if pm.naked_long else "0"
-        changed = (pm.status != prev_status) or (cur_naked != prev_naked)
-        _pm_alert_state["last_status"] = pm.status
-        _pm_alert_state["last_naked"] = cur_naked
-        if should and changed:
-            await send_bot_message(application.bot, chat_id, msg)
-            log.info("PM alert fired: status=%s naked=%s ratio=%.3f",
-                     pm.status, cur_naked, pm.ratio)
+        # R-PMALERT: edge-trigger via SQLite. evaluate() persists the new state
+        # (so a retreat resets silently) and returns the rendered alert.
+        decision = _pma.evaluate(pm)
+        if decision.should_alert:
+            # R-SILENT gate: WARN/STRESS stay silent while silent mode is on;
+            # CRITICAL (LIQ-RISK) and naked-long break silence unconditionally.
+            silent = False
+            try:
+                from auto.silent_mode import is_silent
+                silent = is_silent()
+            except Exception:  # noqa: BLE001
+                silent = False
+            allowed = (not silent) or decision.breaks_silence
+            if allowed:
+                await send_bot_message(application.bot, chat_id, decision.message)
+                log.info("PM alert fired: reason=%s level=%s naked=%s ratio=%.3f",
+                         decision.reason, decision.level, decision.naked_long,
+                         pm.ratio)
+            else:
+                log.info("PM alert %s suppressed by silent mode (level=%s)",
+                         decision.reason, decision.level)
     except Exception:  # noqa: BLE001
         log.exception("PM monitor job failed")
 

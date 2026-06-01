@@ -85,9 +85,11 @@ PM_PRIMARY_WALLET = os.getenv(
 # El activo borrowable en PM es SOLO USDC/USDH (NO existe borrow de UETH).
 PM_HYPE_LTV = float(os.getenv("PM_HYPE_LTV", "0.50") or 0.50)
 # Margin ratio = deuda / capacidad-de-borrow. Umbrales (utilización de la
-# capacidad): WARN 0.40, STRESS 0.70, LIQUIDACIÓN 0.95.
+# capacidad): WARN 0.40, STRESS 0.70, CRÍTICO/pre-liq 0.85, LIQUIDACIÓN 0.95.
 PM_WARN_RATIO = float(os.getenv("PM_WARN_RATIO", "0.40") or 0.40)
 PM_STRESS_RATIO = float(os.getenv("PM_STRESS_RATIO", "0.70") or 0.70)
+# R-PMALERT: pre-liquidation tier — una escalada ANTES del 0.95 de liquidación.
+PM_CRITICAL_RATIO = float(os.getenv("PM_CRITICAL_RATIO", "0.85") or 0.85)
 PM_LIQ_RATIO = float(os.getenv("PM_LIQ_RATIO", "0.95") or 0.95)
 # Activos PM-elegibles como colateral spot además de HYPE (valuados a precio).
 # Stablecoins NUNCA se cuentan como colateral de exposición (son cash/deuda).
