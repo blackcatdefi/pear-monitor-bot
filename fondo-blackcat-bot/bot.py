@@ -2217,31 +2217,74 @@ async def cmd_vaults(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 @authorized
 @with_error_logging
 async def cmd_unlockcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """R-UNLOCK-PRECISION — current five-sub-gate state of the basket-unlock monitor.
+    """R-SCREEN — universal SHORT/LONG screener over the FULL tradeable universe.
 
-    Runs the squeeze-first 5-check pre-filter on each watchlist name (data-quality,
-    z>=floor+persistence, Hurst<0.5, squeeze/momentum guard, funding>=0) and shows
-    a per-name sub-gate table with COUNTS YES/NO + binding reason. On UNLOCK,
-    appends a machine-readable AiPear confirmation block. Read-only and
-    recommendation-only — the bot never selects tokens, sizes, or trades.
-    Cointegration is a labelled CONTEXT-ONLY proxy that does not gate.
+    Broadens the EXACT same squeeze-first 5-gate pre-filter (data-quality,
+    z>=floor+persistence, Hurst<0.5, squeeze/momentum guard, funding>=0) from the
+    11-name watchlist to EVERY perp tradeable on Hyperliquid + Variational
+    (deduped by ticker, venue + liquidity annotated). Ranks them most→least
+    shortable (pass-count → squeeze forced to the bottom → z+/Hurst tiebreak),
+    surfaces a clearly-separated LONG-context read (mirror setup; tactical/your
+    call + AiPear, never a mandate), and lists data-insufficient names
+    separately. Read-only and recommendation-only — the bot never selects tokens,
+    sizes, or trades; only a 5/5 + AiPear is the human's call. Cointegration is a
+    labelled CONTEXT-ONLY proxy that does not gate.
+
+    The basket-unlock ladder (>=4 names) and R-SIGNAL still run in the scheduler;
+    this command is the on-demand universal screener.
     """
-    from modules import unlock_monitor as _ul
+    from modules import universal_screener as _scr
 
     await update.message.reply_text(
-        "⏳ Calculando estado de desbloqueo (5 sub-gates)…", reply_markup=MAIN_KEYBOARD
+        "⏳ Screeneando el universo completo (HL + Variational, 5 gates)…",
+        reply_markup=MAIN_KEYBOARD,
     )
     try:
         # Pure read: do NOT advance the persistence counters on a manual check.
-        snap = await _ul.compute_snapshot(advance_state=False)
-        text = _ul.format_unlockcheck(snap)
-        if snap.level == _ul.UNLOCK:
-            text += "\n\n" + _ul.aipear_block(snap)
+        res = await _scr.compute_screen(advance_state=False)
+        text = _scr.format_screen(res)
         await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
     except Exception as exc:  # noqa: BLE001
         log.exception("/unlockcheck failed")
         await update.message.reply_text(
-            f"❌ Error calculando R-UNLOCK: {str(exc)[:200]}",
+            f"❌ Error calculando R-SCREEN: {str(exc)[:200]}",
+            reply_markup=MAIN_KEYBOARD,
+        )
+
+
+@authorized
+@with_error_logging
+async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-SCREEN per-token — run the SAME five-gate engine on ONE requested ticker.
+
+    Usage: /check <TICKER> (e.g. /check WLD). Returns the per-gate pass/fail with
+    real values, the shortability verdict (e.g. "SHORT: NO-GO — squeeze activo,
+    RSI 73 + HH" or "SHORT: 5/5 GO candidate — confirmá con AiPear"), and the
+    long-viability read ("LONG: no viable" / "LONG context: sobrevendido +
+    funding<0"). If the token isn't tradeable on HL/Variational or has
+    insufficient candle data, says so plainly. Pure read; never selects or trades.
+    """
+    from modules import universal_screener as _scr
+
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Uso: /check <TICKER>  (ej. /check WLD)", reply_markup=MAIN_KEYBOARD
+        )
+        return
+    ticker = args[0].strip().upper().lstrip("$")
+    await update.message.reply_text(
+        f"⏳ Screeneando {ticker} (5 gates: short + long)…", reply_markup=MAIN_KEYBOARD
+    )
+    try:
+        # Pure read: single-token query never advances the persistence counters.
+        row, status = await _scr.check_single(ticker)
+        text = _scr.format_check(row, status, ticker)
+        await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("/check failed")
+        await update.message.reply_text(
+            f"❌ Error en /check {ticker}: {str(exc)[:200]}",
             reply_markup=MAIN_KEYBOARD,
         )
 
@@ -2349,6 +2392,19 @@ async def _unlock_monitor_job(application: Application) -> None:
                              ",".join(res.new_names), len(res.qualifying))
         except Exception:  # noqa: BLE001
             log.exception("R-SIGNAL emission failed (non-fatal)")
+
+        # ── R-SCREEN (universal screener) — advance z-persistence over the FULL
+        # universe so /unlockcheck and /check can reach 5/5 over time exactly the
+        # way the watchlist does. SILENT: emits NOTHING (R-SILENT safe), separate
+        # SQLite table, never touches the watchlist trigger state. Fully wrapped.
+        try:
+            if os.getenv("SCREENER_MONITOR_ENABLED", "true").strip().lower() != "false":
+                from modules import universal_screener as _scr
+
+                n_ranked = await _scr.advance_universe_state()
+                log.info("R-SCREEN universe state advanced (%d ranked)", n_ranked)
+        except Exception:  # noqa: BLE001
+            log.exception("R-SCREEN universe advance failed (non-fatal)")
     except Exception:  # noqa: BLE001
         log.exception("R-UNLOCK monitor job failed")
 
@@ -3366,8 +3422,10 @@ HANDLER_MAP = {
     # R-PMCORE — Portfolio Margin state + per-vault breakdown
     "pm": cmd_pm,
     "vaults": cmd_vaults,
-    # R-UNLOCK — basket-entry-unlock regime monitor (on-demand state)
+    # R-UNLOCK / R-SCREEN — universal SHORT/LONG screener (on-demand state)
     "unlockcheck": cmd_unlockcheck,
+    # R-SCREEN — per-token query (same 5-gate engine on one ticker)
+    "check": cmd_check,
     # R-SIGNAL — per-name short signals (orthogonal to the >=4 unlock ladder)
     "signals": cmd_signals,
     # R-INTEL30 Phase 1 — 11 new free intel sources

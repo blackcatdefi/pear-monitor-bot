@@ -123,8 +123,9 @@ COMMANDS: List[BotCommand] = [
     BotCommand("pm", "Portfolio Margin: colateral HYPE / deuda / capacidad / margin ratio + naked-long guard", "trading", "cmd_pm"),
     BotCommand("vaults", "Breakdown por vault (cada uno separado): equity, PnL, all-time, MDD, evolución", "trading", "cmd_vaults"),
 
-    # ─── R-UNLOCK — basket-entry-unlock regime monitor ───
-    BotCommand("unlockcheck", "Estado A/B/C de desbloqueo de canasta (BTC stab + re-correlación alts + breadth) → re-screen 5/5 manual", "trading", "cmd_unlockcheck"),
+    # ─── R-UNLOCK / R-SCREEN — universal SHORT/LONG screener ───
+    BotCommand("unlockcheck", "R-SCREEN: screener universal SHORT/LONG sobre TODO el universo (HL+Variational), rankeado más→menos shorteable + flag long; 5/5+AiPear es tu decisión", "trading", "cmd_unlockcheck"),
+    BotCommand("check", "R-SCREEN por token: corre los 5 gates en 1 ticker <TICKER> (ej. /check WLD) → veredicto short + lectura long", "trading", "cmd_check"),
 
     # ─── R-SIGNAL — per-name short signals (orthogonal to the >=4 ladder) ───
     BotCommand("signals", "R-SIGNAL: nombres que pasan el filtro short de 5 gates AHORA (confirmá c/u 5/5 AiPear) — ortogonal al ladder >=4", "trading", "cmd_signals"),
