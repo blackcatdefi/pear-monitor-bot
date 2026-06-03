@@ -279,6 +279,21 @@ async def _empty_orders() -> list[dict[str, Any]]:
     return []
 
 
+def _to_float(v: Any) -> float | None:
+    """Parse HL numeric strings ("63500.0", "0.0") to float; None if invalid.
+
+    HL serialises ALL numbers as strings, so truthiness checks like
+    ``bool(o.get("triggerPx"))`` are unsafe (``bool("0.0") is True``). Always
+    compare the parsed numeric value instead.
+    """
+    try:
+        if v is None:
+            return None
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _normalize_open_orders(orders: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     """Normalise HL ``frontendOpenOrders`` into the shape the classifier reads.
 
@@ -294,27 +309,39 @@ def _normalize_open_orders(orders: list[dict[str, Any]] | None) -> list[dict[str
             continue
         try:
             side_raw = (o.get("side") or "").upper()
-            is_trigger = bool(o.get("isTrigger") or o.get("triggerPx"))
             tpsl = (o.get("tpsl") or "").lower()  # "tp" | "sl" | ""
             reduce_only = bool(o.get("reduceOnly") or o.get("isPositionTpsl"))
+            is_position_tpsl = bool(o.get("isPositionTpsl"))
             order_type = (o.get("orderType") or "").lower()
-            # SL/TP heuristic: trigger order, an explicit tp/sl tag, a
-            # reduce-only flag, or a trigger order_type name.
-            is_sl_tp = (
-                is_trigger
-                or tpsl in ("tp", "sl")
-                or reduce_only
-                or "stop" in order_type
-                or "take profit" in order_type
-                or "tp" in order_type
-                or "sl" in order_type
+            # ── Trigger detection ──
+            # CRITICAL: HL returns triggerPx as the STRING "0.0" for plain
+            # limit orders, and bool("0.0") is True — so the old
+            # ``bool(o.get("triggerPx"))`` flagged every resting limit as a
+            # trigger. Parse it numerically: a real trigger has triggerPx > 0
+            # (or the explicit isTrigger flag, a populated triggerCondition,
+            # or a stop/take-profit order_type name).
+            trigger_px_val = _to_float(o.get("triggerPx")) or 0.0
+            trig_cond = (o.get("triggerCondition") or "").strip().lower()
+            has_trig_cond = trig_cond not in ("", "n/a", "na", "none")
+            order_type_is_trigger = ("stop" in order_type) or ("take profit" in order_type)
+            is_trigger = (
+                bool(o.get("isTrigger"))
+                or trigger_px_val > 0
+                or has_trig_cond
+                or order_type_is_trigger
             )
+            # ── SL/TP detection ──
+            # A position carries SL/TP ONLY via reduce-only TRIGGER orders
+            # (HL native position TP/SL: isPositionTpsl=True, also a
+            # reduce-only trigger). A plain limit DCA buy is NOT SL/TP, even
+            # if same-coin. Require trigger-ness AND reduce-only.
+            is_sl_tp = is_position_tpsl or (is_trigger and reduce_only) or (tpsl in ("tp", "sl") and reduce_only)
             out.append({
                 "coin": o.get("coin", "?"),
                 "side": "BUY" if side_raw == "B" else ("SELL" if side_raw == "A" else side_raw),
-                "limit_px": float(o.get("limitPx", 0) or 0),
-                "trigger_px": float(o.get("triggerPx", 0) or 0) if o.get("triggerPx") else None,
-                "size": float(o.get("sz", 0) or 0),
+                "limit_px": _to_float(o.get("limitPx")) or 0.0,
+                "trigger_px": trigger_px_val if trigger_px_val > 0 else None,
+                "size": _to_float(o.get("sz")) or 0.0,
                 "is_trigger": is_trigger,
                 "reduce_only": reduce_only,
                 "tpsl": tpsl,
