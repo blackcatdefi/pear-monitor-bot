@@ -52,26 +52,46 @@ def test_build_fund_state_block_no_legacy_basket_strings() -> None:
 
 
 def test_build_fund_state_block_keeps_legitimate_constants() -> None:
-    """HF thresholds, Flywheel, DCA plan SHOULD remain.
+    """R-REPORTE-LIVE (2026-06-03) FIX 1: the default block is now PM-core.
 
-    R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): Trade del Ciclo (Blofin)
-    ELIMINADO. Las assertions sobre TRADE DEL CICLO / BLOFIN fueron
-    removidas; el bloque ya no debe inyectar esos strings.
+    The fund migrated the flywheel OFF HyperLend onto HyperLiquid Portfolio
+    Margin, so the authoritative non-state block must describe the PM core
+    (collateral / debt / margin-ratio thresholds / naked-long guard) and tell
+    the LLM HyperLend is CLOSED — NOT inject a live HyperLend HF / flywheel
+    pair-trade context. The DCA plan and Super Basket pointer still remain.
     """
     from templates.system_prompt import build_fund_state_block
 
     block = build_fund_state_block()
 
-    # These are non-stale, ground-truth constants — keep them.
-    assert "HF THRESHOLDS" in block
-    assert "1.10" in block  # HF_CRITICAL
-    assert "FLYWHEEL HYPERLEND" in block
+    # PM core must be present (the new live truth).
+    assert "PORTFOLIO MARGIN" in block
+    assert "PM MARGIN-RATIO THRESHOLDS" in block
+    assert "naked-long" in block.lower()
+    assert "0.85" in block  # PM_CRITICAL_RATIO
+    # HyperLend must be explicitly flagged CLOSED, never live.
+    assert "CERRADO" in block.upper()
+    # Non-stale constants that stay.
     assert "PLAN DCA TRAMIFICADO" in block
+    assert "Super Basket Stage 6" in block
 
-    # R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): regression guards — Blofin
-    # MUST NOT reappear in the LLM context.
+    # The obsolete live-flywheel framing must NOT appear in the default block.
+    assert "FLYWHEEL HYPERLEND" not in block
+    # Blofin guard (R-NOPRELIQ) still holds.
     assert "BLOFIN" not in block.upper()
     assert "TRADE DEL CICLO" not in block.upper()
+
+
+def test_build_fund_state_block_rollback_restores_legacy(monkeypatch) -> None:
+    """FLYWHEEL_DEPRECATED=false restores the legacy HyperLend-flywheel block."""
+    import config
+    monkeypatch.setattr(config, "FLYWHEEL_DEPRECATED", False, raising=False)
+    from templates.system_prompt import build_fund_state_block
+
+    block = build_fund_state_block()
+    assert "HF THRESHOLDS" in block
+    assert "FLYWHEEL HYPERLEND" in block
+    assert "PLAN DCA TRAMIFICADO" in block
 
 
 def test_build_fund_state_block_points_to_onchain_block() -> None:

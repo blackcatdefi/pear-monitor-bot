@@ -463,6 +463,21 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         reply_markup=MAIN_KEYBOARD,
     )
 
+    # ─── Section 2a: Position classification (R-REPORTE-LIVE FIX 2) ───────────
+    # Deterministic per-run tagging of each open position by its REAL on-chain
+    # structure (margin mode / SL/TP / laddered limits) so CYCLE-ACCUMULATION
+    # DCA legs are never recommended for a bearish close. Non-fatal.
+    try:
+        from modules.position_classifier import (
+            classify_portfolio,
+            build_classification_block,
+        )
+        _clf_block = build_classification_block(classify_portfolio(portfolio, market))
+        if _clf_block:
+            await send_long_message(update, _clf_block, reply_markup=MAIN_KEYBOARD)
+    except Exception:  # noqa: BLE001
+        log.exception("position classification block failed (non-fatal)")
+
     # ─── Section 2b: TraderMap BTC (R-BOT-FEEDS-EXPAND Task 1) ────────────────
     # Surface the BTC chart snapshot (price + indicators when env vars set)
     # next to positions so BCD sees price-action context in /reporte without

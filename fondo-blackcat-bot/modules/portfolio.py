@@ -76,6 +76,24 @@ async def user_fills(wallet: str) -> list[dict[str, Any]]:
     return await _info({"type": "userFills", "user": wallet})
 
 
+async def frontend_open_orders(wallet: str) -> list[dict[str, Any]]:
+    """Open orders for a wallet (HL ``frontendOpenOrders`` — SAME info endpoint).
+
+    R-REPORTE-LIVE (2026-06-03): this is NOT a new data source — it is one
+    more query type on the Hyperliquid info endpoint already powering the
+    whole portfolio read. It is needed by the position classifier to detect
+    SL/TP triggers and laddered DCA limit orders. NEVER raises: returns an
+    empty list on any failure so a missing/blocked order read can never break
+    /reporte (the classifier degrades to attribute-only when orders are empty).
+    """
+    try:
+        res = await _info({"type": "frontendOpenOrders", "user": wallet})
+        return res if isinstance(res, list) else []
+    except Exception as exc:  # noqa: BLE001
+        log.warning("frontend_open_orders for %s failed: %s", wallet, exc)
+        return []
+
+
 async def user_fills_by_time(
     wallet: str,
     start_time_ms: int,
@@ -256,6 +274,58 @@ async def _fetch_spot(wallet: str) -> list[dict[str, Any]]:
         return []
 
 
+async def _empty_orders() -> list[dict[str, Any]]:
+    """Awaitable that yields no orders (used when order fetch is disabled)."""
+    return []
+
+
+def _normalize_open_orders(orders: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Normalise HL ``frontendOpenOrders`` into the shape the classifier reads.
+
+    HL order side ``"B"`` = bid/buy, ``"A"`` = ask/sell. Trigger orders carry
+    ``isTrigger=True`` + ``triggerPx`` + ``orderType`` ("Stop Market" / "Take
+    Profit Market" / etc.); resting limit orders are ``isTrigger=False``.
+    ``reduceOnly`` / ``isPositionTpsl`` mark protective (SL/TP) orders. NEVER
+    raises — a malformed order is skipped, not fatal.
+    """
+    out: list[dict[str, Any]] = []
+    for o in orders or []:
+        if not isinstance(o, dict):
+            continue
+        try:
+            side_raw = (o.get("side") or "").upper()
+            is_trigger = bool(o.get("isTrigger") or o.get("triggerPx"))
+            tpsl = (o.get("tpsl") or "").lower()  # "tp" | "sl" | ""
+            reduce_only = bool(o.get("reduceOnly") or o.get("isPositionTpsl"))
+            order_type = (o.get("orderType") or "").lower()
+            # SL/TP heuristic: trigger order, an explicit tp/sl tag, a
+            # reduce-only flag, or a trigger order_type name.
+            is_sl_tp = (
+                is_trigger
+                or tpsl in ("tp", "sl")
+                or reduce_only
+                or "stop" in order_type
+                or "take profit" in order_type
+                or "tp" in order_type
+                or "sl" in order_type
+            )
+            out.append({
+                "coin": o.get("coin", "?"),
+                "side": "BUY" if side_raw == "B" else ("SELL" if side_raw == "A" else side_raw),
+                "limit_px": float(o.get("limitPx", 0) or 0),
+                "trigger_px": float(o.get("triggerPx", 0) or 0) if o.get("triggerPx") else None,
+                "size": float(o.get("sz", 0) or 0),
+                "is_trigger": is_trigger,
+                "reduce_only": reduce_only,
+                "tpsl": tpsl,
+                "order_type": o.get("orderType", ""),
+                "is_sl_tp": is_sl_tp,
+            })
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
 async def fetch_wallet(wallet: str, label: str) -> dict[str, Any]:
     """Fetch one wallet across main + HIP-3 dexes + spot with retry logic.
 
@@ -269,12 +339,18 @@ async def fetch_wallet(wallet: str, label: str) -> dict[str, Any]:
     for attempt in range(max_retries):
         try:
             dex_keys: list[str | None] = [None] + list(HIP3_DEXES)
-            # Fetch all perp dexes + spot concurrently
+            # Fetch all perp dexes + spot + open orders concurrently.
+            # R-REPORTE-LIVE: open orders come from the SAME HL info endpoint
+            # (frontendOpenOrders) — used by the position classifier to tell
+            # CYCLE-ACCUMULATION (laddered limits, no SL/TP) from TACTICAL.
             dex_tasks = [_fetch_dex(wallet, d) for d in dex_keys]
             spot_task = _fetch_spot(wallet)
-            all_results = await asyncio.gather(*dex_tasks, spot_task)
-            spot_balances = all_results[-1]  # last result is spot
-            dex_results = all_results[:-1]   # everything else is perp dexes
+            orders_enabled = os.getenv("OPEN_ORDERS_FETCH_ENABLED", "true").lower() == "true"
+            orders_task = frontend_open_orders(wallet) if orders_enabled else _empty_orders()
+            all_results = await asyncio.gather(*dex_tasks, spot_task, orders_task)
+            open_orders = all_results[-1] if isinstance(all_results[-1], list) else []
+            spot_balances = all_results[-2]  # second-to-last result is spot
+            dex_results = all_results[:-2]   # everything else is perp dexes
 
             positions: list[dict[str, Any]] = []
             account_value = 0.0
@@ -301,6 +377,8 @@ async def fetch_wallet(wallet: str, label: str) -> dict[str, Any]:
                 "positions": positions,
                 "unrealized_pnl_total": unrealized_total,
                 "spot_balances": spot_balances,
+                # R-REPORTE-LIVE: normalised open orders (for the classifier).
+                "open_orders": _normalize_open_orders(open_orders),
             }
 
             # Cache successful fetch

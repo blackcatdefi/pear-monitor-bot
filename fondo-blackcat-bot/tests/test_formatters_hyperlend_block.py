@@ -29,7 +29,21 @@ _ROOT = os.path.abspath(os.path.join(_HERE, os.pardir))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+import pytest  # noqa: E402
+
 from templates.formatters import format_hf, format_quick_positions  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _legacy_flywheel_rendering(monkeypatch):
+    """R-REPORTE-LIVE (2026-06-03): the live default migrated the flywheel to
+    Portfolio Margin and STOPS rendering a HyperLend HF block in
+    format_quick_positions. These regression tests exercise the LEGACY /
+    rollback rendering path, so force FLYWHEEL_DEPRECATED=False for them.
+    The new deprecated-default behavior is covered in test_reporte_live.py.
+    """
+    import config
+    monkeypatch.setattr(config, "FLYWHEEL_DEPRECATED", False, raising=False)
 
 
 WALLET_FLY = "0xa44e0000000000000000000000000000000000ae"

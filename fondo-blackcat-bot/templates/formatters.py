@@ -991,14 +991,29 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                 chunk = " | ".join(dust_parts[i:i+4])
                 lines.append(f"    {chunk}")
 
-    # HyperLend section — detailed view with HF, collateral breakdown, debt
-    lines.append("")
-    lines.append("HYPERLEND")
+    # HyperLend section — detailed view with HF, collateral breakdown, debt.
+    # R-REPORTE-LIVE (2026-06-03) FIX 1: when the flywheel is migrated to
+    # Portfolio Margin (default), HyperLend is CLOSED. Do NOT render any
+    # stale HF/collateral/debt block — the live core state is the PM block
+    # rendered above (collateral / debt / margin ratio / naked-long guard).
+    # Rollback: set FLYWHEEL_DEPRECATED=false to restore the legacy block.
+    try:
+        from config import FLYWHEEL_DEPRECATED as _FLY_DEP_HLBLK
+    except Exception:  # noqa: BLE001
+        _FLY_DEP_HLBLK = True
+    if not _FLY_DEP_HLBLK:
+        lines.append("")
+        lines.append("HYPERLEND")
 
-    hl_list = sorted(hl_list,
-                     key=lambda hl: (hl.get("data", {}).get("total_collateral_usd") or 0)
-                     if hl.get("status") == "ok" else 0,
-                     reverse=True)
+        hl_list = sorted(hl_list,
+                         key=lambda hl: (hl.get("data", {}).get("total_collateral_usd") or 0)
+                         if hl.get("status") == "ok" else 0,
+                         reverse=True)
+    else:
+        # Flywheel migrated to Portfolio Margin — render NO HyperLend block
+        # (the loop below iterates an empty list). The live core state is the
+        # PM block already rendered above the per-wallet portfolio.
+        hl_list = []
 
     # ─── R-HF-RENDER (3 may 2026) ───────────────────────────────────────
     # Single-source-of-truth with auto.hyperlend_reader.read_all_with_cache.
@@ -1285,18 +1300,66 @@ def compile_raw_data(
     if not bt and isinstance(telegram_intel, dict) and "bounce_tech" in telegram_intel:
         bt = telegram_intel.pop("bounce_tech", None)
 
+    # ── R-REPORTE-LIVE (2026-06-03): freshness + venue-truth scrub ──
+    # FIX 1: when the flywheel is migrated to Portfolio Margin (default),
+    # HyperLend is CLOSED — do NOT feed stale collateral/HF/debt to the LLM
+    # as if it were a live position. Replace the raw HyperLend blob with an
+    # explicit "deprecated/closed" marker so the model cannot reason on it.
+    try:
+        from config import FLYWHEEL_DEPRECATED as _FLY_DEP_RAW
+    except Exception:  # noqa: BLE001
+        _FLY_DEP_RAW = True
+    if _FLY_DEP_RAW:
+        hyperlend_payload: Any = {
+            "status": "deprecated_closed",
+            "note": (
+                "Flywheel HyperLend CERRADO — fondo migrado 100% a HyperLiquid "
+                "Portfolio Margin. Cualquier colateral/HF/deuda de HyperLend es "
+                "CACHE STALE de wallets cerradas: NO contar como posición viva, "
+                "NO reportar HF de HyperLend, NO incluir en equity. El core del "
+                "fondo es HYPE spot como colateral cross en PM (ver bloque PM)."
+            ),
+        }
+    else:
+        hyperlend_payload = hyperlend or {}
+
+    # FIX 1 (general freshness): annotate any wallet that fell back to cache
+    # or whose data is older than 6h so it is never presented as live state.
+    try:
+        from auto.freshness import annotate_portfolio_freshness
+        portfolio_clean = annotate_portfolio_freshness(portfolio)
+    except Exception:  # noqa: BLE001
+        portfolio_clean = portfolio or []
+
     blob = {
         "timestamp_utc": now,
-        "portfolio": portfolio or [],
-        "hyperlend": hyperlend or {},
+        "portfolio": portfolio_clean or [],
+        "hyperlend": hyperlend_payload,
         "market": market or {},
         "unlocks": unlocks or {},
         "telegram_intel": telegram_intel or {},
         "bounce_tech": bt or [],
     }
     pretty = json.dumps(blob, ensure_ascii=False, indent=2, default=str)
+
+    # FIX 2: classify each open position by real structure and inject the
+    # block ABOVE the raw data so the LLM tags before writing any "acción
+    # sugerida" (CYCLE-ACCUMULATION must never get a bearish close suggestion).
+    classification_block = ""
+    try:
+        from modules.position_classifier import (
+            classify_portfolio,
+            build_classification_block,
+        )
+        classification_block = build_classification_block(
+            classify_portfolio(portfolio, market)
+        )
+    except Exception:  # noqa: BLE001
+        classification_block = ""
+
     return (
-        "RAW DATA (timestamp UTC " + now + "):\n\n"
+        (classification_block + "\n" if classification_block else "")
+        + "RAW DATA (timestamp UTC " + now + "):\n\n"
         "```json\n" + pretty + "\n```\n\n"
         "Generate the report following the system prompt format. "
         "No filler, specific numbers, actionable conclusions."

@@ -40,28 +40,41 @@ from auto.fund_constants import (
 )
 
 
+def _pm_thresholds():
+    """Load PM thresholds with safe fallbacks (importable in isolated tests)."""
+    try:
+        from config import (
+            PM_HYPE_LTV,
+            PM_WARN_RATIO,
+            PM_STRESS_RATIO,
+            PM_CRITICAL_RATIO,
+            PM_LIQ_RATIO,
+        )
+        return PM_HYPE_LTV, PM_WARN_RATIO, PM_STRESS_RATIO, PM_CRITICAL_RATIO, PM_LIQ_RATIO
+    except Exception:  # noqa: BLE001
+        return 0.50, 0.40, 0.70, 0.85, 0.95
+
+
 def build_fund_state_block() -> str:
     """Authoritative non-state context injected at top of prompt.
 
-    R-FUNDFIX: this block deliberately OMITS the basket section. The
-    basket is rendered separately by
-    ``auto.fund_state_v2.build_authoritative_state_block`` from
-    on-chain reality. Including any legacy basket-status prose or
-    "BASKET v5 PLAN" lines here re-introduces the 1 may 17:23 bug
-    where the LLM saw two contradicting basket states and asked BCD
-    to confirm.
+    R-FUNDFIX: this block deliberately OMITS the basket section (rendered by
+    ``auto.fund_state_v2.build_authoritative_state_block`` from on-chain
+    reality).
+
+    R-REPORTE-LIVE (2026-06-03) FIX 1: the fund migrated the flywheel OFF
+    HyperLend onto HyperLiquid Portfolio Margin. By default the block now
+    describes the PM core (collateral / debt / margin-ratio thresholds /
+    naked-long guard) and tells the LLM HyperLend is CLOSED — never to report
+    a HyperLend HF as live state. Rollback: ``FLYWHEEL_DEPRECATED=false``
+    restores the legacy HyperLend-flywheel context.
     """
-    return f"""
-═══════ ESTADO AUTORITATIVO DEL FONDO (constantes — non-state) ═══════
+    try:
+        from config import FLYWHEEL_DEPRECATED as _FLY_DEP
+    except Exception:  # noqa: BLE001
+        _FLY_DEP = True
 
-HF THRESHOLDS (regla operativa del fondo):
-  • HF < {HF_LIQUIDATION:.2f} → LIQUIDACIÓN REAL de HyperLend
-  • HF < {HF_CRITICAL:.2f} → ACCIÓN (topping-up inmediato)
-  • HF < {HF_WARN:.2f} → MONITOREO (preparar topping-up)
-  • HF {HF_CRITICAL:.2f}–1.20 → ZONA NORMAL OPERATIVA — NO alertar
-  • HF > 1.20 → cómodo, considerar sacar más prestado
-
-SUPER BASKET STAGE 6 (basket activa del fondo):
+    basket_block = f"""SUPER BASKET STAGE 6 (basket activa del fondo):
   • La verdad sobre la basket activa/inactiva ESTÁ ARRIBA, en el bloque
     "BASKET STATE — ON-CHAIN AUTORITATIVO". Tomá esos datos como ground
     truth — leé el estado del bloque on-chain, no asumas un id específico
@@ -74,13 +87,60 @@ SUPER BASKET STAGE 6 (basket activa del fondo):
     la basket — el leverage actual de cada posición se calcula
     dinámicamente como notional/equity desde el snapshot HL on-chain.
     Default operativo BCD: {FUND_DEFAULT_LEVERAGE} cross (referencia
-    documental — la realidad on-chain manda).
+    documental — la realidad on-chain manda)."""
+
+    dca_block = f"""PLAN DCA TRAMIFICADO BCD (ground truth — usar en vez de inventar niveles):
+{_build_dca_block()}"""
+
+    if not _FLY_DEP:
+        # ── Rollback path: legacy HyperLend flywheel context ──
+        return f"""
+═══════ ESTADO AUTORITATIVO DEL FONDO (constantes — non-state) ═══════
+
+HF THRESHOLDS (regla operativa del fondo):
+  • HF < {HF_LIQUIDATION:.2f} → LIQUIDACIÓN REAL de HyperLend
+  • HF < {HF_CRITICAL:.2f} → ACCIÓN (topping-up inmediato)
+  • HF < {HF_WARN:.2f} → MONITOREO (preparar topping-up)
+  • HF {HF_CRITICAL:.2f}–1.20 → ZONA NORMAL OPERATIVA — NO alertar
+  • HF > 1.20 → cómodo, considerar sacar más prestado
+
+{basket_block}
 
 FLYWHEEL HYPERLEND:
   • {FLYWHEEL_NOTE}
 
-PLAN DCA TRAMIFICADO BCD (ground truth — usar en vez de inventar niveles):
-{_build_dca_block()}
+{dca_block}
+
+═══════ FIN ESTADO AUTORITATIVO ═══════
+"""
+
+    # ── Default path: Portfolio Margin core (flywheel deprecated) ──
+    ltv, warn, stress, crit, liq = _pm_thresholds()
+    return f"""
+═══════ ESTADO AUTORITATIVO DEL FONDO (constantes — non-state) ═══════
+
+CORE DEL FONDO — PORTFOLIO MARGIN (HyperLiquid):
+  • El flywheel HyperLend está CERRADO. El fondo migró 100% a HyperLiquid
+    Portfolio Margin. NO existe posición viva en HyperLend: cualquier
+    colateral/HF/deuda de HyperLend es CACHE STALE de wallets cerradas —
+    NUNCA reportes un HF de HyperLend como estado vivo ni lo cuentes en equity.
+  • Estructura core: el HYPE spot de la cuenta primaria ES el colateral cross
+    en Portfolio Margin (no hay paso separado de "depositar como colateral").
+    Único activo borroweable = USDC/USDH. Capacidad de borrow = LTV {ltv:.2f}
+    × valor del colateral HYPE (a precio oráculo live).
+
+PM MARGIN-RATIO THRESHOLDS (ratio = deuda / capacidad de borrow):
+  • ratio ≥ {warn:.2f} → WARN (monitorear)
+  • ratio ≥ {stress:.2f} → STRESS (reducir deuda)
+  • ratio ≥ {crit:.2f} → CRÍTICO / pre-liquidación
+  • ratio ≥ {liq:.2f} → LIQUIDACIÓN inminente
+  • NAKED-LONG GUARD: deuda USDC/USDH abierta SIN shorts del basket = long
+    apalancado sin hedge → violación de regla dura. Alertar SIEMPRE, sin
+    importar el ratio.
+
+{basket_block}
+
+{dca_block}
 
 ═══════ FIN ESTADO AUTORITATIVO ═══════
 """
@@ -176,48 +236,24 @@ SIEMPRE:
 - En el análisis macro, mencionar que la tesis Stage 6 sigue vigente pero NO hay trade activo expuesto a ella
 - Tratar a DreamCash como un placeholder para futuros trades, no como una posición actual
 
-3. HYPERLEND FLYWHEEL: ~1,067 kHYPE colateral → deuda rotada a UETH (17 abr 2026)
-   - HF thresholds (REGLA OPERATIVA DEL FONDO):
-       * HF < 1.00 → LIQUIDACIÓN REAL de HyperLend (game over para la posición)
-       * HF < 1.10 → ACCIÓN (agregar colateral o repay inmediato)
-       * HF < 1.15 → MONITOREO (preparar topping-up, sin pánico)
-       * HF 1.10–1.20 → ZONA NORMAL OPERATIVA — NO alertar, es por diseño
-       * HF > 1.20 → zona cómoda, considerar sacar más prestado
-   - Flywheel: kHYPE baja → comprar más con profits shorts. kHYPE sube → sacar más prestado
-   - IMPORTANTE: el asset borrowed se lee DINÁMICAMENTE del API — no asumir USDH.
-   - El flywheel es un PAIR TRADE INTENCIONAL LONG kHYPE / SHORT ETH. La exposición
-     direccional NO es un riesgo — es la tesis. Solo alertar si:
-       (a) HF < 1.10
-       (b) UETH utilization > 90% (riesgo liquidez pool)
-       (c) APY borrow UETH > 6% (costo del pair trade se hace insostenible)
-     ETH outperform HYPE NO es alerta — es el caso adverso intrínseco, no un bug.
+3. CORE — PORTFOLIO MARGIN (HyperLiquid): el flywheel HyperLend está CERRADO.
+   El fondo migró 100% a Portfolio Margin. NO existe posición viva en
+   HyperLend — NUNCA reportes un HF de HyperLend como estado vivo, NUNCA
+   describas un "pair trade kHYPE/UETH", NUNCA cuentes colateral/deuda de
+   HyperLend en equity. Cualquier dato HyperLend es CACHE STALE de wallets
+   cerradas.
+   - Estructura: el HYPE spot de la cuenta primaria ES el colateral cross en
+     PM. Único activo borroweable = USDC/USDH. Capacidad de borrow = LTV ×
+     colateral HYPE (a precio oráculo live).
+   - Estado vivo del core = el bloque "PORTFOLIO MARGIN" inyectado / en la
+     sección de posiciones: colateral, deuda, capacidad/disponible, margin
+     ratio y guard de naked-long. Reportá ESE estado, no HyperLend.
+   - Margin ratio = deuda / capacidad de borrow. Umbrales: WARN 0.40 /
+     STRESS 0.70 / CRÍTICO 0.85 / LIQUIDACIÓN 0.95.
+   - NAKED-LONG GUARD: deuda USDC/USDH abierta SIN shorts del basket = long
+     apalancado sin hedge → violación de regla dura. Alertar SIEMPRE.
 
-HYPERLEND FLYWHEEL — LÓGICA DEL PAIR TRADE (actualizado 17 abr):
-La Reserva 0xA44E ahora borrowea UETH en vez de USDH. Esto convierte el flywheel en un PAIR TRADE implícito:
-- Colateral: kHYPE (LONG HYPE exposure)
-- Deuda: UETH (SHORT ETH exposure vía borrow)
-HF se ve afectado por DOS variables: precio de HYPE (colateral) y precio de ETH (deuda).
-Escenarios:
-- HYPE sube + ETH baja → HF mejora FUERTE (ideal)
-- HYPE baja + ETH baja → HF estable (deuda baja en USD al mismo ritmo)
-- HYPE baja + ETH sube → HF cae RÁPIDO (peor caso)
-- HYPE sube + ETH sube → depende de magnitudes
-FÓRMULA: HF = (kHYPE_balance × HYPE_price × LT_kHYPE) / (borrowed_balance × borrowed_asset_price)
-Donde LT_kHYPE = 0.74
-Evaluar ratio HYPE/ETH además de precio absoluto.
-NUNCA recomendar cerrar flywheel solo porque HF bajó si el motivo es ETH subiendo — puede ser oportunidad de acumular kHYPE en pullback de HYPE vs ETH.
-
-FLYWHEEL PAIR TRADE (nuevo 17 abr):
-La estructura actual del fondo es un PAIR TRADE implícito desde HyperLend:
-- LONG HYPE (colateral kHYPE)
-- SHORT ETH (deuda UETH)
-Cuando el bot analice:
-- Caídas del mercado crypto: flywheel RELATIVAMENTE NEUTRO (ambos caen juntos)
-- HYPE outperform ETH: flywheel GANA fuerte
-- ETH outperform HYPE: flywheel PIERDE
-- Risk-on parejo: depende de quién corre más fuerte
-
-4. CORE DCA: kHYPE + PEAR (spot, sin leverage)
+4. CORE DCA: HYPE + PEAR (spot, sin leverage)
 
 (Trade del Ciclo / Blofin: ELIMINADO del fondo el 2026-05-15 — R-NOPRELIQ +
 REMOVE BLOFIN. NO mencionar "Trade del Ciclo", "Blofin", "BTC LONG 10x" ni
@@ -242,6 +278,29 @@ REGLAS DEL REPORTE:
 - Acción sugerida: siempre específica a las posiciones actuales
 - Si hay señales de ceasefire/de-escalación: ALERTAR INMEDIATAMENTE como primer item
 
+CLASIFICACIÓN DE POSICIONES — REGLA DURA (FIX 2):
+- El bloque "CLASIFICACIÓN DE POSICIONES" inyectado al tope tagea cada
+  posición por su ESTRUCTURA REAL on-chain (margin mode, SL/TP, órdenes
+  límite escalonadas), no por el entorno de mercado. Usá esos tags ANTES de
+  escribir cualquier "acción sugerida".
+- Posiciones tageadas "ACUMULACIÓN CICLO (DCA piso, NO cerrar)": el drawdown
+  ES la tesis. NUNCA sugieras cerrar/reducir por entorno bearish, capitulación,
+  CVD negativo, downtrend ni nada del estilo. Para estas SOLO se flaggea si:
+    (a) la distancia a liquidación se comprime < 8%, o
+    (b) el funding se vuelve materialmente caro.
+  Para estas reportá: distancia a liq, si la próxima tranche DCA está por
+  llenarse, y si hace falta top-up de margen del vault cerca de la tranche
+  fondeada más baja. La acción por defecto es MANTENER/AGREGAR en piso, no SALIR.
+- Posiciones tageadas "TÁCTICA": aplica la lógica normal de cierre por ruptura
+  de tesis (SL/TP, basket activa).
+
+FRESHNESS + CONSISTENCIA (FIX 1 / FIX 3):
+- Cualquier dato marcado STALE / "_freshness" / cache fallback / >6h NO es
+  estado actual: no lo reportes como live (omitilo o marcalo "stale/no disponible").
+- El header del reporte y el cuerpo deben coincidir en venue/estado. Si el
+  core está en Portfolio Margin (HyperLend CERRADO), el cuerpo NO debe mostrar
+  un HF de HyperLend ni hablar del flywheel kHYPE/UETH como vivo.
+
 FORMATO DEL REPORTE: (seguir este formato exacto)
 
 ═══ REPORTE DIARIO FONDO BLACK CAT ═══
@@ -249,7 +308,9 @@ Fecha: [fecha y hora UTC]
 
 1. PORTFOLIO CONSOLIDADO
 Tabla: Wallet | Equity Perp | UPnL | PnL 24h | Leverage | Bias
-HyperLend: HF, Deposited, Borrowed, APYs, Costo neto/día
+PORTFOLIO MARGIN: Colateral HYPE, Deuda (USDC/USDH), Capacidad/disponible,
+Margin ratio (WARN 0.40 / STRESS 0.70 / CRÍTICO 0.85 / LIQ 0.95), naked-long guard.
+NO reportar bloque HyperLend (CERRADO — flywheel migrado a PM).
 DreamCash: "INACTIVA. Sin posiciones." (ver REGLA DREAMCASH arriba)
 
 2. MERCADO
@@ -292,7 +353,7 @@ Generá un análisis CORTO (máx 1500 chars) del estado de la tesis macro:
 Para cada uno de estos componentes, marcá ✅ VALIDA / ⚠️ NEUTRO / 🔴 INVALIDA con un dato específico:
 1. War trade (oil > $80, gold > $3500): Dalio Stage 6, Hormuz cerrado, energy crisis
 2. Super Basket Stage 6: leer estado real del bloque "BASKET STATE — ON-CHAIN AUTORITATIVO" arriba; alts en bear / no risk-on squeeze valida la tesis cuando la basket está ACTIVE. (Nombre canónico — renombre interno 2026-05-07; usar siempre este nombre en outputs.)
-3. HYPE flywheel (pair trade LONG kHYPE / SHORT ETH): HF > 1.10 (threshold operativo), kHYPE estable o subiendo. ETH outperform HYPE NO invalida la tesis — es caso adverso intrínseco.
+3. HYPE core (Portfolio Margin): el flywheel HyperLend está CERRADO — el core es HYPE spot como colateral cross en PM. Salud = margin ratio (WARN 0.40 / STRESS 0.70 / CRÍTICO 0.85 / LIQ 0.95) y guard de naked-long, NO un HF de HyperLend. Tesis válida si HYPE estable/subiendo y el ratio en zona CALM/WARN con hedge (shorts) presente.
 4. Fed hawkish: Warsh narrative, no pivot dovish
 5. LMEC Bear Invalidation Triggers (las 4 condiciones formales que destruyen la tesis bear):
      a) BTC rompe ATH $97-98K

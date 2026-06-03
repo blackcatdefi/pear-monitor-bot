@@ -473,6 +473,32 @@ async def generate_report(
         if not report_text.strip():
             report_text = "(reporte vac\u00edo)"
 
+        # ── R-REPORTE-LIVE (2026-06-03) FIX 3: header/body self-consistency ──
+        # Drop body lines that contradict the current venue/state (a live
+        # HyperLend HF when the flywheel is in PM) or that suggest a bearish
+        # close on a CYCLE-ACCUMULATION leg. NEVER breaks the report.
+        if os.getenv("REPORT_CONSISTENCY_ENABLED", "true").lower() == "true":
+            try:
+                from config import FLYWHEEL_DEPRECATED as _FLY_DEP_CONS
+            except Exception:  # noqa: BLE001
+                _FLY_DEP_CONS = True
+            try:
+                from modules.position_classifier import classify_portfolio, cycle_coins
+                from modules.report_consistency import enforce_consistency
+                _cycle = cycle_coins(classify_portfolio(portfolio, market))
+                report_text, _dropped = enforce_consistency(
+                    report_text,
+                    flywheel_deprecated=_FLY_DEP_CONS,
+                    cycle_coins=_cycle,
+                )
+                if _dropped:
+                    log.info(
+                        "report_consistency dropped %d contradicting line(s)",
+                        len(_dropped),
+                    )
+            except Exception:  # noqa: BLE001
+                log.exception("report_consistency pass failed (non-fatal)")
+
         report_text += f"\n\n_An\u00e1lisis generado por: {provider}_"
 
         _save_last_analysis(report_text, provider)
