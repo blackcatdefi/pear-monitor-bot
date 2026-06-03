@@ -235,3 +235,75 @@ async def test_check_single_not_tradeable(tmp_path, monkeypatch):
     monkeypatch.setattr(s, "build_universe", fake_build_universe)
     row, status = await s.check_single("NOSUCHTOKEN")
     assert row is None and status == "not_tradeable"
+
+
+# ─── (e) LEVERAGE NEUTRALITY: max-leverage NEVER gates, scores, or ranks ──────
+# The fund decided max-leverage must not exclude or down-rank any asset. The
+# five gates (data, z, Hurst, squeeze, funding) are the ONLY admission criteria.
+# These guards fail loudly if anyone ever reintroduces a leverage filter — e.g.
+# excluding 3x-capped Hyperliquid names (NOT, IO, GOAT, PNUT, POPCAT, VIRTUAL).
+def test_leverage_is_not_an_input_to_scoring_or_passcount():
+    """Structural guard: the score/pass-count functions take ONLY the gate verdict.
+    There is no venue/leverage parameter, so max-leverage CANNOT influence either."""
+    import inspect
+
+    assert list(inspect.signature(s.short_score).parameters) == ["g"]
+    assert list(inspect.signature(s.short_pass_count).parameters) == ["g"]
+    # VenueInfo (the only place per-asset venue metadata lives) carries no leverage
+    # field — there is nothing for a leverage filter to read.
+    venue_fields = set(s.VenueInfo.__dataclass_fields__)
+    assert not any("lev" in f.lower() for f in venue_fields)
+
+
+@pytest.mark.parametrize("ticker", ["NOT", "IO", "GOAT", "PNUT", "POPCAT", "VIRTUAL"])
+def test_3x_capped_name_passing_all_gates_is_5of5_go(ticker):
+    """A 3x-leverage-capped name fed a clean-short series passes all five gates and
+    is a 5/5 GO candidate — identical to any 5x+ name with the same metrics. Max
+    leverage neither excludes it nor changes its pass-count or verdict."""
+    g = _gate(ticker, _clean_overbought_meanreverting(), 0.00001)
+    assert g.data_ok and not g.squeeze_flag
+    assert s.short_pass_count(g) == 5
+    assert s.short_verdict(g) == "SHORT: 5/5 GO candidate — confirmá con AiPear"
+    # Its score equals a non-3x-capped name's score for the same metrics: the
+    # 3x cap costs it nothing (no leverage term anywhere in the ranking).
+    control = _gate("CTRL5X", _clean_overbought_meanreverting(), 0.00001)
+    assert s.short_score(g) == s.short_score(control)
+
+
+@pytest.mark.asyncio
+async def test_compute_screen_ranks_3x_capped_names_as_go_not_excluded(tmp_path, monkeypatch):
+    """End-to-end (offline): NOT and IO (both 3x-capped on Hyperliquid) fed clean
+    data land in the RANKED bucket as GO candidates — never in the excluded bucket
+    and never down-ranked below an otherwise-identical name for their leverage cap."""
+    monkeypatch.setattr(s, "DB_PATH", str(tmp_path / "screener.db"))
+    s._reset_for_tests()
+
+    clean = _clean_overbought_meanreverting()
+    venue_map = {
+        # NOT / IO are 3x-capped HL perps; CTRL is the higher-leverage control.
+        "NOT": s.VenueInfo("NOT", True, False, 5e6, None, 0.00001, 1000.0, None),
+        "IO": s.VenueInfo("IO", True, False, 5e6, None, 0.00001, 1000.0, None),
+        "CTRL": s.VenueInfo("CTRL", True, False, 5e6, None, 0.00001, 1000.0, None),
+    }
+
+    async def fake_build_universe():
+        return venue_map, []
+
+    async def fake_fetch(coin, bars):
+        return clean  # identical clean-short series for every name
+
+    monkeypatch.setattr(s, "build_universe", fake_build_universe)
+    monkeypatch.setattr(s, "fetch_4h_closes", fake_fetch)
+    for t in venue_map:
+        s.save_screen_state(t, 2, 0.00001, 1000.0)  # seed z-persistence → 5/5 reachable
+
+    res = await s.compute_screen(advance_state=False)
+    ranked = {r.ticker: r for r in res.ranked}
+    excluded = {r.ticker for r in res.excluded}
+
+    for t in ("NOT", "IO"):
+        assert t in ranked and t not in excluded
+        assert ranked[t].pass_count == 5
+        assert ranked[t].is_go_candidate is True
+        # No leverage down-rank: a 3x-capped name scores exactly like the control.
+        assert ranked[t].score == ranked["CTRL"].score
