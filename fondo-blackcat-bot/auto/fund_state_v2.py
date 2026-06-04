@@ -389,29 +389,68 @@ def render_state_block(detected: dict[str, Any]) -> str:
         "más abajo dice algo distinto, ignorala — la realidad on-chain "
         "PREVALECE."
     )
+    lines.append(
+        "La DIRECCIÓN de cada posición (LONG/SHORT) se deriva del signo "
+        "on-chain — NUNCA se asume. Una wallet con SÓLO legs LONG (p.ej. una "
+        "acumulación de ciclo BTC LONG) NO es una basket SHORT: reportá su "
+        "dirección real de la lista de posiciones de abajo."
+    )
     lines.append("")
-    if any_active:
+
+    # R-REPORTE-NOLEGACY-SHORT (2026-06-04): the fund's "basket" vocabulary
+    # refers SPECIFICALLY to the SHORT alt-basket (Super Basket Stage 6). It
+    # is ACTIVE only when a wallet holds real SHORT legs on-chain. The old
+    # code hardcoded "SHORT {coins}" for EVERY active wallet and read the
+    # SHORT-only ``shorts`` view — so a wallet whose only position was a LONG
+    # printed a bogus "SHORT" line with no coins (the BTC cycle long shown as
+    # "ACTIVA — SHORT"). Direction now comes only from the real per-position
+    # ``side``; a LONG can never be mislabeled SHORT.
+    active = {a: w for a, w in wallets.items() if w.get("status") == "ACTIVE"}
+    short_wallets = {a: w for a, w in active.items() if w.get("shorts")}
+
+    if short_wallets:
         active_baskets = sorted(
-            {
-                w.get("basket_id_inferido") or "?"
-                for w in wallets.values()
-                if w["status"] == "ACTIVE"
-            }
+            {w.get("basket_id_inferido") or "?" for w in short_wallets.values()}
+        )
+        short_total = sum(
+            float(s.get("ntl") or 0.0)
+            for w in short_wallets.values()
+            for s in w["shorts"]
         )
         lines.append(
             f"Basket activa: SÍ ({', '.join(active_baskets)}) — "
-            f"notional total ${total:,.0f}"
+            f"notional SHORT total ${short_total:,.0f}"
         )
-        for addr, w in wallets.items():
-            if w["status"] != "ACTIVE":
-                continue
+        for addr, w in short_wallets.items():
             coins = ",".join(s["coin"] for s in w["shorts"])
+            wallet_short_ntl = sum(float(s.get("ntl") or 0.0) for s in w["shorts"])
             lines.append(
                 f"  • {w['label']} ({addr[:10]}…): SHORT {coins} "
-                f"— ntl ${w['basket_notional_usd']:,.0f}"
+                f"— ntl ${wallet_short_ntl:,.0f}"
             )
     else:
-        lines.append("Basket activa: NO (todas las wallets IDLE on-chain)")
+        lines.append(
+            "Basket activa: NO (ninguna wallet tiene legs SHORT on-chain)"
+        )
+
+    # Authoritative per-position direction listing — the single source of
+    # truth for LONG vs SHORT. Every open position appears here with its REAL
+    # on-chain side, so no downstream consumer can flip a LONG into a SHORT.
+    lines.append("")
+    if active:
+        lines.append(
+            "Posiciones abiertas on-chain (dirección real, autoritativa):"
+        )
+        for addr, w in active.items():
+            for p in w.get("positions") or []:
+                lines.append(
+                    f"  • {w['label']} ({addr[:10]}…): {p['side']} {p['coin']} "
+                    f"— ntl ${float(p.get('ntl') or 0.0):,.0f}"
+                )
+    else:
+        lines.append(
+            "Posiciones abiertas on-chain: NINGUNA (todas las wallets IDLE)."
+        )
 
     if anomalies:
         lines.append("")
