@@ -405,7 +405,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # FLYWHEEL + NEXT CATALYST <72h. Single-source-of-truth via
     # auto.capital_calc / auto.hyperlend_reader / modules.macro_calendar.
     try:
-        header_text = format_report_header(portfolio, hl, market)
+        header_text = format_report_header(portfolio, hl, market, unlocks)
         await update.message.reply_text(header_text, reply_markup=MAIN_KEYBOARD)
     except Exception:  # noqa: BLE001
         log.exception("format_report_header failed (non-fatal — continuing)")

@@ -370,59 +370,147 @@ def _basket_upnl_for_header(wallets: list[dict[str, Any]]) -> tuple[float, int]:
     return 0.0, 0
 
 
-def _next_catalyst_for_header(window_hours: int = 72) -> str:
-    """Return the next macro catalyst within ``window_hours``.
+def _cat_date_label(dt: datetime) -> str:
+    """Compact UTC date like '6 Jun' (no leading zero, platform-agnostic)."""
+    return f"{dt.day} {dt.strftime('%b')}"
 
-    Returns a one-line string like "Powell FOMC in 2d 4h (🔴 critical)"
-    or "ninguno <72h" when the calendar is empty / nothing in window.
-    Best-effort — if the calendar module is unavailable returns "n/a".
+
+def _cat_time_until(target: datetime, now: datetime) -> str:
+    """Relative 'en 2d 4h' string; never negative (already-passed → '0m')."""
+    total = int((target - now).total_seconds())
+    if total <= 0:
+        return "0m"
+    days = total // 86400
+    hours = (total % 86400) // 3600
+    mins = (total % 3600) // 60
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if mins and not days:
+        parts.append(f"{mins}m")
+    return " ".join(parts) or f"{total}s"
+
+
+def _cat_token_key(label: str) -> str:
+    """Leading token symbol (UPPER) used for dedup, e.g. 'HYPE unlock'→'HYPE'."""
+    for tok in (label or "").replace("×", " ").replace("x", " ").split():
+        cleaned = "".join(c for c in tok if c.isalnum()).upper()
+        if cleaned:
+            return cleaned
+    return (label or "").strip().upper()
+
+
+def _next_catalyst_for_header(
+    window_hours: int = 72,
+    unlocks: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> str:
+    """Return the next REAL dated catalyst(s) within ``window_hours``.
+
+    R-CATALYST-LIVE (2026-06-04): the header no longer trusts ONLY the
+    hardcoded SQLite macro roadmap (which goes stale once its seeded
+    events expire). It merges dated events from every wired source —
+    the macro calendar AND the live token-unlock feed (``unlocks`` as
+    returned by ``modules.unlocks.fetch_unlocks``) — purges anything
+    past-dated relative to the report's run timestamp (UTC), keeps only
+    what falls inside the window, and renders the nearest 1-3.
+
+    Returns "ninguno <72h" only when NO source has a dated event inside
+    the window (the genuinely-empty case). Never raises.
     """
-    try:
-        from modules.macro_calendar import (
-            _impact_emoji,
-            format_time_until,
-            upcoming_events,
-        )
-    except Exception:  # noqa: BLE001
-        return "n/a"
-    try:
-        evs = upcoming_events(limit=20)
-    except Exception:  # noqa: BLE001
-        return "n/a"
-    if not evs:
-        return f"ninguno <{window_hours}h"
-    # Filter to the requested window; fall back to "next overall" if empty.
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     window_secs = window_hours * 3600
-    in_window: list[Any] = []
-    now = datetime.now(timezone.utc)
-    for ev in evs:
-        ts = ev.timestamp_utc
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        if (ts - now).total_seconds() <= window_secs:
-            in_window.append(ev)
-    target_list = in_window if in_window else evs[:1]
-    if not target_list:
-        return f"ninguno <{window_hours}h"
-    # Pick highest impact within window; tie-break by soonest.
+
+    # candidate = {"label","dt","emoji","rank"}; rank for tie-break only.
+    candidates: list[dict[str, Any]] = []
     impact_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
-    target_list.sort(
-        key=lambda e: (-impact_rank.get(e.impact_level, 0), e.timestamp_utc)
-    )
-    ev = target_list[0]
-    until = format_time_until(ev.timestamp_utc)
-    name = (ev.name or "?")
-    if len(name) > 60:
-        name = name[:57] + "…"
-    emoji = _impact_emoji(ev.impact_level)
-    note = "" if in_window else " (>72h)"
-    return f"{name} en {until} ({emoji} {ev.impact_level}){note}"
+    impact_emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}
+
+    # ── Source 1: curated macro calendar (already purges ts < now in SQL,
+    #    but we re-check the window here against the run timestamp). ──────
+    try:
+        from modules.macro_calendar import upcoming_events
+        for ev in upcoming_events(limit=30) or []:
+            ts = ev.timestamp_utc
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            name = (ev.name or "?").strip()
+            if len(name) > 48:
+                name = name[:45] + "…"
+            candidates.append({
+                "label": name,
+                "dt": ts,
+                "emoji": impact_emoji.get(ev.impact_level, "⚪"),
+                "rank": impact_rank.get(ev.impact_level, 0),
+            })
+    except Exception:  # noqa: BLE001
+        pass
+
+    # ── Source 2: live token-unlock feed (knows real upcoming unlocks,
+    #    e.g. the 6 Jun HYPE unlock that the stale roadmap never had). ───
+    try:
+        if isinstance(unlocks, dict) and unlocks.get("status") == "ok":
+            for item in unlocks.get("data") or []:
+                if not isinstance(item, dict):
+                    continue
+                raw_ts = item.get("timestamp") or item.get("next_unlock_ts")
+                try:
+                    epoch = int(float(raw_ts))
+                except (TypeError, ValueError):
+                    continue
+                if epoch <= 0:
+                    continue
+                dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+                sym = (item.get("symbol") or item.get("token") or "?")
+                candidates.append({
+                    "label": f"{sym} unlock",
+                    "dt": dt,
+                    "emoji": "🔓",
+                    "rank": impact_rank["high"],
+                })
+    except Exception:  # noqa: BLE001
+        pass
+
+    # ── Window filter: strictly purge past-dated; keep only inside 72h. ──
+    in_window: list[dict[str, Any]] = []
+    for c in candidates:
+        delta = (c["dt"] - now).total_seconds()
+        if 0 <= delta <= window_secs:
+            in_window.append(c)
+
+    if not in_window:
+        return f"ninguno <{window_hours}h"
+
+    # Nearest first (the header is about *what's next*), tie-break impact.
+    in_window.sort(key=lambda c: (c["dt"], -c["rank"]))
+
+    # Dedup by (token, date) — same unlock from calendar + feed collapses.
+    seen: set[tuple[str, Any]] = set()
+    chosen: list[dict[str, Any]] = []
+    for c in in_window:
+        key = (_cat_token_key(c["label"]), c["dt"].date())
+        if key in seen:
+            continue
+        seen.add(key)
+        chosen.append(c)
+        if len(chosen) >= 3:
+            break
+
+    parts = [f"{c['emoji']} {c['label']} {_cat_date_label(c['dt'])}" for c in chosen]
+    line = " · ".join(parts)
+    return f"{line} (en {_cat_time_until(chosen[0]['dt'], now)})"
 
 
 def format_report_header(
     wallets: list[dict[str, Any]],
     hyperlend: list[dict[str, Any]] | dict[str, Any],
     market: dict[str, Any] | None = None,
+    unlocks: dict[str, Any] | None = None,
 ) -> str:
     """Build the destacado header for /reporte (Bug #4).
 
@@ -436,8 +524,10 @@ def format_report_header(
        (Trading) wallet's perp positions (Super Basket Stage 6).
     3. HF FLYWHEEL — Main Flywheel HF from auto.hyperlend_reader
        (cache-aware, branches on hf_status).
-    4. NEXT CATALYST <72h — highest-impact macro event from
-       modules.macro_calendar within a 72h window.
+    4. NEXT CATALYST <72h — nearest REAL dated catalyst(s) within a 72h
+       window, merged from modules.macro_calendar AND the live
+       token-unlock feed (``unlocks``); past-dated entries are purged
+       against the run timestamp so a stale roadmap can't read "ninguno".
 
     Returns a Telegram-ready multi-line string. Never raises — degrades
     each line independently to "—" if its data source is unavailable.
@@ -554,7 +644,7 @@ def format_report_header(
 
     # 4. NEXT CATALYST <72h
     try:
-        cat = _next_catalyst_for_header(window_hours=72)
+        cat = _next_catalyst_for_header(window_hours=72, unlocks=unlocks)
         lines.append(f"🗓 NEXT CATALYST <72h: {cat}")
     except Exception:  # noqa: BLE001
         lines.append("🗓 NEXT CATALYST <72h: —")
