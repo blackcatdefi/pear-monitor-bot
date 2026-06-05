@@ -574,8 +574,8 @@ def _build_degraded_report(
         lines.append(
             "  El core del fondo ahora es HYPE spot como colateral cross en "
             "Portfolio Margin (cuenta primaria 0xc7ae). Cualquier "
-            "colateral/HF/deuda de HyperLend es CACHE STALE de wallets "
-            "cerradas — NO contar como posición viva ni en equity."
+            "colateral/deuda de HyperLend (métricas legacy) es CACHE STALE de "
+            "wallets cerradas — NO contar como posición viva ni en equity."
         )
         lines.append("")
 

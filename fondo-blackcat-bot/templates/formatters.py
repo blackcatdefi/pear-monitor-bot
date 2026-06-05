@@ -333,6 +333,54 @@ def _flywheel_hf_for_header(hyperlend: list[dict[str, Any]] | dict[str, Any]) ->
     return "—", "n/a"
 
 
+def _pm_health_for_header(
+    wallets: list[dict[str, Any]],
+    market: dict[str, Any] | None = None,
+) -> str:
+    """P1.4/P1.5: PM-core health KPI for the destacado header.
+
+    The flywheel migrated to Portfolio Margin, so the live core-health metric
+    is the PM margin ratio (band CALM/WARN/STRESS/CRÍTICO/LIQ) — NOT a legacy
+    HyperLend HF. Returns a compact one-liner like
+    ``12.3% 🟢 CALM (col $94K / deuda $0)`` or ``—`` if PM can't be computed.
+    NEVER raises.
+    """
+    try:
+        from config import PM_PRIMARY_WALLET as _PMW
+        from modules.portfolio_margin import compute_pm_state, _display_band
+    except Exception:  # noqa: BLE001
+        return "—"
+    try:
+        pmw = (_PMW or "").lower()
+        primary = None
+        for w in wallets:
+            if isinstance(w, dict) and w.get("status") == "ok":
+                wd = w.get("data") or {}
+                if (wd.get("wallet") or "").lower() == pmw:
+                    primary = wd
+                    break
+        if primary is None:
+            return "—"
+        pm = compute_pm_state(
+            primary.get("spot_balances") or [],
+            primary.get("positions") or [],
+            _build_price_map(market),
+            open_orders=primary.get("open_orders") or [],
+        )
+        if pm is None or not pm.has_data or pm.collateral_usd <= 0:
+            return "—"
+        emoji, band = _display_band(pm.ratio)
+        txt = (
+            f"{pm.ratio * 100:.1f}% {emoji} {band} "
+            f"(col {_fmt_usd(pm.collateral_usd)} / deuda {_fmt_usd(pm.debt_usd)})"
+        )
+        if pm.naked_long:
+            txt += " 🚨 NAKED-LONG"
+        return txt
+    except Exception:  # noqa: BLE001
+        return "—"
+
+
 def _basket_upnl_for_header(wallets: list[dict[str, Any]]) -> tuple[float, int]:
     """Aggregate basket UPnL from the trading wallet's perp positions.
 
@@ -651,12 +699,25 @@ def format_report_header(
     except Exception:  # noqa: BLE001
         lines.append("📉 BASKET UPnL: —")
 
-    # 3. HF FLYWHEEL
+    # 3. CORE HEALTH — PM margin ratio (flywheel migrated to Portfolio
+    #    Margin). P1.4: the legacy "HF FLYWHEEL" KPI is replaced by the live
+    #    PM-core health band. Rollback (FLYWHEEL_DEPRECATED=false) restores
+    #    the legacy HyperLend HF line.
     try:
-        hf_text, hf_source = _flywheel_hf_for_header(hyperlend)
-        lines.append(f"⚖️ HF FLYWHEEL: {hf_text} ({hf_source})")
+        from config import FLYWHEEL_DEPRECATED as _FLY_DEP_K3
     except Exception:  # noqa: BLE001
-        lines.append("⚖️ HF FLYWHEEL: —")
+        _FLY_DEP_K3 = True
+    if _FLY_DEP_K3:
+        try:
+            lines.append(f"⚖️ PM SALUD (core): {_pm_health_for_header(wallets, market)}")
+        except Exception:  # noqa: BLE001
+            lines.append("⚖️ PM SALUD (core): —")
+    else:
+        try:
+            hf_text, hf_source = _flywheel_hf_for_header(hyperlend)
+            lines.append(f"⚖️ HF FLYWHEEL: {hf_text} ({hf_source})")
+        except Exception:  # noqa: BLE001
+            lines.append("⚖️ HF FLYWHEEL: —")
 
     # 4. NEXT CATALYST <72h
     try:
@@ -803,6 +864,7 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                     _primary.get("spot_balances") or [],
                     _primary.get("positions") or [],
                     _price_map_qp,
+                    open_orders=_primary.get("open_orders") or [],
                 )
                 _pm_block = format_pm_state_telegram(_pm)
                 if _pm_block:

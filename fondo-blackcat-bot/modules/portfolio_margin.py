@@ -64,6 +64,12 @@ class PMState:
     hype_px: float
     collateral_breakdown: dict[str, float] = field(default_factory=dict)
     has_data: bool = True
+    # P1.5: capital reserved by resting (non-trigger, non-reduce-only) limit
+    # BUY orders. Loaded limit orders reserve margin/notional in HL, so the
+    # borrow head-room (``available_usd``) is NOT freely deployable — this is
+    # the dry powder already allocated to the ladder.
+    committed_orders_usd: float = 0.0
+    committed_orders_count: int = 0
 
 
 def _f(v: Any) -> float:
@@ -83,12 +89,46 @@ def _classify(ratio: float) -> str:
     return "CALM"
 
 
+def _committed_resting_notional(
+    open_orders: list[dict[str, Any]] | None,
+) -> tuple[float, int]:
+    """Sum the USD notional reserved by resting BUY limit orders.
+
+    P1.5: a resting limit BUY (non-trigger, non-reduce-only) reserves
+    capital in HL the moment it is loaded — it is NOT free head-room. SL/TP
+    and other reduce-only / trigger orders do NOT commit new capital and are
+    excluded. Notional = ``limit_px × size``. NEVER raises.
+    """
+    total = 0.0
+    count = 0
+    for o in open_orders or []:
+        if not isinstance(o, dict):
+            continue
+        try:
+            side = str(o.get("side") or "").upper()
+            is_buy = side in ("BUY", "B")
+            if not is_buy:
+                continue
+            if o.get("is_trigger") or o.get("reduce_only") or o.get("is_sl_tp"):
+                continue
+            px = float(o.get("limit_px") or o.get("limitPx") or 0.0)
+            sz = float(o.get("size") or o.get("sz") or 0.0)
+            ntl = px * sz
+            if ntl > 0:
+                total += ntl
+                count += 1
+        except (TypeError, ValueError):
+            continue
+    return total, count
+
+
 def compute_pm_state(
     spot_balances: list[dict[str, Any]] | None,
     positions: list[dict[str, Any]] | None,
     prices: dict[str, float] | None = None,
     *,
     hype_px: float | None = None,
+    open_orders: list[dict[str, Any]] | None = None,
 ) -> PMState:
     """Derive Portfolio Margin state from one wallet's spot + perp data.
 
@@ -152,6 +192,7 @@ def compute_pm_state(
     ratio = (debt / capacity) if capacity > 0 else 0.0
     status = _classify(ratio)
     naked_long = debt > 1.0 and shorts_notional < 1.0
+    committed_usd, committed_n = _committed_resting_notional(open_orders)
 
     return PMState(
         collateral_usd=collateral,
@@ -166,6 +207,8 @@ def compute_pm_state(
         hype_px=float(prices.get("HYPE") or 0.0),
         collateral_breakdown=breakdown,
         has_data=(collateral > 0 or debt > 0 or len(spot_balances) > 0),
+        committed_orders_usd=committed_usd,
+        committed_orders_count=committed_n,
     )
 
 
@@ -213,8 +256,16 @@ def format_pm_state_telegram(pm: PMState) -> str:
     lines.append(f"├─ Deuda (USDC/USDH borrowed): {_fmt_usd(pm.debt_usd)}")
     lines.append(
         f"├─ Capacidad borrow (LTV {PM_HYPE_LTV:.2f}): {_fmt_usd(pm.capacity_usd)}"
-        f"  | disponible: {_fmt_usd(pm.available_usd)}"
+        f"  | head-room borrow: {_fmt_usd(pm.available_usd)}"
     )
+    # P1.5: resting limit orders reserve capital — never present head-room as
+    # freely deployable "free capital" without showing what's already
+    # committed to the ladder.
+    if pm.committed_orders_usd > 0:
+        lines.append(
+            f"├─ Capital comprometido en órdenes resting: "
+            f"{_fmt_usd(pm.committed_orders_usd)} ({pm.committed_orders_count} órdenes)"
+        )
     lines.append(
         f"├─ Margin ratio: {pm.ratio * 100:.1f}%  {emoji} {band_label}  "
         f"(WARN {PM_WARN_RATIO*100:.0f}% · STRESS {PM_STRESS_RATIO*100:.0f}% · "

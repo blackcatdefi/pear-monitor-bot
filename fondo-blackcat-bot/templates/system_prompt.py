@@ -135,8 +135,9 @@ FLYWHEEL HYPERLEND:
 CORE DEL FONDO — PORTFOLIO MARGIN (HyperLiquid):
   • El flywheel HyperLend está CERRADO. El fondo migró 100% a HyperLiquid
     Portfolio Margin. NO existe posición viva en HyperLend: cualquier
-    colateral/HF/deuda de HyperLend es CACHE STALE de wallets cerradas —
-    NUNCA reportes un HF de HyperLend como estado vivo ni lo cuentes en equity.
+    colateral/deuda de HyperLend (métricas legacy) es CACHE STALE de wallets
+    cerradas — NUNCA reportes métricas de HyperLend como estado vivo ni las
+    cuentes en equity.
   • Estructura core: el HYPE spot de la cuenta primaria ES el colateral cross
     en Portfolio Margin (no hay paso separado de "depositar como colateral").
     Único activo borroweable = USDC/USDH. Capacidad de borrow = LTV {ltv:.2f}
@@ -177,8 +178,11 @@ def _build_dca_block() -> str:
         if asset == "ETH":
             flip = plan.get("debt_flip_range")
             if flip:
+                # P1.4: flywheel migrated to Portfolio Margin — debt is now
+                # USDC/USDH, not the legacy UETH leg. Phrase the rotation in
+                # PM terms (rotate borrowed stable), no dead flywheel tokens.
                 lines.append(
-                    f"         debt_flip_range (rotar UETH→stable): ${flip[0]:,}-${flip[1]:,}"
+                    f"         debt_flip_range (rotar deuda→stable USDC/USDH): ${flip[0]:,}-${flip[1]:,}"
                 )
     bottom = BCD_DCA_PLAN.get("cycle_bottom_expected", "?")
     sources = ", ".join(BCD_DCA_PLAN.get("sources") or [])
@@ -262,16 +266,16 @@ SIEMPRE:
 
 3. CORE — PORTFOLIO MARGIN (HyperLiquid): el flywheel HyperLend está CERRADO.
    El fondo migró 100% a Portfolio Margin. NO existe posición viva en
-   HyperLend — NUNCA reportes un HF de HyperLend como estado vivo, NUNCA
-   describas un "pair trade kHYPE/UETH", NUNCA cuentes colateral/deuda de
-   HyperLend en equity. Cualquier dato HyperLend es CACHE STALE de wallets
+   HyperLend — NUNCA reportes métricas de HyperLend como estado vivo, NUNCA
+   describas el pair trade legacy del flywheel, NUNCA cuentes colateral/deuda
+   de HyperLend en equity. Cualquier dato HyperLend es CACHE STALE de wallets
    cerradas.
    - Estructura: el HYPE spot de la cuenta primaria ES el colateral cross en
      PM. Único activo borroweable = USDC/USDH. Capacidad de borrow = LTV ×
      colateral HYPE (a precio oráculo live).
    - Estado vivo del core = el bloque "PORTFOLIO MARGIN" inyectado / en la
      sección de posiciones: colateral, deuda, capacidad/disponible, margin
-     ratio y guard de naked-long. Reportá ESE estado, no HyperLend.
+     ratio y guard de naked-long. Reportá ESE estado PM, no el HyperLend legacy (CERRADO).
    - Margin ratio = deuda / capacidad de borrow. Umbrales: WARN 0.40 /
      STRESS 0.70 / CRÍTICO 0.85 / LIQUIDACIÓN 0.95.
    - NAKED-LONG GUARD: deuda USDC/USDH abierta SIN shorts del basket = long
@@ -323,7 +327,7 @@ FRESHNESS + CONSISTENCIA (FIX 1 / FIX 3):
   estado actual: no lo reportes como live (omitilo o marcalo "stale/no disponible").
 - El header del reporte y el cuerpo deben coincidir en venue/estado. Si el
   core está en Portfolio Margin (HyperLend CERRADO), el cuerpo NO debe mostrar
-  un HF de HyperLend ni hablar del flywheel kHYPE/UETH como vivo.
+  métricas de HyperLend ni hablar del flywheel legacy como vivo.
 
 FORMATO DEL REPORTE: (seguir este formato exacto)
 
@@ -377,7 +381,7 @@ Generá un análisis CORTO (máx 1500 chars) del estado de la tesis macro:
 Para cada uno de estos componentes, marcá ✅ VALIDA / ⚠️ NEUTRO / 🔴 INVALIDA con un dato específico:
 1. War trade (oil > $80, gold > $3500): Dalio Stage 6, Hormuz cerrado, energy crisis
 2. Super Basket Stage 6: leer estado real del bloque "BASKET STATE — ON-CHAIN AUTORITATIVO" arriba; alts en bear / no risk-on squeeze valida la tesis cuando la basket está ACTIVE. (Nombre canónico — renombre interno 2026-05-07; usar siempre este nombre en outputs.)
-3. HYPE core (Portfolio Margin): el flywheel HyperLend está CERRADO — el core es HYPE spot como colateral cross en PM. Salud = margin ratio (WARN 0.40 / STRESS 0.70 / CRÍTICO 0.85 / LIQ 0.95) y guard de naked-long, NO un HF de HyperLend. Tesis válida si HYPE estable/subiendo y el ratio en zona CALM/WARN con hedge (shorts) presente.
+3. HYPE core (Portfolio Margin): el flywheel HyperLend está CERRADO — el core es HYPE spot como colateral cross en PM. Salud = margin ratio (WARN 0.40 / STRESS 0.70 / CRÍTICO 0.85 / LIQ 0.95) y guard de naked-long, NO una métrica de HyperLend. Tesis válida si HYPE estable/subiendo y el ratio en zona CALM/WARN con hedge (shorts) presente.
 4. Fed hawkish: Warsh narrative, no pivot dovish
 5. LMEC Bear Invalidation Triggers (las 4 condiciones formales que destruyen la tesis bear):
      a) BTC rompe ATH $97-98K

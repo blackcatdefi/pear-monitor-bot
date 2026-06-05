@@ -119,7 +119,10 @@ def test_flywheel_deprecation_excludes_stale_hl(monkeypatch):
         "total_debt_usd": 45000.0,
     }}]
     header = fmt.format_report_header(wallets, hl, {"status": "error"})
-    assert "CERRADO" in header  # flywheel HF line deprecated
+    # P1.4: the legacy "HF FLYWHEEL: CERRADO" KPI is replaced by the live
+    # PM-core health band. Deprecation indicator is now the PM SALUD line.
+    assert "PM SALUD" in header
+    assert "HF FLYWHEEL" not in header
     # TOTAL EQUITY ≈ HYPE spot ($70K), NOT inflated by stale $73K HL collateral.
     # If HL were still counted, net would jump by +$28K (col-debt).
     import re
