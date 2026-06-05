@@ -272,7 +272,10 @@ async def fetch_unlocks() -> dict[str, Any]:
                 "name": r["token"],
                 "timestamp": r["next_unlock_ts"],
                 "tokens": r.get("amount_tokens") or 0,
-                "value_usd": r.get("value_usd") or 0,
+                # R-AUDIT2-P0.2: preserve None (unknown) — do NOT coerce to 0,
+                # or the catalyst header treats an unknown-USD real unlock as
+                # an explicit $0 tick and drops it.
+                "value_usd": r.get("value_usd"),
                 "float_pct": r.get("pct_supply"),
                 "category": r.get("category"),
                 "type": r.get("category"),

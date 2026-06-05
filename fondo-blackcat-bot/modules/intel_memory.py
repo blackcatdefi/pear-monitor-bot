@@ -626,6 +626,21 @@ def save_unlock_events(events: list[dict]) -> int:
         return 0
     conn = _get_conn()
     inserted = 0
+
+    def _num_or_none(*vals):
+        # R-AUDIT2-P0.2: preserve NULL for an UNKNOWN amount/value. Coercing
+        # an unknown value_usd to 0 used to make the NEXT CATALYST header treat
+        # a real upcoming unlock (whose USD size the source didn't compute,
+        # e.g. a DropsTab priority token like HYPE) as an explicit $0 tick and
+        # drop it. Unknown must stay NULL so it reads as "unknown", not "$0".
+        for v in vals:
+            if v not in (None, ""):
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    continue
+        return None
+
     for ev in events:
         try:
             conn.execute(
@@ -635,9 +650,9 @@ def save_unlock_events(events: list[dict]) -> int:
                 (
                     (ev.get("token") or ev.get("symbol") or "").upper(),
                     int(ev.get("next_unlock_ts") or ev.get("timestamp") or 0),
-                    float(ev.get("amount_tokens") or ev.get("tokens") or 0),
-                    float(ev.get("value_usd") or 0),
-                    float(ev.get("pct_supply") or ev.get("float_pct") or 0),
+                    _num_or_none(ev.get("amount_tokens"), ev.get("tokens")),
+                    _num_or_none(ev.get("value_usd")),
+                    _num_or_none(ev.get("pct_supply"), ev.get("float_pct")),
                     ev.get("category") or ev.get("type"),
                     ev.get("source") or "unknown",
                 ),

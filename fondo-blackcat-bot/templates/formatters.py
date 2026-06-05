@@ -450,10 +450,41 @@ def _cat_token_key(label: str) -> str:
     return (label or "").strip().upper()
 
 
+def _price_for_symbol(sym: str, prices: dict[str, Any] | None) -> float | None:
+    """Spot price for a ticker from a ``{COIN: price_usd}`` map. None if absent."""
+    if not prices or not sym:
+        return None
+    v = prices.get(str(sym).upper())
+    try:
+        return float(v) if v is not None and float(v) > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _fmt_usd_compact(val: float | None) -> str | None:
+    """Compact USD size for the catalyst label, e.g. 34_000_000 → '$34M'."""
+    if val is None:
+        return None
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return None
+    if v <= 0:
+        return None
+    if v >= 1_000_000_000:
+        return f"${v/1_000_000_000:.1f}B"
+    if v >= 1_000_000:
+        return f"${v/1_000_000:.0f}M"
+    if v >= 1_000:
+        return f"${v/1_000:.0f}K"
+    return f"${v:.0f}"
+
+
 def _next_catalyst_for_header(
     window_hours: int = 72,
     unlocks: dict[str, Any] | None = None,
     now: datetime | None = None,
+    prices: dict[str, Any] | None = None,
 ) -> str:
     """Return the next REAL dated catalyst(s) within ``window_hours``.
 
@@ -513,29 +544,47 @@ def _next_catalyst_for_header(
                     continue
                 if epoch <= 0:
                     continue
-                # P0.2 (2026-06-04): the live feed tracks PRIORITY tokens
-                # even at $0 (linear / already-emitted), whose
+                # P0.2 (2026-06-04 / R-AUDIT2 2026-06-05): the live feed tracks
+                # PRIORITY tokens even at $0 (linear / already-emitted), whose
                 # "next_unlock_ts" can be a near-future emission tick — that
-                # produced the bogus "SUI unlock 2 Jun (en 17m)" line for an
-                # already-passed, $0-per-dropstab event. When the feed gives
-                # an EXPLICIT value of $0 (or negative), the unlock is not a
-                # material catalyst → drop it. A MISSING value field is
-                # treated as "unknown but assume material" (the past-purge
-                # below still guards against stale ticks).
-                if "value_usd" in item:
+                # produced the bogus "SUI unlock 2 Jun (en 17m)" line.
+                #   • An EXPLICIT non-positive value (value_usd present AND ≤ 0)
+                #     ⇒ immaterial tick → drop (the SUI case).
+                #   • An UNKNOWN value (key missing OR value is None — e.g. a
+                #     DropsTab priority token like HYPE whose USD size the
+                #     source never computed) ⇒ assume material → KEEP. The
+                #     past-purge below still guards against stale ticks.
+                # R-AUDIT2 bug: the SQLite cache used to coerce an unknown
+                # value_usd to 0, so a real future HYPE unlock read as an
+                # explicit $0 and was dropped → header said "ninguno" while
+                # the body discussed the 6-Jun HYPE unlock.
+                raw_val = item.get("value_usd")
+                val_usd: float | None = None
+                if raw_val is not None:
                     try:
-                        val_usd = float(item.get("value_usd") or 0)
+                        val_usd = float(raw_val)
                     except (TypeError, ValueError):
-                        val_usd = 0.0
-                    if val_usd <= 0:
-                        continue
+                        val_usd = None
+                    if val_usd is not None and val_usd <= 0:
+                        continue  # explicit $0/negative → immaterial, drop
                 dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
                 sym = (item.get("symbol") or item.get("token") or "?")
+                # USD size for the label: prefer the feed value; otherwise
+                # derive tokens × spot price from this run's market data.
+                if (val_usd is None or val_usd <= 0):
+                    try:
+                        toks = float(item.get("tokens") or item.get("amount_tokens") or 0)
+                    except (TypeError, ValueError):
+                        toks = 0.0
+                    px = _price_for_symbol(sym, prices)
+                    if toks > 0 and px and px > 0:
+                        val_usd = toks * px
                 candidates.append({
                     "label": f"{sym} unlock",
                     "dt": dt,
                     "emoji": "🔓",
                     "rank": impact_rank["high"],
+                    "value_usd": val_usd,
                 })
     except Exception:  # noqa: BLE001
         pass
@@ -565,7 +614,11 @@ def _next_catalyst_for_header(
         if len(chosen) >= 3:
             break
 
-    parts = [f"{c['emoji']} {c['label']} {_cat_date_label(c['dt'])}" for c in chosen]
+    parts = []
+    for c in chosen:
+        usd = _fmt_usd_compact(c.get("value_usd"))
+        size = f" ({usd})" if usd else ""
+        parts.append(f"{c['emoji']} {c['label']}{size} {_cat_date_label(c['dt'])}")
     line = " · ".join(parts)
     return f"{line} (en {_cat_time_until(chosen[0]['dt'], now)})"
 
@@ -721,7 +774,11 @@ def format_report_header(
 
     # 4. NEXT CATALYST <72h
     try:
-        cat = _next_catalyst_for_header(window_hours=72, unlocks=unlocks)
+        # Pass this run's price map so an unknown-USD unlock (e.g. a DropsTab
+        # priority token) can show its size via tokens × spot (R-AUDIT2-P0.2).
+        cat = _next_catalyst_for_header(
+            window_hours=72, unlocks=unlocks, prices=_build_price_map(market)
+        )
         lines.append(f"🗓 NEXT CATALYST <72h: {cat}")
     except Exception:  # noqa: BLE001
         lines.append("🗓 NEXT CATALYST <72h: —")

@@ -118,6 +118,15 @@ def max_assets() -> int:
 
 
 # ─── Pure helpers (mirror side; never touch the gate engine) ─────────────────
+def _dca_blocklist() -> set[str]:
+    """Tickers banned from LONG/cycle/DCA candidacy (P1.4) — ZEC permanently."""
+    try:
+        from config import CYCLE_DCA_BLOCKLIST
+        return {c.upper() for c in CYCLE_DCA_BLOCKLIST}
+    except Exception:  # noqa: BLE001
+        return {"ZEC"}
+
+
 def made_lower_lows(closes: list[float], k: int) -> Optional[bool]:
     """Mirror of ``made_higher_highs``: True when the last close is the LOWEST of
     the last ``k+1`` bars (still making lower lows = falling). None when short."""
@@ -508,6 +517,16 @@ async def _evaluate_one(
 
     lower_lows = made_lower_lows(closes, int(k["hh_lookback_bars"])) if closes else None
     lr = long_read(gate, lower_lows, k)
+
+    # P1.4: a blocklisted ticker (e.g. ZEC) is NEVER a LONG/cycle/DCA
+    # candidate — force the long-context read to non-viable. The SHORT read
+    # is untouched (it can still be shorted; only accumulation is banned).
+    if ticker.upper() in _dca_blocklist():
+        import dataclasses as _dc
+        lr = _dc.replace(
+            lr, flag=False,
+            note="LONG: NO candidato — en blocklist de ciclo/DCA (permanente)",
+        )
 
     excluded = ""
     if not gate.data_ok:

@@ -74,6 +74,10 @@ class PositionTag:
     liq_px: float | None
     liq_distance_pct: float | None
     funding_apr: float | None
+    # P1.5: liquidation price AFTER all resting ladder rungs fill (the
+    # "ride-or-liq" structural floor). Estimate — see structural_liq_note.
+    structural_liq_px: float | None = None
+    structural_liq_note: str = ""
     flags: list[str] = field(default_factory=list)
     orders_unavailable: bool = False
     notional_usd: float = 0.0
@@ -109,8 +113,14 @@ def classify_position(
     orders_available: bool = True,
     funding_apr: float | None = None,
     exploit_flagged: bool = False,
+    dca_blocked: bool = False,
 ) -> PositionTag:
-    """Classify ONE open position from its real attributes. NEVER raises."""
+    """Classify ONE open position from its real attributes. NEVER raises.
+
+    ``dca_blocked`` (P1.4): when True (coin on the cycle/DCA blocklist, e.g.
+    ZEC) the position is NEVER tagged ACUMULACIÓN CICLO — it is forced
+    TACTICAL regardless of structure.
+    """
     coin = position.get("coin", "?")
     size = _to_float(position.get("size") or position.get("szi")) or 0.0
     side = position.get("side") or ("LONG" if size > 0 else "SHORT")
@@ -157,9 +167,34 @@ def classify_position(
 
     orders_unavailable = not orders_available
 
+    # P1.5: structural post-fill liquidation floor ("ride-or-liq" floor).
+    # If every resting ladder rung fills (assuming roughly equal token size
+    # per rung and the SAME effective margin ratio liq/entry is maintained as
+    # margin is added per rung), the blended entry moves toward the rungs and
+    # the liq moves with it. Transparent estimate — labelled as such.
+    structural_liq_px: float | None = None
+    structural_liq_note = ""
+    if (
+        ladder_pxs and entry_px and entry_px > 0
+        and liq_px and liq_px > 0
+    ):
+        try:
+            blended_entry = (entry_px + sum(ladder_pxs)) / (1 + len(ladder_pxs))
+            ratio = liq_px / entry_px  # preserved effective margin ratio
+            structural_liq_px = blended_entry * ratio
+            structural_liq_note = (
+                "≈ post-fill (rungs ~equal size, misma ratio margen)"
+            )
+        except Exception:  # noqa: BLE001
+            structural_liq_px = None
+
     # ── Bucket decision ──
     is_isolated = margin_mode == "isolated"
-    is_cycle = is_isolated and (not has_sl_tp) and ladder_count >= 1 and orders_available
+    # P1.4: a blocklisted ticker (e.g. ZEC) is NEVER a cycle/DCA candidate.
+    is_cycle = (
+        is_isolated and (not has_sl_tp) and ladder_count >= 1
+        and orders_available and not dca_blocked
+    )
 
     flags: list[str] = []
     manual_review_reasons: list[str] = []
@@ -197,7 +232,13 @@ def classify_position(
     else:
         bucket = TACTICAL
         tag_es = "TÁCTICA (cierre por ruptura de tesis aplica)"
-        if orders_unavailable and is_isolated and not has_sl_tp:
+        if dca_blocked:
+            tag_es = "TÁCTICA — fuera del plan DCA/ciclo (blocklist permanente)"
+            flags.append(
+                "🚫 En blocklist de ciclo/DCA — NUNCA acumular/promediar; "
+                "no es candidato de ACUMULACIÓN CICLO (decisión permanente)"
+            )
+        elif orders_unavailable and is_isolated and not has_sl_tp:
             flags.append(
                 "❔ Órdenes no visibles este run — NO sugerir cierre a ciegas; "
                 "podría ser ACUMULACIÓN CICLO sin confirmar"
@@ -216,6 +257,8 @@ def classify_position(
         liq_px=liq_px,
         liq_distance_pct=liq_distance_pct,
         funding_apr=funding_apr,
+        structural_liq_px=structural_liq_px,
+        structural_liq_note=structural_liq_note,
         flags=flags,
         orders_unavailable=orders_unavailable,
         notional_usd=notional,
@@ -245,6 +288,19 @@ def _build_price_map(market: dict[str, Any] | None) -> dict[str, Any]:
     return market.get("prices") or {}
 
 
+def _dca_blocklist() -> set[str]:
+    """Tickers that may NEVER be tagged cycle-accumulation / DCA (P1.4).
+
+    Sourced from ``config.CYCLE_DCA_BLOCKLIST`` (ZEC permanently + any env
+    additions). Falls back to {ZEC} if config import fails.
+    """
+    try:
+        from config import CYCLE_DCA_BLOCKLIST
+        return {c.upper() for c in CYCLE_DCA_BLOCKLIST}
+    except Exception:  # noqa: BLE001
+        return {"ZEC"}
+
+
 def _env_exploit_coins() -> set[str]:
     """Coins with a confirmed protocol/supply-integrity exploit.
 
@@ -268,6 +324,7 @@ def classify_portfolio(
     out: list[PositionTag] = []
     prices = _build_price_map(market)
     exploits = {c.upper() for c in (exploit_coins or set())} | _env_exploit_coins()
+    blocked = _dca_blocklist()
     for w in portfolio or []:
         if not isinstance(w, dict) or w.get("status") != "ok":
             continue
@@ -280,10 +337,12 @@ def classify_portfolio(
         for p in d.get("positions") or []:
             try:
                 mark = _price_for(p.get("coin", ""), prices)
+                _coin_u = str(p.get("coin") or "").upper()
                 tag = classify_position(
                     p, open_orders, mark,
                     orders_available=orders_available,
-                    exploit_flagged=(str(p.get("coin") or "").upper() in exploits),
+                    exploit_flagged=(_coin_u in exploits),
+                    dca_blocked=(_coin_u in blocked),
                 )
                 out.append(tag)
             except Exception:  # noqa: BLE001
@@ -335,12 +394,22 @@ def build_classification_block(tags: list[PositionTag]) -> str:
         if t.notional_usd:
             detail += f" · notional=${t.notional_usd:,.0f}"
         lines.append(detail)
-        if t.bucket == CYCLE:
-            if t.liq_distance_pct is not None:
-                lines.append(f"   distancia a liq: {t.liq_distance_pct:.1f}%")
+        # Liq distance + ladder detail surface for ANY laddered isolated
+        # position (CYCLE *and* TÁCTICA like BTC/SOL), so the ride-or-liq
+        # structural floor is always visible when a ladder exists (P1.5).
+        if t.liq_distance_pct is not None:
+            lines.append(f"   distancia a liq: {t.liq_distance_pct:.1f}%")
+        if t.ladder_count > 0:
             if t.lowest_ladder_px:
                 lines.append(
-                    f"   tranche DCA más baja fondeada: ${t.lowest_ladder_px:,.4f}"
+                    f"   tranche más baja fondeada: ${t.lowest_ladder_px:,.4f}"
+                )
+            # P1.5: post-fill structural liq floor — the ride-or-liq level.
+            if t.structural_liq_px:
+                note = f" {t.structural_liq_note}" if t.structural_liq_note else ""
+                lines.append(
+                    f"   piso liq estructural (tras llenar todo el ladder): "
+                    f"${t.structural_liq_px:,.4f}{note}"
                 )
         for fl in t.flags:
             lines.append(f"   {fl}")

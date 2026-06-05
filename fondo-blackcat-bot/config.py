@@ -286,6 +286,29 @@ CHANNELS = {
 }
 CHANNEL_LIMITS = {"tier1": 200, "tier2": 50, "tier3": 20}
 
+# ─── R-AUDIT2-P1.4 — cycle/DCA blocklist + current fund plan ────────────────
+# ZEC was liquidated and is OUT FOR GOOD: it belongs to a systemic
+# undetectable-exploit class (privacy/shielded accounting), not a one-off bug.
+# Blocklisted tickers are NEVER tagged as cycle-accumulation / DCA candidates
+# anywhere (classifier, screeners, DCA-zone logic). They can still appear in
+# generic intel. Extend via CYCLE_DCA_BLOCKLIST (comma-separated, additive).
+CYCLE_DCA_BLOCKLIST = frozenset(
+    {"ZEC"} | {
+        t.strip().upper()
+        for t in os.getenv("CYCLE_DCA_BLOCKLIST", "").split(",")
+        if t.strip()
+    }
+)
+
+# The current fund plan (post-ZEC): HYPE spot (frozen PM core) + BTC and SOL
+# isolated 5x + Pear staked. Used as context for integrity scanning and plan
+# alignment. Override via FUND_PLAN_ASSETS (comma-separated).
+FUND_PLAN_ASSETS = frozenset(
+    t.strip().upper()
+    for t in os.getenv("FUND_PLAN_ASSETS", "HYPE,BTC,SOL,PEAR").split(",")
+    if t.strip()
+)
+
 # ─── Paths ──────────────────────────────────────────────────────────────────
 DATA_DIR = os.getenv("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
 os.makedirs(DATA_DIR, exist_ok=True)

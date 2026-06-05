@@ -499,6 +499,37 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception:  # noqa: BLE001
         log.exception("per-position funding block failed (non-fatal)")
 
+    # ─── Section 2a-ter: INTEGRITY-HALT scan (R-AUDIT2-P1.3) ─────────────────
+    # Born from the ZEC liquidation: scan the intel feeds for integrity /
+    # credibility rumors tied to a HELD position with adverse PnL and raise a
+    # 🛑 STOP-accumulation MANUAL-REVIEW flag. Never an auto-action. Non-fatal.
+    try:
+        from modules.integrity_halt import run_integrity_halt
+        from config import CYCLE_DCA_BLOCKLIST as _ZB  # noqa: F401  (loaded for plan ctx)
+        _ih_positions = []
+        for _w in (portfolio or []):
+            if isinstance(_w, dict) and _w.get("status") == "ok":
+                _ih_positions.extend((_w.get("data") or {}).get("positions") or [])
+        _ih_intel = {}
+        if isinstance(intel_legacy, dict):
+            _ih_intel["legacy"] = intel_legacy
+        if isinstance(intel_unread, dict):
+            _ih_intel["unread"] = intel_unread
+        if isinstance(x_intel, dict):
+            _ih_intel["x"] = x_intel
+        if isinstance(gmail_intel, dict):
+            _ih_intel["gmail"] = gmail_intel
+        try:
+            from config import FUND_PLAN_ASSETS as _PLAN
+            _plan = set(_PLAN)
+        except Exception:  # noqa: BLE001
+            _plan = {"HYPE", "BTC", "SOL"}
+        _ih_block, _ih_new = run_integrity_halt(_ih_positions, _ih_intel, plan_assets=_plan)
+        if _ih_block:
+            await send_long_message(update, _ih_block, reply_markup=MAIN_KEYBOARD)
+    except Exception:  # noqa: BLE001
+        log.exception("integrity-halt block failed (non-fatal)")
+
     # ─── Section 2b: TraderMap BTC (R-BOT-FEEDS-EXPAND Task 1) ────────────────
     # Surface the BTC chart snapshot (price + indicators when env vars set)
     # next to positions so BCD sees price-action context in /reporte without
@@ -2410,6 +2441,66 @@ async def cmd_signals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
 
 
+async def cmd_halts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-AUDIT2-P1.3 — show ACTIVE 🛑 INTEGRITY-HALT flags. Read-only.
+
+    These are MANUAL-REVIEW alerts (integrity rumor + adverse PnL on a held
+    asset). They never auto-clear; clear one with /haltclear <ASSET>.
+    """
+    try:
+        from modules.integrity_halt import get_active_flags, build_integrity_block
+        flags = get_active_flags()
+        if not flags:
+            await update.message.reply_text(
+                "✅ Sin INTEGRITY-HALT activos.", reply_markup=MAIN_KEYBOARD
+            )
+            return
+        await send_long_message(
+            update, build_integrity_block(flags), reply_markup=MAIN_KEYBOARD
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.exception("/halts failed")
+        await update.message.reply_text(
+            f"❌ Error leyendo INTEGRITY-HALT: {str(exc)[:200]}",
+            reply_markup=MAIN_KEYBOARD,
+        )
+
+
+async def cmd_haltclear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-AUDIT2-P1.3 — explicit BCD dismissal of an INTEGRITY-HALT flag.
+
+    Usage: /haltclear <ASSET>. The ONLY way a flag clears (a shielded-asset
+    flag NEVER auto-clears on absence of confirmation). BCD's call.
+    """
+    try:
+        from modules.integrity_halt import dismiss
+        args = (context.args or [])
+        if not args:
+            await update.message.reply_text(
+                "Uso: /haltclear <ASSET> (p.ej. /haltclear ZEC). Cierre manual de BCD.",
+                reply_markup=MAIN_KEYBOARD,
+            )
+            return
+        asset = str(args[0]).upper()
+        cleared = dismiss(asset, resolution="BCD dismissal via /haltclear")
+        if cleared:
+            await update.message.reply_text(
+                f"🛑→✅ INTEGRITY-HALT de {asset} cerrado por BCD.",
+                reply_markup=MAIN_KEYBOARD,
+            )
+        else:
+            await update.message.reply_text(
+                f"No había INTEGRITY-HALT activo para {asset}.",
+                reply_markup=MAIN_KEYBOARD,
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.exception("/haltclear failed")
+        await update.message.reply_text(
+            f"❌ Error cerrando INTEGRITY-HALT: {str(exc)[:200]}",
+            reply_markup=MAIN_KEYBOARD,
+        )
+
+
 async def _unlock_monitor_job(application: Application) -> None:
     """R-UNLOCK — basket-unlock watchdog (edge-triggered, R-SILENT aware).
 
@@ -3519,6 +3610,9 @@ HANDLER_MAP = {
     "check": cmd_check,
     # R-SIGNAL — per-name short signals (orthogonal to the >=4 unlock ladder)
     "signals": cmd_signals,
+    # R-AUDIT2-P1.3 — INTEGRITY-HALT view + BCD dismissal
+    "halts": cmd_halts,
+    "haltclear": cmd_haltclear,
     # R-INTEL30 Phase 1 — 11 new free intel sources
     "etfs": cmd_etfs,
     "macro": cmd_macro,

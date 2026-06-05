@@ -131,6 +131,10 @@ COMMANDS: List[BotCommand] = [
     # ─── R-SIGNAL — per-name short signals (orthogonal to the >=4 ladder) ───
     BotCommand("signals", "R-SIGNAL: nombres que pasan el filtro short de 5 gates AHORA (confirmá c/u 5/5 AiPear) — ortogonal al ladder >=4", "trading", "cmd_signals"),
 
+    # ─── R-AUDIT2-P1.3 — INTEGRITY-HALT (rumor de integridad + PnL adverso) ───
+    BotCommand("halts", "INTEGRITY-HALT activos: rumor de integridad sobre un activo en cartera con PnL adverso → STOP acumular (MANUAL REVIEW, nunca auto-acción)", "trading", "cmd_halts"),
+    BotCommand("haltclear", "Cierre manual de BCD de un INTEGRITY-HALT: /haltclear <ASSET>. Único modo de limpiarlo (shielded NUNCA auto-limpia)", "trading", "cmd_haltclear"),
+
     # ─── DEBUG / OBSERVABILITY ───
     BotCommand("debug_x", "X/Twitter connectivity diagnostic", "debug", "cmd_debug_x"),
     BotCommand("x_status", "X API status (R15+ live + counters + cache)", "debug", "cmd_x_status"),

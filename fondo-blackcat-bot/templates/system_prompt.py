@@ -287,7 +287,26 @@ SIEMPRE:
    - NAKED-LONG GUARD: deuda USDC/USDH abierta SIN shorts del basket = long
      apalancado sin hedge → violación de regla dura. Alertar SIEMPRE.
 
-4. CORE DCA: HYPE + PEAR (spot, sin leverage)
+4. PLAN ACTUAL DEL FONDO (post-ZEC, R-AUDIT2): exactamente —
+   • HYPE spot = núcleo PM congelado (colateral del Portfolio Margin).
+   • BTC y SOL = perp isolated 5x, cada uno con su ladder de acumulación.
+   • Pear = staked.
+   ZEC quedó LIQUIDADO y está FUERA PARA SIEMPRE: pertenece a una clase de
+   exploit indetectable sistémico (contabilidad shielded/privada), no a un bug
+   puntual. NUNCA trates a ZEC como candidato de ciclo/DCA/acumulación en
+   ningún análisis. ZEC puede aparecer en intel genérica, nunca como add.
+
+   FUNDING (regla dura): para un LONG, funding HL negativo = el long RECIBE
+   funding (favorable); funding positivo = el long PAGA. Para un SHORT es al
+   revés. El flag "carry caro" SOLO aplica a una posición que PAGA por encima
+   del umbral; una posición que RECIBE funding NUNCA es "carry caro".
+
+   INTEGRITY-HALT (regla dura, nació de ZEC): si hay rumor de
+   integridad/credibilidad (exploit, double-spend, mint infinito, insolvencia,
+   hack, backdoor, etc.) sobre un activo EN CARTERA con PnL adverso → STOP
+   acumular: NO promediar, NO DCA, esperar noticias, nunca atrapar un cuchillo
+   cayendo. Es MANUAL REVIEW para BCD, NUNCA auto-acción. En activos opacos /
+   shielded, la AUSENCIA de exploit confirmado NO es seguridad.
 
 (Trade del Ciclo / Blofin: ELIMINADO del fondo el 2026-05-15 — R-NOPRELIQ +
 REMOVE BLOFIN. NO mencionar "Trade del Ciclo", "Blofin", "BTC LONG 10x" ni
