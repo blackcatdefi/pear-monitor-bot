@@ -630,21 +630,29 @@ _DISCLAIMERS = [
 
 
 def _short_gate_detail(g: AltGate, k: dict[str, float]) -> str:
-    """Full per-gate one-liner for a single ranked row (reused by /check)."""
+    """Full per-gate one-liner for a single ranked row (reused by /check).
+
+    P1.8: renders pass/fail (✅/❌) for ALL FIVE gates explicitly — gate #1
+    (data ≥90% coverage) was previously implicit (data-insuf names were just
+    excluded). Order matches the canonical gate list: data, z, Hurst,
+    squeeze, funding.
+    """
     cutoff = hurst_count_cutoff(k)
+    dtag = "✅" if g.data_ok else "❌"
     ztag = "✅" if g.z_ok else "❌"
     htag = "✅" if g.hurst_ok else "❌"
     sqtag = "✅" if not g.squeeze_flag else "❌"
     ftag = "✅" if g.funding_ok else "❌"
     sqtxt = "clear" if not g.squeeze_flag else "/".join(g.squeeze_reasons)
     parts = [
+        f"data {g.coverage * 100:.0f}%≥{k['data_min_coverage'] * 100:.0f}%{dtag}",
         f"z {_fmt_z(g.z)}≥+{k['z_floor']:.2f}{ztag}",
         f"Hurst {_fmt_hurst(g.hurst)}≤{cutoff:.2f}{htag}",
         f"squeeze {sqtxt}{sqtag}",
         f"fund {_fmt_funding(g.funding_sign)}{ftag}",
     ]
     if g.z_floor_ok and not g.z_persistent:
-        parts[0] += f"(persist {g.z_streak}/{int(k['z_persist_readings'])})"
+        parts[1] += f"(persist {g.z_streak}/{int(k['z_persist_readings'])})"
     return " | ".join(parts)
 
 
