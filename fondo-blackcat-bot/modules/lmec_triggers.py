@@ -105,6 +105,15 @@ def _env_bool_optional(name: str) -> bool | None:
     return str(raw).strip().lower() in ("true", "1", "yes", "y", "on")
 
 
+def _manual_lmec_inputs() -> dict[str, object]:
+    """P1.9: BCD's persisted /setlmec inputs (MACD/RSI/MA50w). Never raises."""
+    try:
+        from modules.lmec_state import get_manual_inputs
+        return get_manual_inputs()
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _btc_price_from_market(market: dict[str, Any] | None) -> float | None:
     """Best-effort BTC spot extraction shared with other modules."""
     if not isinstance(market, dict):
@@ -225,17 +234,20 @@ def evaluate_lmec_triggers(market: dict[str, Any] | None = None) -> dict[str, An
         })
 
     # ── 2. Weekly MACD positive ──────────────────────────────────────
-    # TraderMap override > LMEC env var.
+    # Precedence: TraderMap override > manual /setlmec input > LMEC env var.
+    _manual = _manual_lmec_inputs()
     if "macd_weekly_positive" in tm_over:
         macd_pos = bool(tm_over["macd_weekly_positive"])
+    elif _manual.get("macd_weekly_positive") is not None:
+        macd_pos = bool(_manual["macd_weekly_positive"])
     else:
         macd_pos = _env_bool_optional("LMEC_MACD_WEEKLY_POSITIVE")
     if macd_pos is None:
         conditions.append({
             "id": "macd_weekly_positive",
             "name": "MACD semanal terreno positivo",
-            "status": "UNKNOWN",
-            "detail": "LMEC_MACD_WEEKLY_POSITIVE unset (BCD update vía TradingView)",
+            "status": "AWAITING_BCD",
+            "detail": "⏳ esperando input de BCD (MACD semanal vía TradingView) — usá /setlmec macd <pos|neg>",
         })
     else:
         conditions.append({
@@ -255,16 +267,23 @@ def evaluate_lmec_triggers(market: dict[str, Any] | None = None) -> dict[str, An
         try:
             rsi: float | None = float(tm_over["rsi_weekly"])
         except (TypeError, ValueError):
-            rsi = _env_float("LMEC_RSI_WEEKLY", None)
+            rsi = None
+    elif _manual.get("rsi_weekly") is not None:
+        try:
+            rsi = float(_manual["rsi_weekly"])
+        except (TypeError, ValueError):
+            rsi = None
     else:
+        rsi = _env_float("LMEC_RSI_WEEKLY", None)
+    if rsi is None:
         rsi = _env_float("LMEC_RSI_WEEKLY", None)
     rsi_neutral_band = _env_float("LMEC_RSI_NEUTRAL_BAND", 5.0) or 5.0
     if rsi is None:
         conditions.append({
             "id": "rsi_weekly_above_70",
             "name": "RSI semanal > 70",
-            "status": "UNKNOWN",
-            "detail": "LMEC_RSI_WEEKLY unset (BCD update vía TradingView)",
+            "status": "AWAITING_BCD",
+            "detail": "⏳ esperando input de BCD (RSI semanal vía TradingView) — usá /setlmec rsi <valor>",
         })
     else:
         if rsi > 70.0:
@@ -289,12 +308,20 @@ def evaluate_lmec_triggers(market: dict[str, Any] | None = None) -> dict[str, An
     # TraderMap override > LMEC env var (only the MA value — weeks-broken
     # is now AUTO-MANAGED via lmec_state.update_weeks_counter, with the
     # legacy LMEC_MA50W_BROKEN_WEEKS env var as manual override).
+    # Precedence: TraderMap override > manual /setlmec input > LMEC env var.
     if "ma50w" in tm_over:
         try:
             ma50w: float | None = float(tm_over["ma50w"])
         except (TypeError, ValueError):
-            ma50w = _env_float("LMEC_MA50W_USD", None)
+            ma50w = None
+    elif _manual.get("ma50w_usd") is not None:
+        try:
+            ma50w = float(_manual["ma50w_usd"])
+        except (TypeError, ValueError):
+            ma50w = None
     else:
+        ma50w = _env_float("LMEC_MA50W_USD", None)
+    if ma50w is None:
         ma50w = _env_float("LMEC_MA50W_USD", None)
 
     # R-BOT-LMEC-AUTOFEED: auto-managed counter (lmec_state.json on Railway Volume).
@@ -317,14 +344,20 @@ def evaluate_lmec_triggers(market: dict[str, Any] | None = None) -> dict[str, An
         or 2
     )
     if ma50w is None or weeks_broken is None or btc_price is None:
+        # P1.9: if the only thing missing is BCD's MA50w value, this is an
+        # AWAITING_BCD state (clean) rather than a generic UNKNOWN error.
+        if ma50w is None:
+            detail = ("⏳ esperando input de BCD (MA50w semanal vía TradingView) "
+                      "— usá /setlmec ma50w <valor>")
+            status_ma = "AWAITING_BCD"
+        else:
+            detail = "Inputs incompletos — falta el feed de BTC o el contador de semanas"
+            status_ma = "UNKNOWN"
         conditions.append({
             "id": "ma50w_broken_sustained",
             "name": "MA50w rota con fuerza sostenida 2-3 semanas",
-            "status": "UNKNOWN",
-            "detail": (
-                "Inputs incompletos — set LMEC_MA50W_USD, "
-                "LMEC_MA50W_BROKEN_WEEKS y verificar BTC feed"
-            ),
+            "status": status_ma,
+            "detail": detail,
         })
     else:
         gap_ma_pct = (btc_price - ma50w) / ma50w * 100.0

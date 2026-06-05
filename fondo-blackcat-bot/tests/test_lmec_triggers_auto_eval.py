@@ -87,6 +87,8 @@ def test_lmec_macd_used_when_tradermap_unset():
 
 
 def test_macd_unknown_when_neither_set():
+    # P1.9: a BCD-manual TA leg with no TraderMap / manual / env input now
+    # reads AWAITING_BCD (clean) instead of the old generic UNKNOWN.
     with env(
         TRADERMAP_BTC_MACD=None,
         TRADERMAP_BTC_RSI=None,
@@ -95,7 +97,8 @@ def test_macd_unknown_when_neither_set():
     ):
         result = evaluate_lmec_triggers(_market(80_000))
     leg = next(c for c in result["conditions"] if c["id"] == "macd_weekly_positive")
-    assert leg["status"] == "UNKNOWN"
+    assert leg["status"] == "AWAITING_BCD"
+    assert "unset" not in leg["detail"].lower()
 
 
 # ── Leg #3 — RSI weekly > 70 ────────────────────────────────────────────

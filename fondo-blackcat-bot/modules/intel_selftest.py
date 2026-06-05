@@ -24,6 +24,29 @@ PER_MODULE_TIMEOUT = 10.0
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 LAST_SELFTEST = DATA_DIR / "selftest_last.json"
 
+# P1.9: sources that are OPTIONAL by design — they have no free public API or
+# require a key the fund hasn't provisioned, so a non-LIVE result is EXPECTED
+# and must NOT count as a selftest failure.
+#   • arkham_intel — ARKHAM_API_KEY not provisioned (free signup optional)
+#   • asxn_data    — no public API (dashboard is a client-rendered SPA)
+#   • hypurrscan   — /api/auctions returns 404 (endpoint retired upstream)
+OPTIONAL_SOURCES = frozenset({"arkham_intel", "asxn_data", "hypurrscan"})
+
+# Statuses that mean "working as expected" for pass-count purposes. OPTIONAL
+# sources are folded in via _is_healthy below regardless of their raw status.
+HEALTHY_STATUSES = frozenset({"LIVE", "GRACEFUL_NO_KEY", "DEGRADED", "OPTIONAL"})
+
+
+def _is_healthy(row: dict[str, Any]) -> bool:
+    """A source counts toward the pass total if it is LIVE / gracefully
+    keyless / degraded-but-handled, OR if it is an OPTIONAL-by-design source
+    (any non-crashing status). Only hard failures (TIMEOUT / EXCEPTION /
+    IMPORT_FAIL / BAD_SHAPE / UNAVAILABLE / EMPTY / UNKNOWN on a REQUIRED
+    source) count against the total."""
+    if row.get("optional"):
+        return row.get("status") != "IMPORT_FAIL"  # import failure is always a fail
+    return row.get("status") in HEALTHY_STATUSES
+
 
 async def _fetch_one(name: str) -> dict[str, Any]:
     """Run one module's fetch_all under timeout. Always returns a dict."""
@@ -56,6 +79,17 @@ async def _fetch_one(name: str) -> dict[str, Any]:
 
 def _classify(name: str, data: Any, latency_ms: int) -> dict[str, Any]:
     """Map a module's fetch_all return into a status entry."""
+    entry = _classify_inner(name, data, latency_ms)
+    # P1.9: tag optional-by-design sources and normalise their non-LIVE
+    # statuses to OPTIONAL so they read clean and never count as failures.
+    if name in OPTIONAL_SOURCES:
+        entry["optional"] = True
+        if entry.get("status") not in ("LIVE", "IMPORT_FAIL"):
+            entry["status"] = "OPTIONAL"
+    return entry
+
+
+def _classify_inner(name: str, data: Any, latency_ms: int) -> dict[str, Any]:
     if not isinstance(data, dict):
         return {"name": name, "status": "BAD_SHAPE", "latency_ms": latency_ms, "reason": "non-dict return"}
     if data.get("_status") == "GRACEFUL_NO_KEY":
@@ -107,11 +141,18 @@ async def run_selftest() -> dict[str, Any]:
     counts: dict[str, int] = {}
     for r in rows:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
+    # P1.9: pass-count excludes optional-source non-failures. ``healthy`` is
+    # the number reported as the selftest pass count (LIVE/keyless/degraded/
+    # optional); ``failures`` are REQUIRED sources that genuinely broke.
+    healthy = sum(1 for r in rows if _is_healthy(r))
+    failures = [r["name"] for r in rows if not _is_healthy(r)]
     matrix = {
         "ts_utc": int(time.time()),
         "rows": rows,
         "counts": counts,
         "total": len(rows),
+        "healthy": healthy,
+        "failures": failures,
     }
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -123,10 +164,20 @@ async def run_selftest() -> dict[str, Any]:
 
 
 def format_matrix(matrix: dict[str, Any]) -> str:
-    lines = [f"🩺 *Selftest — {matrix.get('total', 0)} sources*"]
+    total = matrix.get("total", 0)
+    healthy = matrix.get("healthy")
+    head = f"🩺 *Selftest — {total} sources*"
+    if healthy is not None:
+        head += f" · sanos {healthy}/{total}"
+    lines = [head]
     counts = matrix.get("counts", {})
     summary_bits = [f"{k}={v}" for k, v in sorted(counts.items())]
     lines.append("  · " + " · ".join(summary_bits))
+    fails = matrix.get("failures") or []
+    if fails:
+        lines.append("  ⚠️ requeridas caídas: " + ", ".join(fails))
+    else:
+        lines.append("  ✅ sin fuentes requeridas caídas (opcionales no cuentan)")
     rows = matrix.get("rows", [])
     rows.sort(key=lambda r: (r.get("status", ""), r.get("name", "")))
     for r in rows:

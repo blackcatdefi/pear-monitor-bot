@@ -95,7 +95,43 @@ def _empty_state() -> dict[str, Any]:
         "tradermap_failure_streak": 0,
         "last_flip_iso": None,
         "last_flip_legs": [],
+        # P1.9: BCD's manually-entered TradingView inputs (MACD weekly /
+        # RSI weekly / MA50w), persisted on the Volume via /setlmec so they
+        # survive restarts without an env-var redeploy. None = awaiting input.
+        "manual_inputs": {},
     }
+
+
+# P1.9 — manual LMEC input persistence (set via /setlmec). These are the
+# weekly-TA values BCD reads off TradingView; the bot has no first-class TA
+# feed, so they're entered by hand and stored here as an override layer.
+_MANUAL_KEYS = ("macd_weekly_positive", "rsi_weekly", "ma50w_usd")
+
+
+def get_manual_inputs() -> dict[str, Any]:
+    """Return the persisted manual LMEC inputs (possibly empty). Never raises."""
+    try:
+        mi = load().get("manual_inputs") or {}
+        return {k: mi[k] for k in _MANUAL_KEYS if k in mi and mi[k] is not None}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def set_manual_input(key: str, value: Any) -> dict[str, Any]:
+    """Persist one manual LMEC input. ``value=None`` clears it. Returns the
+    updated manual-inputs dict. Never raises."""
+    key = (key or "").strip().lower()
+    if key not in _MANUAL_KEYS:
+        raise ValueError(f"unknown LMEC input {key!r}; valid: {', '.join(_MANUAL_KEYS)}")
+    state = load()
+    mi = dict(state.get("manual_inputs") or {})
+    if value is None:
+        mi.pop(key, None)
+    else:
+        mi[key] = value
+    state["manual_inputs"] = mi
+    save(state)
+    return mi
 
 
 def load() -> dict[str, Any]:

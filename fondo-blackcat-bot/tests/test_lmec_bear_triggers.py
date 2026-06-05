@@ -59,7 +59,7 @@ def test_evaluate_returns_four_conditions_with_known_statuses():
     assert isinstance(result, dict)
     conds = result["conditions"]
     assert len(conds) == 4
-    valid = {"VALIDA", "NEUTRO", "INVALIDA", "UNKNOWN"}
+    valid = {"VALIDA", "NEUTRO", "INVALIDA", "UNKNOWN", "AWAITING_BCD"}
     for c in conds:
         assert c["status"] in valid, c
 
@@ -95,7 +95,9 @@ def test_btc_below_ath_is_invalida():
 
 
 def test_all_unknown_when_env_missing_and_no_market():
-    """No market + no env vars → 4 UNKNOWN legs, no triggers."""
+    """No market + no env vars → legs are non-actionable: the BTC-ATH leg has
+    no price feed (UNKNOWN) and the three BCD-manual TA legs read AWAITING_BCD
+    (P1.9). No leg triggers."""
     with env(
         LMEC_MACD_WEEKLY_POSITIVE=None,
         LMEC_RSI_WEEKLY=None,
@@ -107,7 +109,9 @@ def test_all_unknown_when_env_missing_and_no_market():
     ):
         result = evaluate_lmec_triggers(None)
     statuses = {c["status"] for c in result["conditions"]}
-    assert statuses == {"UNKNOWN"}
+    assert statuses <= {"UNKNOWN", "AWAITING_BCD"}
+    assert "VALIDA" not in statuses
+    assert result["triggered_count"] == 0
     assert result["any_triggered"] is False
     assert result["all_triggered"] is False
     assert result["triggered_count"] == 0

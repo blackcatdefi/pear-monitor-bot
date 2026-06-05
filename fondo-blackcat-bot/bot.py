@@ -1318,6 +1318,75 @@ async def cmd_lmec_status(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 @authorized
 @with_error_logging
+async def cmd_setlmec(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """P1.9 — set BCD's manual LMEC TradingView inputs (persisted on Volume).
+
+    Usage:
+      /setlmec                 → show current inputs + usage
+      /setlmec macd pos|neg    → weekly MACD above/below 0
+      /setlmec rsi <valor>     → weekly RSI 14
+      /setlmec ma50w <valor>   → current 50-week MA (USD)
+      /setlmec clear <campo>   → clear one input (back to awaiting)
+    """
+    from modules.lmec_state import get_manual_inputs, set_manual_input
+
+    args = context.args or []
+    if not args:
+        cur = get_manual_inputs()
+        def _show(k, label):
+            v = cur.get(k)
+            return f"  • {label}: {v if v is not None else '⏳ awaiting'}"
+        text = (
+            "🧭 /setlmec — inputs manuales LMEC (TradingView)\n\n"
+            + _show("macd_weekly_positive", "MACD semanal positivo") + "\n"
+            + _show("rsi_weekly", "RSI semanal") + "\n"
+            + _show("ma50w_usd", "MA50w (USD)") + "\n\n"
+            "Uso:\n"
+            "  /setlmec macd pos|neg\n"
+            "  /setlmec rsi 72.5\n"
+            "  /setlmec ma50w 88000\n"
+            "  /setlmec clear macd|rsi|ma50w"
+        )
+        await update.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
+        return
+
+    field = args[0].strip().lower()
+    val = args[1].strip().lower() if len(args) > 1 else ""
+    alias = {"macd": "macd_weekly_positive", "rsi": "rsi_weekly", "ma50w": "ma50w_usd"}
+    try:
+        if field == "clear":
+            key = alias.get(val)
+            if not key:
+                raise ValueError("campo a limpiar: macd|rsi|ma50w")
+            set_manual_input(key, None)
+            await update.message.reply_text(
+                f"🧹 LMEC {val} limpiado (vuelve a ⏳ awaiting).", reply_markup=MAIN_KEYBOARD
+            )
+            return
+        if field == "macd":
+            if val in ("pos", "positive", "true", "1", "yes"):
+                set_manual_input("macd_weekly_positive", True)
+            elif val in ("neg", "negative", "false", "0", "no"):
+                set_manual_input("macd_weekly_positive", False)
+            else:
+                raise ValueError("usá: /setlmec macd pos|neg")
+            await update.message.reply_text("✅ MACD semanal actualizado.", reply_markup=MAIN_KEYBOARD)
+            return
+        if field == "rsi":
+            set_manual_input("rsi_weekly", float(val))
+            await update.message.reply_text("✅ RSI semanal actualizado.", reply_markup=MAIN_KEYBOARD)
+            return
+        if field == "ma50w":
+            set_manual_input("ma50w_usd", float(val))
+            await update.message.reply_text("✅ MA50w actualizado.", reply_markup=MAIN_KEYBOARD)
+            return
+        raise ValueError("campo desconocido — usá macd|rsi|ma50w|clear")
+    except ValueError as exc:
+        await update.message.reply_text(f"❌ {exc}", reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
 async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """R-DASHBOARD-COMMAND — full dashboard as a Telegram message.
 
@@ -3435,6 +3504,7 @@ HANDLER_MAP = {
     "dashboard": cmd_dashboard,
     # R-BOT-LMEC-AUTOFEED
     "lmec_status": cmd_lmec_status,
+    "setlmec": cmd_setlmec,
     # R-VARIATIONAL — Farm the DUMP
     "variationalfunding": cmd_variationalfunding,
     "variationalalerts": cmd_variationalalerts,

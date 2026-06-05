@@ -28,7 +28,7 @@ COMMANDS: List[BotCommand] = [
     BotCommand("posiciones", "Quick snapshot (wallets + HF + Bounce Tech)", "core", "cmd_posiciones"),
     BotCommand("dashboard", "Live dashboard: capital + flywheels + basket + market (R-DASHBOARD-COMMAND)", "core", "cmd_dashboard"),
     BotCommand("status", "R17 quick status (no LLM, <3s)", "core", "cmd_status"),
-    BotCommand("flywheel", "HL pair trade (LONG HYPE / SHORT UETH)", "core", "cmd_flywheel"),
+    BotCommand("flywheel", "Estado core Portfolio Margin (flywheel HyperLend CERRADO)", "core", "cmd_flywheel"),
     BotCommand("tesis", "Current macro thesis state", "core", "cmd_tesis"),
     BotCommand("calendar", "Upcoming catalysts (macro + unlocks + TGEs)", "core", "cmd_calendar"),
     BotCommand("brief", "Full morning brief (R18)", "core", "cmd_brief"),
@@ -113,6 +113,7 @@ COMMANDS: List[BotCommand] = [
     BotCommand("pat_status", "GitHub PAT expiry — días restantes + verdict (R-PAT-RENEW)", "admin", "cmd_pat_status"),
 
     BotCommand("lmec_status", "LMEC bear-invalidation telemetry (R-BOT-LMEC-AUTOFEED)", "trading", "cmd_lmec_status"),
+    BotCommand("setlmec", "Set manual LMEC inputs: MACD/RSI/MA50w semanal (P1.9)", "trading", "cmd_setlmec"),
 
     # ─── R-VARIATIONAL — Farm the DUMP ───
     BotCommand("variationalfunding", "Scan Variational perps: funding anualizado ≤ umbral (-500% def)", "trading", "cmd_variationalfunding"),
