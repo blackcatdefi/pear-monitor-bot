@@ -465,6 +465,22 @@ def _next_catalyst_for_header(
                     continue
                 if epoch <= 0:
                     continue
+                # P0.2 (2026-06-04): the live feed tracks PRIORITY tokens
+                # even at $0 (linear / already-emitted), whose
+                # "next_unlock_ts" can be a near-future emission tick — that
+                # produced the bogus "SUI unlock 2 Jun (en 17m)" line for an
+                # already-passed, $0-per-dropstab event. When the feed gives
+                # an EXPLICIT value of $0 (or negative), the unlock is not a
+                # material catalyst → drop it. A MISSING value field is
+                # treated as "unknown but assume material" (the past-purge
+                # below still guards against stale ticks).
+                if "value_usd" in item:
+                    try:
+                        val_usd = float(item.get("value_usd") or 0)
+                    except (TypeError, ValueError):
+                        val_usd = 0.0
+                    if val_usd <= 0:
+                        continue
                 dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
                 sym = (item.get("symbol") or item.get("token") or "?")
                 candidates.append({

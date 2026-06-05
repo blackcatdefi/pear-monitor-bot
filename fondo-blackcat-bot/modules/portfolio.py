@@ -16,6 +16,7 @@ from typing import Any
 
 from config import FUND_WALLETS, HIP3_DEXES, HYPERLIQUID_API, WALLET_FETCH_TIMEOUT, DATA_DIR
 from utils.http import post_json
+from modules import spot_index
 
 log = logging.getLogger(__name__)
 
@@ -113,7 +114,7 @@ async def user_fills_by_time(
 def _normalize_fill(f: dict[str, Any], wallet_label: str = "") -> dict[str, Any]:
     """Normalise a raw HL fill dict to the canonical shape used across the bot."""
     return {
-        "coin": f.get("coin", "?"),
+        "coin": spot_index.resolve_spot_coin(f.get("coin", "?")),
         "side": f.get("side", "?"),
         "dir": f.get("dir", ""),
         "px": float(f.get("px", 0) or 0),
@@ -133,6 +134,7 @@ async def fetch_fills_since(
     """Fetch all fills for one wallet since `since` datetime (inclusive)."""
     start_ms = int(since.timestamp() * 1000)
     try:
+        await spot_index.ensure_spot_index_map()
         raw = await user_fills_by_time(wallet, start_ms)
         if not isinstance(raw, list):
             return []
@@ -263,7 +265,7 @@ async def _fetch_spot(wallet: str) -> list[dict[str, Any]]:
             except (TypeError, ValueError):
                 entry_ntl = 0.0
             result.append({
-                "coin": b.get("coin", "?"),
+                "coin": spot_index.resolve_spot_coin(b.get("coin", "?")),
                 "total": total,
                 "hold": hold,
                 "entry_ntl": entry_ntl,
@@ -337,7 +339,7 @@ def _normalize_open_orders(orders: list[dict[str, Any]] | None) -> list[dict[str
             # if same-coin. Require trigger-ness AND reduce-only.
             is_sl_tp = is_position_tpsl or (is_trigger and reduce_only) or (tpsl in ("tp", "sl") and reduce_only)
             out.append({
-                "coin": o.get("coin", "?"),
+                "coin": spot_index.resolve_spot_coin(o.get("coin", "?")),
                 "side": "BUY" if side_raw == "B" else ("SELL" if side_raw == "A" else side_raw),
                 "limit_px": _to_float(o.get("limitPx")) or 0.0,
                 "trigger_px": trigger_px_val if trigger_px_val > 0 else None,
@@ -365,6 +367,10 @@ async def fetch_wallet(wallet: str, label: str) -> dict[str, Any]:
 
     for attempt in range(max_retries):
         try:
+            # Warm the spot-index → ticker map so @N spot orders/balances
+            # resolve by name (HYPE, not @107). Cached 1h, so this is a
+            # no-op fast path after the first wallet of the run.
+            await spot_index.ensure_spot_index_map()
             dex_keys: list[str | None] = [None] + list(HIP3_DEXES)
             # Fetch all perp dexes + spot + open orders concurrently.
             # R-REPORTE-LIVE: open orders come from the SAME HL info endpoint
@@ -476,6 +482,7 @@ async def get_spot_price(coin: str) -> float | None:
 async def fetch_recent_fills(wallet: str, hours: int = 24) -> list[dict[str, Any]]:
     """Fetch recent fills (closed trades) for a wallet within the last N hours."""
     try:
+        await spot_index.ensure_spot_index_map()
         fills = await user_fills(wallet)
         if not isinstance(fills, list):
             return []
@@ -489,7 +496,7 @@ async def fetch_recent_fills(wallet: str, hours: int = 24) -> list[dict[str, Any
                     if dt < cutoff:
                         continue
                 recent.append({
-                    "coin": f.get("coin", "?"),
+                    "coin": spot_index.resolve_spot_coin(f.get("coin", "?")),
                     "side": f.get("side", "?"),
                     "px": float(f.get("px", 0) or 0),
                     "sz": float(f.get("sz", 0) or 0),

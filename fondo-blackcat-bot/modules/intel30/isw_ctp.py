@@ -43,6 +43,59 @@ FEEDS = {
         "http://feeds.bbci.co.uk/news/world/middle_east/rss.xml",
     ],
 }
+
+# P0.3 (2026-06-04) — relevance routing. The canonical ISW/CTP feeds are
+# topical by construction, but they 403 from Railway/datacenter IPs, so we
+# fall back to GENERAL wire feeds (Al Jazeera "all", BBC world). Those carry
+# unrelated headlines (Ivory Coast football, Kenya Ebola, US vote-a-rama)
+# that must NOT be tagged "Iran/MENA". Any feed not in CANONICAL_TOPICAL has
+# its items filtered to bucket keywords; a bucket with zero matches is
+# dropped (the renderer skips empty buckets) rather than mislabelled.
+CANONICAL_TOPICAL = (
+    "understandingwar.org",
+    "criticalthreats.org",
+)
+
+BUCKET_KEYWORDS = {
+    "Geopol Russia/Ukraine": (
+        "ukrain", "russia", "russian", "kremlin", "moscow", "kyiv", "kiev",
+        "putin", "zelensk", "donbas", "donetsk", "luhansk", "crimea",
+        "kharkiv", "zaporizh", "wagner", "belarus",
+    ),
+    "Geopol Iran/MENA": (
+        "iran", "tehran", "irgc", "khamenei", "israel", "gaza", "hamas",
+        "hezbollah", "houthi", "yemen", "syria", "lebanon", "beirut",
+        "idf", "netanyahu", "west bank", "hormuz", "red sea",
+        "middle east", "mena", "saudi", "uae", "qatar", "iraq", "baghdad",
+        "nuclear",
+    ),
+}
+
+
+def _is_canonical(url: str | None) -> bool:
+    u = (url or "").lower()
+    return any(dom in u for dom in CANONICAL_TOPICAL)
+
+
+def _filter_relevant(label: str, items: list[dict[str, str]], url: str | None) -> list[dict[str, str]]:
+    """Keep only bucket-relevant items for non-canonical (general) feeds.
+
+    Canonical ISW/CTP feeds are already on-topic and pass through unchanged.
+    For general fallback feeds, match the title (case-insensitive substring)
+    against the bucket's keyword set; non-matching headlines are discarded so
+    they can never be mislabelled under this bucket.
+    """
+    if _is_canonical(url):
+        return items
+    kws = BUCKET_KEYWORDS.get(label)
+    if not kws:
+        return items
+    out = []
+    for it in items:
+        title = (it.get("title") or "").lower()
+        if any(k in title for k in kws):
+            out.append(it)
+    return out
 HTTP_TIMEOUT = 10.0
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
 HEADERS = {
@@ -83,11 +136,12 @@ async def fetch_feed(label: str, urls: list[str] | str) -> dict[str, Any]:
                 if r.status_code != 200:
                     last_err = f"http_{r.status_code}@{url[:60]}"
                     continue
-                items = _parse_rss(r.text, max_items=3)
+                items = _parse_rss(r.text, max_items=12)
+                items = _filter_relevant(label, items, url)[:3]
                 if items:
                     used_url = url
                     return {"label": label, "items": items, "source": used_url, "_error": None}
-                last_err = f"empty@{url[:60]}"
+                last_err = f"no_relevant@{url[:60]}"
             except Exception as e:
                 last_err = f"{type(e).__name__}@{url[:60]}: {str(e)[:60]}"
                 continue
@@ -115,8 +169,15 @@ def format_for_telegram(data: dict[str, Any]) -> str:
         if not isinstance(f, dict):
             continue
         label = f.get("label", "?")
-        if f.get("_error"):
-            lines.append(f"  ⚠️ {label}: {f['_error'][:50]}")
+        err = f.get("_error") or ""
+        # P0.3: a bucket with no on-topic items is DROPPED, not mislabelled.
+        # "no_relevant"/"no_feeds"/"empty" are confidence-drop sentinels →
+        # omit the bucket silently rather than print a raw error string or
+        # attach unrelated headlines under an Iran/MENA / RU-UA heading.
+        if err.startswith(("no_relevant", "no_feeds", "empty")):
+            continue
+        if err:
+            lines.append(f"  ⚠️ {label}: degradado")
             continue
         items = f.get("items") or []
         if not items:
