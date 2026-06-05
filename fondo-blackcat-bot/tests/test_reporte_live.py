@@ -131,7 +131,9 @@ def test_classify_cycle_accumulation_long() -> None:
     assert tag.ladder_count == 2
     assert tag.lowest_ladder_px == 60000.0
     # Liq distance = (70000-50000)/70000 = 28.6% → > 8% → no compress flag.
-    assert all("LIQ COMPRIMIDA" not in f for f in tag.flags)
+    # P1.7: compress flag is now phrased as a MANUAL-REVIEW liq line.
+    assert tag.manual_review is False
+    assert all("distancia a liq" not in f for f in tag.flags)
 
 
 def test_cycle_flags_when_liq_compresses() -> None:
@@ -141,7 +143,9 @@ def test_cycle_flags_when_liq_compresses() -> None:
     pos["liq_px"] = 66000.0  # mark 70000 → distance 5.7% < 8%
     tag = classify_position(pos, orders, mark_px=70000.0, orders_available=True)
     assert tag.bucket == CYCLE
-    assert any("LIQ COMPRIMIDA" in f for f in tag.flags)
+    # P1.7: compressing liq distance raises a MANUAL-REVIEW flag (not auto-close).
+    assert tag.manual_review is True
+    assert any("MANUAL REVIEW" in f and "liq" in f.lower() for f in tag.flags)
 
 
 def test_position_with_sl_tp_is_tactical() -> None:

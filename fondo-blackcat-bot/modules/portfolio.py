@@ -193,6 +193,14 @@ def _summarize_positions(state: dict[str, Any], dex_label: str = "main") -> dict
         except (TypeError, ValueError):
             liq_px = None
         leverage = p.get("leverage", {}) or {}
+        # P1.6: cumulative funding PAID since the position opened
+        # (HL cumFunding.sinceOpen, USD; HL convention: positive = paid out,
+        # negative = received). Captured here so the funding tracker can show
+        # carry-to-date per position without a second API round-trip.
+        try:
+            cum_funding_open = float((p.get("cumFunding") or {}).get("sinceOpen") or 0.0)
+        except (TypeError, ValueError):
+            cum_funding_open = 0.0
         positions.append({
             "coin": p.get("coin", "?"),
             "size": szi,
@@ -203,6 +211,7 @@ def _summarize_positions(state: dict[str, Any], dex_label: str = "main") -> dict
             "liq_px": liq_px,
             "leverage": leverage.get("value"),
             "leverage_type": leverage.get("type"),
+            "cum_funding_since_open": cum_funding_open,
             "dex": dex_label,
         })
         unrealized_total += unrealized

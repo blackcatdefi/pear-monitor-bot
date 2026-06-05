@@ -79,6 +79,12 @@ class PositionTag:
     notional_usd: float = 0.0
     entry_px: float | None = None
     mark_px: float | None = None
+    # P1.7: cycle-accumulation positions are NEVER auto-suggested for
+    # close/reduce. When a hard risk condition appears (exploit / expensive
+    # funding / compressing liq distance) we raise a MANUAL-REVIEW flag for
+    # BCD — never an auto-action.
+    manual_review: bool = False
+    manual_review_reasons: list[str] = field(default_factory=list)
 
 
 def _to_float(v: Any) -> float | None:
@@ -102,6 +108,7 @@ def classify_position(
     *,
     orders_available: bool = True,
     funding_apr: float | None = None,
+    exploit_flagged: bool = False,
 ) -> PositionTag:
     """Classify ONE open position from its real attributes. NEVER raises."""
     coin = position.get("coin", "?")
@@ -155,20 +162,30 @@ def classify_position(
     is_cycle = is_isolated and (not has_sl_tp) and ladder_count >= 1 and orders_available
 
     flags: list[str] = []
+    manual_review_reasons: list[str] = []
     if is_cycle:
         bucket = CYCLE
         tag_es = "ACUMULACIÓN CICLO (DCA piso, NO cerrar)"
-        # Only two legitimate flag conditions for a cycle leg.
-        if liq_distance_pct is not None and liq_distance_pct < _liq_compress_pct():
-            flags.append(
-                f"⚠️ LIQ COMPRIMIDA: distancia a liq {liq_distance_pct:.1f}% "
-                f"(< {_liq_compress_pct():.0f}%) — evaluar top-up de margen"
+        # P1.7: a cycle leg is NEVER auto-closed. The three hard risk
+        # conditions raise a MANUAL-REVIEW flag (input for BCD), never an
+        # auto-action. Output says "MANUAL REVIEW", not close/reduce.
+        # (a) confirmed protocol / supply-integrity exploit.
+        if exploit_flagged:
+            manual_review_reasons.append(
+                "exploit de protocolo / integridad de supply CONFIRMADO"
             )
+        # (b) funding past the expensive threshold.
         if funding_apr is not None and funding_apr > _funding_material_apr():
-            flags.append(
-                f"⚠️ FUNDING CARO: {funding_apr:.0f}% anual "
-                f"(> {_funding_material_apr():.0f}%) — costo de mantener sube"
+            manual_review_reasons.append(
+                f"funding caro {funding_apr:.0f}% anual (> {_funding_material_apr():.0f}%)"
             )
+        # (c) liq distance compressing below the floor (default 8%).
+        if liq_distance_pct is not None and liq_distance_pct < _liq_compress_pct():
+            manual_review_reasons.append(
+                f"distancia a liq {liq_distance_pct:.1f}% (< {_liq_compress_pct():.0f}%)"
+            )
+        for reason in manual_review_reasons:
+            flags.append(f"🔍 MANUAL REVIEW — {reason} (NO auto-cierre; decide BCD)")
         # Informational: is the next lower laddered limit about to fill?
         if nearest_ladder_px and mark_px and mark_px > 0:
             gap_pct = abs(mark_px - nearest_ladder_px) / mark_px * 100.0
@@ -204,6 +221,8 @@ def classify_position(
         notional_usd=notional,
         entry_px=entry_px,
         mark_px=mark_px,
+        manual_review=bool(manual_review_reasons),
+        manual_review_reasons=manual_review_reasons,
     )
 
 
@@ -226,15 +245,29 @@ def _build_price_map(market: dict[str, Any] | None) -> dict[str, Any]:
     return market.get("prices") or {}
 
 
+def _env_exploit_coins() -> set[str]:
+    """Coins with a confirmed protocol/supply-integrity exploit.
+
+    P1.7: BCD / AiPear set ``CYCLE_EXPLOIT_COINS`` (comma-separated tickers)
+    when an exploit is confirmed; those cycle legs then raise a MANUAL-REVIEW
+    flag. Empty by default — the bot never invents an exploit.
+    """
+    raw = os.getenv("CYCLE_EXPLOIT_COINS", "") or ""
+    return {c.strip().upper() for c in raw.split(",") if c.strip()}
+
+
 def classify_portfolio(
     portfolio: list[dict[str, Any]] | None,
     market: dict[str, Any] | None = None,
+    *,
+    exploit_coins: set[str] | None = None,
 ) -> list[PositionTag]:
     """Classify every open position across all fund wallets. NEVER raises."""
     if os.getenv("POSITION_CLASSIFIER_ENABLED", "true").lower() != "true":
         return []
     out: list[PositionTag] = []
     prices = _build_price_map(market)
+    exploits = {c.upper() for c in (exploit_coins or set())} | _env_exploit_coins()
     for w in portfolio or []:
         if not isinstance(w, dict) or w.get("status") != "ok":
             continue
@@ -248,7 +281,9 @@ def classify_portfolio(
             try:
                 mark = _price_for(p.get("coin", ""), prices)
                 tag = classify_position(
-                    p, open_orders, mark, orders_available=orders_available
+                    p, open_orders, mark,
+                    orders_available=orders_available,
+                    exploit_flagged=(str(p.get("coin") or "").upper() in exploits),
                 )
                 out.append(tag)
             except Exception:  # noqa: BLE001
@@ -259,6 +294,11 @@ def classify_portfolio(
 def cycle_coins(tags: list[PositionTag]) -> set[str]:
     """Set of coins (upper) currently tagged CYCLE_ACCUMULATION."""
     return {t.coin.upper() for t in tags if t.bucket == CYCLE}
+
+
+def manual_review_coins(tags: list[PositionTag]) -> set[str]:
+    """Set of coins (upper) currently raising a MANUAL-REVIEW flag."""
+    return {t.coin.upper() for t in tags if getattr(t, "manual_review", False)}
 
 
 def build_classification_block(tags: list[PositionTag]) -> str:
@@ -275,10 +315,15 @@ def build_classification_block(tags: list[PositionTag]) -> str:
         "SL/TP, órdenes límite escalonadas), NO por el entorno de mercado.",
         "REGLA DURA: para las tageadas ACUMULACIÓN CICLO, NUNCA sugerir "
         "cerrar/reducir por entorno bearish / capitulación / CVD / downtrend. "
-        "El drawdown ES la tesis. Solo flaggear si la distancia a liq se "
-        "comprime o el funding se vuelve caro.",
+        "El drawdown ES la tesis. Ante exploit confirmado, funding caro o "
+        "distancia a liq comprimida → 🔍 MANUAL REVIEW (decide BCD), NUNCA "
+        "un auto-cierre.",
         "",
     ]
+    mr = sorted(manual_review_coins(tags))
+    if mr:
+        lines.append(f"🔍 MANUAL REVIEW pendiente: {', '.join(mr)} (NO auto-acción)")
+        lines.append("")
     for t in tags:
         icon = "🟢" if t.bucket == CYCLE else "⚙️"
         head = f"{icon} {t.side} {t.coin} — {t.tag_es}"

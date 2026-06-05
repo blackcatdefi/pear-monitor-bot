@@ -467,16 +467,37 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Deterministic per-run tagging of each open position by its REAL on-chain
     # structure (margin mode / SL/TP / laddered limits) so CYCLE-ACCUMULATION
     # DCA legs are never recommended for a bearish close. Non-fatal.
+    _clf_tags = []
     try:
         from modules.position_classifier import (
             classify_portfolio,
             build_classification_block,
+            cycle_coins,
         )
-        _clf_block = build_classification_block(classify_portfolio(portfolio, market))
+        _clf_tags = classify_portfolio(portfolio, market)
+        _clf_block = build_classification_block(_clf_tags)
         if _clf_block:
             await send_long_message(update, _clf_block, reply_markup=MAIN_KEYBOARD)
     except Exception:  # noqa: BLE001
         log.exception("position classification block failed (non-fatal)")
+
+    # ─── Section 2a-bis: Per-position funding (P1.6) ─────────────────────────
+    # Live 8h funding rate + cumulative carry since entry for each open
+    # position; LONG cycle-accumulation legs past the expensive floor raise a
+    # MANUAL-REVIEW carry flag (never an auto-action). Non-fatal.
+    try:
+        from modules.funding_tracker import fetch_funding_rates, build_funding_block
+        from modules.position_classifier import cycle_coins as _cyc
+        _rates = await fetch_funding_rates()
+        _all_positions = []
+        for _w in (portfolio or []):
+            if isinstance(_w, dict) and _w.get("status") == "ok":
+                _all_positions.extend((_w.get("data") or {}).get("positions") or [])
+        _fund_block = build_funding_block(_all_positions, _rates, _cyc(_clf_tags))
+        if _fund_block:
+            await send_long_message(update, _fund_block, reply_markup=MAIN_KEYBOARD)
+    except Exception:  # noqa: BLE001
+        log.exception("per-position funding block failed (non-fatal)")
 
     # ─── Section 2b: TraderMap BTC (R-BOT-FEEDS-EXPAND Task 1) ────────────────
     # Surface the BTC chart snapshot (price + indicators when env vars set)
