@@ -309,6 +309,44 @@ FUND_PLAN_ASSETS = frozenset(
     if t.strip()
 )
 
+# ─── R-INTEGRITY-FIX — integrity-rumor subject-resolution alias map ─────────
+# Maps coin / protocol / project NAMES to their canonical HL ticker so the
+# INTEGRITY-HALT scanner binds a rumor to the asset it actually NAMES (not to
+# whichever held position happens to be down). Seeded with the fund's assets +
+# the Zcash/Orchard names that caused the 2026-06-05 false BTC STOP. Held
+# tickers are always detected directly; this map adds NAME→ticker resolution.
+# Extend without code changes via env INTEGRITY_ASSET_ALIASES as a
+# comma-separated list of `name:TICKER` pairs (additive, case-insensitive).
+_DEFAULT_INTEGRITY_ALIASES = {
+    "bitcoin": "BTC", "btc": "BTC", "xbt": "BTC",
+    "ethereum": "ETH", "ether": "ETH", "eth": "ETH",
+    "solana": "SOL", "sol": "SOL",
+    "hyperliquid": "HYPE", "hype": "HYPE", "hyperevm": "HYPE",
+    "zcash": "ZEC", "zec": "ZEC", "orchard": "ZEC", "sapling": "ZEC",
+    "monero": "XMR", "xmr": "XMR",
+    "dash": "DASH", "secret": "SCRT", "scrt": "SCRT",
+    "pear": "PEAR", "pear protocol": "PEAR",
+    "arbitrum": "ARB", "arb": "ARB",
+}
+
+
+def _build_integrity_aliases():
+    aliases = dict(_DEFAULT_INTEGRITY_ALIASES)
+    raw = os.getenv("INTEGRITY_ASSET_ALIASES", "") or ""
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if not pair or ":" not in pair:
+            continue
+        name, _, ticker = pair.partition(":")
+        name = name.strip().lower()
+        ticker = ticker.strip().upper()
+        if name and ticker:
+            aliases[name] = ticker
+    return aliases
+
+
+INTEGRITY_ASSET_ALIASES = _build_integrity_aliases()
+
 # ─── Paths ──────────────────────────────────────────────────────────────────
 DATA_DIR = os.getenv("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
 os.makedirs(DATA_DIR, exist_ok=True)

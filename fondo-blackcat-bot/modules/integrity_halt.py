@@ -72,6 +72,25 @@ class IntegrityHit:
     shielded: bool
 
 
+@dataclass(frozen=True)
+class IntegrityNote:
+    """A suppressed / informational rumor — NEVER a per-position STOP.
+
+    reason ∈ {"blocklisted", "not_held", "unresolved"}.
+    """
+    asset: str | None
+    keyword: str
+    excerpt: str
+    source: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class IntegrityScan:
+    hits: list[IntegrityHit]
+    notes: list[IntegrityNote]
+
+
 # ── Feed text harvesting (robust to every intel shape we pass) ───────────────
 _TEXT_KEYS = ("text", "message", "snippet", "title", "body", "summary", "content")
 
@@ -124,9 +143,161 @@ def _held_negative(positions: list[dict[str, Any]] | None) -> dict[str, float]:
     return held
 
 
+def _word_positions(needle: str, text_lower: str) -> list[int]:
+    """All whole-word match start offsets of ``needle`` in ``text_lower``.
+
+    Case-insensitive (caller lowers) and word-boundary aware so a ticker like
+    ZEC never matches inside ZECASH and a name like ETH never matches ethernet.
+    """
+    pat = rf"(?<![A-Za-z0-9]){re.escape(needle.lower())}(?![A-Za-z0-9])"
+    return [m.start() for m in re.finditer(pat, text_lower)]
+
+
 def _asset_in_text(asset: str, text_lower: str) -> bool:
     """Whole-word ticker match (case-insensitive), avoids substring noise."""
-    return re.search(rf"(?<![A-Za-z0-9]){re.escape(asset.lower())}(?![A-Za-z0-9])", text_lower) is not None
+    return bool(_word_positions(asset, text_lower))
+
+
+def integrity_aliases() -> dict[str, str]:
+    """name(lower) → TICKER(upper) resolution map (config-driven, env-extensible)."""
+    try:
+        from config import INTEGRITY_ASSET_ALIASES
+        return {str(k).lower(): str(v).upper() for k, v in dict(INTEGRITY_ASSET_ALIASES).items()}
+    except Exception:  # noqa: BLE001 — never let config break a scan
+        return {
+            "bitcoin": "BTC", "btc": "BTC", "ethereum": "ETH", "eth": "ETH",
+            "solana": "SOL", "sol": "SOL", "hyperliquid": "HYPE", "hype": "HYPE",
+            "zcash": "ZEC", "zec": "ZEC", "orchard": "ZEC", "monero": "XMR", "xmr": "XMR",
+        }
+
+
+def _blocklist() -> set[str]:
+    try:
+        from config import CYCLE_DCA_BLOCKLIST
+        return {a.upper() for a in CYCLE_DCA_BLOCKLIST}
+    except Exception:  # noqa: BLE001
+        return {"ZEC"}
+
+
+def _resolve_subjects(
+    text_lower: str,
+    kw_positions: list[int],
+    *,
+    held_tickers: set[str],
+    alias_map: dict[str, str],
+) -> set[str]:
+    """Bind each integrity-keyword occurrence to the NEAREST named asset.
+
+    The rumor's subject is the asset it actually names — resolved by proximity
+    so a long daily-report blob that mentions BTC in one place and a Zcash bug
+    in another binds the bug to ZEC (nearest), never to BTC. Detects both held
+    HL tickers and project/coin NAMES via the alias map. Returns the set of
+    resolved tickers, or empty when the text names no known asset (fail-closed:
+    an unresolved rumor must NOT attach to any held position).
+    """
+    mentions: list[tuple[int, str]] = []
+    for ticker in held_tickers:
+        for pos in _word_positions(ticker, text_lower):
+            mentions.append((pos, ticker.upper()))
+    for name, ticker in alias_map.items():
+        for pos in _word_positions(name, text_lower):
+            mentions.append((pos, ticker.upper()))
+    if not mentions:
+        return set()
+    subjects: set[str] = set()
+    for kpos in kw_positions:
+        nearest = min(mentions, key=lambda m: abs(m[0] - kpos))
+        subjects.add(nearest[1])
+    return subjects
+
+
+def scan_integrity(
+    positions: list[dict[str, Any]] | None,
+    intel: Any,
+    *,
+    plan_assets: set[str] | None = None,
+    blocklist: set[str] | None = None,
+    alias_map: dict[str, str] | None = None,
+) -> IntegrityScan:
+    """Resolve each integrity rumor to the asset it NAMES, then classify it.
+
+    A per-position STOP (``IntegrityHit``) fires ONLY for a resolved subject
+    that is (i) currently held with NEGATIVE UPnL and (ii) NOT in the DCA
+    blocklist. Subjects that are blocklisted, not held, or unresolvable are
+    surfaced as low-severity ``IntegrityNote``s — never a STOP, never a
+    MANUAL-REVIEW escalation tied to an unrelated held asset. NEVER raises.
+    """
+    if not _enabled():
+        return IntegrityScan([], [])
+    held_neg = _held_negative(positions)
+    held_all = {
+        str(p.get("coin") or "").upper().strip()
+        for p in (positions or []) if isinstance(p, dict) and (p.get("coin") or "").strip()
+    }
+    held_all.discard("")
+    held_all.discard("?")
+
+    blocklist = {a.upper() for a in (blocklist if blocklist is not None else _blocklist())}
+    alias_map = alias_map if alias_map is not None else integrity_aliases()
+    kws = _keywords()
+    shielded = shielded_assets()
+    # Detect any named asset: held tickers, alias targets, and plan assets.
+    detect_tickers = set(held_all) | {v.upper() for v in alias_map.values()}
+    if plan_assets:
+        detect_tickers |= {a.upper() for a in plan_assets}
+
+    hits: dict[str, IntegrityHit] = {}
+    notes: dict[tuple[str | None, str], IntegrityNote] = {}
+    for source, text in _harvest_texts(intel):
+        tl = text.lower()
+        kw_positions: dict[str, list[int]] = {}
+        for k in kws:
+            pos = [m.start() for m in re.finditer(re.escape(k), tl)]
+            if pos:
+                kw_positions[k] = pos
+        if not kw_positions:
+            continue
+        all_kw_pos = [p for plist in kw_positions.values() for p in plist]
+        first_kw = min(kw_positions, key=lambda k: min(kw_positions[k]))
+        excerpt = text.strip().replace("\n", " ")
+        if len(excerpt) > 180:
+            excerpt = excerpt[:177] + "…"
+
+        subjects = _resolve_subjects(
+            tl, all_kw_pos, held_tickers=detect_tickers, alias_map=alias_map
+        )
+        if not subjects:
+            # Fail-closed: a keyword with no resolvable subject NEVER attaches
+            # to a held position. At most a single generic info note.
+            key = (None, "unresolved")
+            if key not in notes:
+                notes[key] = IntegrityNote(
+                    asset=None, keyword=first_kw, excerpt=excerpt,
+                    source=str(source), reason="unresolved",
+                )
+            continue
+        for asset in subjects:
+            if asset in hits:
+                continue
+            if asset in blocklist:
+                notes.setdefault((asset, "blocklisted"), IntegrityNote(
+                    asset=asset, keyword=first_kw, excerpt=excerpt,
+                    source=str(source), reason="blocklisted",
+                ))
+                continue
+            if asset not in held_neg:
+                notes.setdefault((asset, "not_held"), IntegrityNote(
+                    asset=asset, keyword=first_kw, excerpt=excerpt,
+                    source=str(source), reason="not_held",
+                ))
+                continue
+            hits[asset] = IntegrityHit(
+                asset=asset, keyword=first_kw, excerpt=excerpt,
+                source=str(source), shielded=(asset in shielded),
+            )
+    # A held+adverse subject that genuinely fires must not also linger as a note.
+    notes = {k: v for k, v in notes.items() if k[0] not in hits}
+    return IntegrityScan(list(hits.values()), list(notes.values()))
 
 
 def scan_integrity_signals(
@@ -134,43 +305,14 @@ def scan_integrity_signals(
     intel: Any,
     *,
     plan_assets: set[str] | None = None,
+    blocklist: set[str] | None = None,
+    alias_map: dict[str, str] | None = None,
 ) -> list[IntegrityHit]:
-    """Pure scan: held assets with NEGATIVE UPnL hit by an integrity keyword.
-
-    A DCA-plan asset that is also held-and-negative is included. NEVER raises.
-    """
-    if not _enabled():
-        return []
-    held_neg = _held_negative(positions)
-    if not held_neg:
-        return []
-    # The flag requires HELD + negative UPnL (per spec). plan_assets only
-    # widens name-matching when those assets are themselves held-and-negative.
-    eligible = set(held_neg)
-    if plan_assets:
-        eligible |= {a.upper() for a in plan_assets if a.upper() in held_neg}
-
-    kws = _keywords()
-    shielded = shielded_assets()
-    texts = _harvest_texts(intel)
-    hits: dict[str, IntegrityHit] = {}
-    for source, text in texts:
-        tl = text.lower()
-        kw_found = next((k for k in kws if k in tl), None)
-        if not kw_found:
-            continue
-        for asset in eligible:
-            if asset in hits:
-                continue
-            if _asset_in_text(asset, tl):
-                excerpt = text.strip().replace("\n", " ")
-                if len(excerpt) > 180:
-                    excerpt = excerpt[:177] + "…"
-                hits[asset] = IntegrityHit(
-                    asset=asset, keyword=kw_found, excerpt=excerpt,
-                    source=str(source), shielded=(asset in shielded),
-                )
-    return list(hits.values())
+    """Backward-compatible wrapper — returns only the fireable STOP hits."""
+    return scan_integrity(
+        positions, intel, plan_assets=plan_assets,
+        blocklist=blocklist, alias_map=alias_map,
+    ).hits
 
 
 # ── Persistence (raised flags never auto-clear) ──────────────────────────────
@@ -294,6 +436,35 @@ def build_integrity_block(active_flags: list[dict[str, Any]] | None) -> str:
     return "\n".join(lines)
 
 
+def build_notes_block(notes: list[IntegrityNote] | None) -> str:
+    """Render low-severity informational lines for suppressed rumors.
+
+    These are NEVER STOPs — they only acknowledge that a rumor was seen and
+    consciously not acted on (blocklisted / not held / unresolvable).
+    """
+    notes = notes or []
+    if not notes:
+        return ""
+    lines: list[str] = []
+    for n in notes:
+        if n.reason == "blocklisted":
+            lines.append(
+                f"ℹ️ Rumor de integridad notado para {n.asset} «{n.keyword}» "
+                f"(en blocklist DCA / fuera del plan) — sin acción."
+            )
+        elif n.reason == "not_held":
+            lines.append(
+                f"ℹ️ Rumor de integridad notado para {n.asset} «{n.keyword}» "
+                f"(no en posición) — sin acción."
+            )
+        else:  # unresolved
+            lines.append(
+                f"ℹ️ Rumor de integridad sin activo identificable «{n.keyword}» "
+                f"— sin acción (no se atribuye a ninguna posición)."
+            )
+    return "\n".join(lines)
+
+
 def run_integrity_halt(
     positions: list[dict[str, Any]] | None,
     intel: Any,
@@ -302,12 +473,17 @@ def run_integrity_halt(
 ) -> tuple[str, list[str]]:
     """Scan → persist → render. Returns (block_text, newly_raised_assets).
 
-    NEVER raises — integrity scanning must never break /reporte.
+    NEVER raises — integrity scanning must never break /reporte. The STOP
+    block (persisted, MANUAL-REVIEW) is followed by any low-severity info
+    lines for rumors that were consciously suppressed.
     """
     try:
-        hits = scan_integrity_signals(positions, intel, plan_assets=plan_assets)
-        newly = raise_flags(hits)
+        scan = scan_integrity(positions, intel, plan_assets=plan_assets)
+        newly = raise_flags(scan.hits)
         block = build_integrity_block(get_active_flags())
+        notes_block = build_notes_block(scan.notes)
+        if notes_block:
+            block = f"{block}\n{notes_block}" if block else notes_block
         return block, newly
     except Exception as exc:  # noqa: BLE001
         log.warning("run_integrity_halt failed: %s", exc)

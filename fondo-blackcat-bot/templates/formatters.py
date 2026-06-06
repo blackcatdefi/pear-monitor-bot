@@ -480,6 +480,60 @@ def _fmt_usd_compact(val: float | None) -> str | None:
     return f"${v:.0f}"
 
 
+def _normalize_unlock_epoch(raw: Any, now: datetime) -> int | None:
+    """Normalize a unlock/catalyst date field to a UTC epoch (seconds).
+
+    R-INTEGRITY-FIX (P0.2): the header used to do ``int(float(raw_ts))`` only,
+    which silently dropped any unlock whose date arrived as a string (ISO
+    date-only, full datetime, "Z"-suffixed, or a "6-Jun"/"6 Jun" shorthand) —
+    so a real future HYPE unlock vanished and the header read "ninguno <72h"
+    while the body discussed it. This accepts:
+      • int/float epoch (seconds or ms),
+      • numeric strings,
+      • ISO date-only ("2026-06-06") and full datetime (tz-aware or naive→UTC),
+      • day-month shorthand ("6-Jun", "6 Jun", "Jun 6") — year inferred so the
+        date is the nearest occurrence not already long past.
+    Returns an epoch int, or None when nothing parseable is present. To stay
+    CONSISTENT with the live feed, it first defers to the unlock module's own
+    parser (the same one fetch_unlocks uses) so header and body never diverge.
+    """
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    # Defer to the feed's canonical parser first (consistency guarantee).
+    try:
+        from modules.unlocks import _parse_iso_or_epoch
+        ep = _parse_iso_or_epoch(raw)
+        if ep:
+            return int(ep)
+    except Exception:  # noqa: BLE001
+        pass
+    if isinstance(raw, (int, float)):
+        v = int(raw)
+        return v // 1000 if v > 10**12 else (v if v > 0 else None)
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    # Day-month shorthand with inferred year ("6-Jun", "6 Jun", "Jun 6", …).
+    cleaned = s.replace("-", " ").replace(",", " ").strip()
+    for fmt in ("%d %b", "%b %d", "%d %B", "%B %d"):
+        try:
+            parsed = datetime.strptime(cleaned, fmt)
+        except ValueError:
+            continue
+        for yr in (now.year, now.year + 1, now.year - 1):
+            try:
+                cand = parsed.replace(year=yr, tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            # Accept the year that lands within [-2d, +400d] of now; prefer
+            # the nearest future occurrence.
+            delta_days = (cand - now).total_seconds() / 86400
+            if -2 <= delta_days <= 400:
+                return int(cand.timestamp())
+        return None
+    return None
+
+
 def _next_catalyst_for_header(
     window_hours: int = 72,
     unlocks: dict[str, Any] | None = None,
@@ -537,12 +591,21 @@ def _next_catalyst_for_header(
             for item in unlocks.get("data") or []:
                 if not isinstance(item, dict):
                     continue
-                raw_ts = item.get("timestamp") or item.get("next_unlock_ts")
-                try:
-                    epoch = int(float(raw_ts))
-                except (TypeError, ValueError):
-                    continue
-                if epoch <= 0:
+                # P0.2 (R-INTEGRITY-FIX): accept every date field the live feed
+                # actually emits — numeric epoch OR string (ISO / "6-Jun") under
+                # any of these keys — via the shared normalizer so the header
+                # and the body agree on whether an unlock is imminent.
+                raw_ts = (
+                    item.get("timestamp")
+                    if item.get("timestamp") is not None
+                    else item.get("next_unlock_ts")
+                    if item.get("next_unlock_ts") is not None
+                    else item.get("unlock_timestamp")
+                    if item.get("unlock_timestamp") is not None
+                    else item.get("date")
+                )
+                epoch = _normalize_unlock_epoch(raw_ts, now)
+                if not epoch or epoch <= 0:
                     continue
                 # P0.2 (2026-06-04 / R-AUDIT2 2026-06-05): the live feed tracks
                 # PRIORITY tokens even at $0 (linear / already-emitted), whose

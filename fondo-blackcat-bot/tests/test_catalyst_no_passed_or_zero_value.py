@@ -106,6 +106,85 @@ def test_known_value_renders_usd_size():
     assert "HYPE unlock" in out and "$34M" in out
 
 
+# ── R-INTEGRITY-FIX-P0.2: string-date normalization regression ───────────────
+# The live 2026-06-05 header still read "ninguno <72h" while the body reported
+# the 6-Jun HYPE unlock. Root cause: the unlock's date arrived as a STRING (the
+# header only parsed numeric epochs via int(float(...)) → ValueError → dropped).
+# The header must normalize date-only ISO, full ISO, "Z"-suffix, and "6-Jun"
+# shorthand, and include the unlock REGARDLESS of value_usd being None.
+
+NOW6 = datetime(2026, 6, 5, 22, 0, tzinfo=timezone.utc)  # eve of the 6-Jun unlock
+
+
+def test_iso_date_only_string_is_parsed_into_window():
+    unlocks = {"status": "ok", "data": [
+        {"symbol": "HYPE", "date": "2026-06-06", "value_usd": None},
+    ]}
+    out = formatters._next_catalyst_for_header(72, unlocks, NOW6)
+    assert "HYPE unlock" in out
+    assert "ninguno" not in out
+
+
+def test_full_iso_zulu_string_is_parsed():
+    unlocks = {"status": "ok", "data": [
+        {"symbol": "HYPE", "timestamp": "2026-06-06T12:00:00Z", "value_usd": None},
+    ]}
+    out = formatters._next_catalyst_for_header(72, unlocks, NOW6)
+    assert "HYPE unlock" in out and "ninguno" not in out
+
+
+def test_day_month_shorthand_is_parsed():
+    unlocks = {"status": "ok", "data": [
+        {"symbol": "HYPE", "date": "6 Jun", "value_usd": None},
+    ]}
+    out = formatters._next_catalyst_for_header(72, unlocks, NOW6)
+    assert "HYPE unlock" in out and "ninguno" not in out
+
+
+def test_production_shape_hype_6jun_none_value_with_size_from_price():
+    # Exact production shape: symbol HYPE, string date, value_usd None — the
+    # header must NAME it and show a size derived from tokens × spot price.
+    unlocks = {"status": "ok", "data": [
+        {"symbol": "HYPE", "date": "2026-06-06", "value_usd": None, "tokens": 534000},
+    ]}
+    out = formatters._next_catalyst_for_header(72, unlocks, NOW6, prices={"HYPE": 64.0})
+    assert "HYPE unlock" in out
+    assert "$34M" in out
+    assert "ninguno" not in out
+
+
+def test_production_shape_hype_6jun_known_value():
+    unlocks = {"status": "ok", "data": [
+        {"symbol": "HYPE", "date": "2026-06-06", "value_usd": 34_000_000},
+    ]}
+    out = formatters._next_catalyst_for_header(72, unlocks, NOW6)
+    assert "HYPE unlock" in out and "$34M" in out and "ninguno" not in out
+
+
+def test_string_date_explicit_zero_still_dropped():
+    # The SUI explicit-$0 guard survives string-date parsing.
+    unlocks = {"status": "ok", "data": [
+        {"symbol": "SUI", "date": "2026-06-06", "value_usd": 0},
+    ]}
+    assert formatters._next_catalyst_for_header(72, unlocks, NOW6) == "ninguno <72h"
+
+
+def test_string_date_past_is_purged():
+    unlocks = {"status": "ok", "data": [
+        {"symbol": "HYPE", "date": "2026-06-01", "value_usd": 5_000_000},
+    ]}
+    assert formatters._next_catalyst_for_header(72, unlocks, NOW6) == "ninguno <72h"
+
+
+def test_header_and_body_agree_on_imminence():
+    # Consistency: the header normalizer and the feed's own parser agree.
+    from modules.unlocks import _parse_iso_or_epoch
+    raw = "2026-06-06"
+    header_epoch = formatters._normalize_unlock_epoch(raw, NOW6)
+    feed_epoch = _parse_iso_or_epoch(raw)
+    assert header_epoch == feed_epoch
+
+
 async def test_fetch_unlocks_cache_preserves_unknown_value_usd(monkeypatch):
     """fetch_unlocks() cache branch must pass value_usd=None through, never 0.
 

@@ -14,8 +14,13 @@ from modules.integrity_halt import (
     shielded_assets,
 )
 
+# Exact STOP wording is asset-agnostic (formatter). XMR is shielded but NOT
+# blocklisted, so it is the canonical "STOP still fires" example post-R-AUDIT2
+# (ZEC is now permanently blocklisted → its rumors are suppressed, see below).
 EXACT = ("STOP accumulation on ZEC: integrity rumor + adverse PnL. "
          "Do NOT DCA/add/average. Await news. Never catch a falling knife.")
+EXACT_XMR = ("STOP accumulation on XMR: integrity rumor + adverse PnL. "
+             "Do NOT DCA/add/average. Await news. Never catch a falling knife.")
 
 
 def _pos(coin, upnl):
@@ -31,17 +36,18 @@ def _tg(text):
 
 
 def test_doublespend_on_held_negative_raises_exact_wording():
-    intel = _tg("BREAKING: possible double-spend undetectable on ZEC, devs silent")
-    hits = scan_integrity_signals([_pos("ZEC", -1200.0)], intel)
+    intel = _tg("BREAKING: possible double-spend undetectable on Monero, devs silent")
+    hits = scan_integrity_signals([_pos("XMR", -1200.0)], intel)
     assert len(hits) == 1
-    assert hits[0].asset == "ZEC"
+    assert hits[0].asset == "XMR"
     assert hits[0].shielded is True
     block = build_integrity_block(
-        [{"asset": "ZEC", "keyword": hits[0].keyword, "excerpt": hits[0].excerpt,
+        [{"asset": "XMR", "keyword": hits[0].keyword, "excerpt": hits[0].excerpt,
           "source": hits[0].source, "shielded": True}]
     )
-    assert EXACT in block
-    assert stop_line("ZEC") == EXACT
+    assert EXACT_XMR in block
+    assert stop_line("ZEC") == EXACT       # formatter is asset-agnostic
+    assert stop_line("XMR") == EXACT_XMR
     assert "🛑" in block
     assert "NO se auto-limpia" in block  # shielded nuance surfaced
 
@@ -63,10 +69,10 @@ def test_keyword_but_asset_not_held_does_not_raise():
 
 def test_x_feed_shape_is_scanned():
     intel = {"status": "ok", "tweets": [
-        {"username": "zachxbt", "text": "ZEC backdoor — insolvency risk, get out"},
+        {"username": "zachxbt", "text": "XMR backdoor — insolvency risk, get out"},
     ]}
-    hits = scan_integrity_signals([_pos("ZEC", -100.0)], intel)
-    assert len(hits) == 1 and hits[0].asset == "ZEC"
+    hits = scan_integrity_signals([_pos("XMR", -100.0)], intel)
+    assert len(hits) == 1 and hits[0].asset == "XMR"
 
 
 def test_whole_word_match_avoids_substring_false_positive():
@@ -101,6 +107,6 @@ def test_disabled_via_env(monkeypatch):
 
 def test_extra_keyword_via_env(monkeypatch):
     monkeypatch.setenv("INTEGRITY_HALT_KEYWORDS", "ponzi")
-    intel = _tg("ZEC looks like a ponzi now")
-    hits = scan_integrity_signals([_pos("ZEC", -1.0)], intel)
+    intel = _tg("XMR looks like a ponzi now")
+    hits = scan_integrity_signals([_pos("XMR", -1.0)], intel)
     assert len(hits) == 1 and hits[0].keyword == "ponzi"
