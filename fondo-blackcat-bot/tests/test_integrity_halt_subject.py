@@ -151,6 +151,49 @@ def test_alias_env_extension(monkeypatch):
         importlib.reload(ih)
 
 
+# ── (g) R-WALLET-FIX P1: distinctive NAME beats a nearer held ticker ──────────
+# Faithful to the live 2026-06-06 mis-fire: a SINGLE integrity signal (unlimited
+# mint) where held BTC sits textually as-near-or-nearer to the keyword than the
+# words "Zcash"/"Orchard". Pure-nearest proximity wrongly bound the bug to BTC;
+# the distinctive-name precedence must resolve it to ZEC (blocklisted → note).
+HARD_BLOB_BTC_NEAR_KEYWORD = (
+    "AIXBT: BTC holds 105k into the weekend. New rumor of an unlimited mint "
+    "flaw — researchers trace it to the Zcash Orchard shielded pool design."
+)
+
+# Same trap but BTC additionally carries its own loaded word right beside it,
+# yet the only protocol-specific integrity signal is still the Zcash one.
+HARD_BLOB_BTC_ADJACENT = (
+    "AIXBT alpha: BTC exploit fears overblown, dip is a gift; whales buying. "
+    "Separately, an unlimited mint bug in Zcash Orchard pools is unconfirmed."
+)
+
+
+def test_distinctive_name_overrides_nearer_held_btc():
+    positions = [_pos("BTC", -3400.0), _pos("SOL", -900.0)]
+    scan = scan_integrity(positions, _tg(HARD_BLOB_BTC_NEAR_KEYWORD))
+    flagged = {h.asset for h in scan.hits}
+    assert "BTC" not in flagged
+    assert "SOL" not in flagged
+    assert scan.hits == []  # subject is ZEC, which is blocklisted
+    assert "ZEC" in {n.asset for n in scan.notes if n.reason == "blocklisted"}
+
+
+def test_distinctive_name_wins_even_with_btc_adjacent_loaded_word():
+    positions = [_pos("BTC", -3400.0), _pos("SOL", -900.0)]
+    assert scan_integrity_signals(positions, _tg(HARD_BLOB_BTC_ADJACENT)) == []
+    scan = scan_integrity(positions, _tg(HARD_BLOB_BTC_ADJACENT))
+    assert "ZEC" in {n.asset for n in scan.notes if n.reason == "blocklisted"}
+
+
+def test_btc_only_signal_with_no_other_name_still_fires():
+    # Guard against over-correction: when NO distinctive foreign name is present,
+    # a genuine BTC-named integrity signal must still bind BTC and fire.
+    positions = [_pos("BTC", -3400.0)]
+    scan = scan_integrity(positions, _tg("Bitcoin consensus exploit confirmed; chain halted"))
+    assert [h.asset for h in scan.hits] == ["BTC"]
+
+
 # ── (f) shielded subject (non-blocklisted) — no auto-clear, /haltclear works ──
 def test_shielded_nonblocklisted_no_auto_clear_until_dismiss(monkeypatch, tmp_path):
     db = tmp_path / "intel.db"

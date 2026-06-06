@@ -142,6 +142,12 @@ class WalletSnapshot:
     # docstring R-DASHBOARD-SPOT-FIX block.
     spot_usd: float = 0.0
     spot_stables_usd: float = 0.0
+    # R-WALLET-FIX (2026-06-06): TRUE borrowed liability from the wallet's
+    # spot ledger (HyperLiquid Portfolio Margin USDC borrow). Netted out of
+    # ``capital_total`` and folded into TOTAL EQUITY as a debt. This is the
+    # NATIVE PM borrow — distinct from the (deprecated) HyperLend flywheel
+    # ``hl_debt_usd``, so it is NOT zeroed by FLYWHEEL_DEPRECATED.
+    spot_borrow_usd: float = 0.0
     hl_collateral_usd: float = 0.0
     hl_debt_usd: float = 0.0
     capital_total: float = 0.0
@@ -222,6 +228,12 @@ class PortfolioSnapshot:
     # across all fund wallets. Defaults to 0.0 to keep the existing kwargs
     # construction sites compatible with older callers.
     spot_stables_total: float = 0.0
+    # R-WALLET-FIX (2026-06-06): total TRUE borrowed liability (HyperLiquid
+    # Portfolio Margin USDC borrow) across all fund wallets. Subtracted from
+    # TOTAL EQUITY by ``auto.capital_calc.compute_net_capital`` so the headline
+    # reads like Rabby/DeBank (net of leverage) instead of overstating by the
+    # full borrow. Defaults to 0.0 to keep older construction sites compatible.
+    spot_borrow_total: float = 0.0
     # R-DASHBOARD-RABBY-PARITY (2026-05-06): external DeFi positions
     # surfaced through the env-var ``PEAR_STAKED_USD`` (BCD-controlled
     # static value while we don't yet have an on-chain Pear Protocol
@@ -308,6 +320,17 @@ def _spot_split_value(spot_balances: list[dict[str, Any]],
         # active. Skip the lot. When idle, fold into the stables bucket
         # as cash equivalent (1:1).
         if coin in STABLECOINS:
+            # R-WALLET-FIX (2026-06-06): a borrowed stable (negative total,
+            # ``borrowed`` field set) is a LIABILITY, not cash. It is netted
+            # out separately via ``_spot_native_borrow`` so it never lands in
+            # the cash-equivalent ``stables`` bucket (which would otherwise
+            # double-count it against the borrow subtraction).
+            try:
+                _bw = float(sb.get("borrowed") or 0.0)
+            except (TypeError, ValueError):
+                _bw = 0.0
+            if _bw > 0 or amount < 0:
+                continue
             if has_active_perp:
                 continue
             stables += amount
@@ -321,6 +344,51 @@ def _spot_split_value(spot_balances: list[dict[str, Any]],
         else:
             non_stable += entry_ntl
     return non_stable, stables
+
+
+def _spot_native_borrow(spot_balances: list[dict[str, Any]]) -> float:
+    """Sum the TRUE borrowed liability from a wallet's spot ledger.
+
+    R-WALLET-FIX (2026-06-06)
+    -------------------------
+    Under HyperLiquid Portfolio Margin the fund's spot HYPE is cross
+    collateral and USDC can be borrowed against it. The borrow appears in
+    ``spotClearinghouseState`` as a balance with a NEGATIVE ``total`` and a
+    positive ``borrowed`` field — e.g. ``USDC total=-10,740 borrowed=39,808``.
+
+    The ``borrowed`` field is the authoritative gross liability. The
+    ``total`` is the *net* spot USDC (borrow minus whatever borrowed dollars
+    were transferred into the perp account, which already show up inside
+    ``marginSummary.accountValue``). Subtracting only the net ``total`` would
+    leave the borrowed-then-deployed portion uncounted → equity overstated by
+    ~$29K. So we net the FULL ``borrowed`` and keep perp accountValue as-is:
+
+        wallet_equity = HYPE_value − borrowed + perp_accountValue
+
+    which reproduces the Rabby/DeBank net worth. Stables are ~1:1 USD.
+    NEVER raises — returns 0.0 on any bad row.
+    """
+    borrow = 0.0
+    for sb in spot_balances or []:
+        coin = (sb.get("coin") or "").upper()
+        if coin not in STABLECOINS:
+            continue
+        try:
+            bw = float(sb.get("borrowed") or 0.0)
+        except (TypeError, ValueError):
+            bw = 0.0
+        if bw > 0:
+            borrow += bw
+            continue
+        # Fallback: no explicit borrowed field but a negative spot total still
+        # represents a stable owed (older payloads). Count its magnitude.
+        try:
+            total = float(sb.get("total") or 0.0)
+        except (TypeError, ValueError):
+            total = 0.0
+        if total < 0:
+            borrow += abs(total)
+    return borrow
 
 
 def _spot_usd_value(spot_balances: list[dict[str, Any]],
@@ -671,13 +739,17 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
             spot_usd, spot_stables = _spot_split_value(
                 d.get("spot_balances") or [], prices, perp_equity
             )
+            # R-WALLET-FIX (2026-06-06): real borrowed liability (PM USDC
+            # borrow). Must reduce wallet capital so it reads like Rabby.
+            spot_borrow = _spot_native_borrow(d.get("spot_balances") or [])
             hl_data = hl_by_wallet.get(addr, {})
             hl_coll = float(hl_data.get("total_collateral_usd") or 0.0)
             hl_debt = float(hl_data.get("total_debt_usd") or 0.0)
-            # capital_total still adds spot_usd (now non-stable only); stables
-            # are surfaced separately so the dashboard can show them as
-            # cash-equivalent without inflating "exposure".
-            cap = perp_equity + spot_usd + hl_coll
+            # capital_total adds spot_usd (non-stable exposure) and SUBTRACTS
+            # the borrowed liability (R-WALLET-FIX) so leverage is netted, not
+            # ignored. Stables are surfaced separately so the dashboard can
+            # show them as cash-equivalent without inflating "exposure".
+            cap = perp_equity + spot_usd + hl_coll - spot_borrow
             upnl = float(d.get("unrealized_pnl_total") or 0.0)
 
             short_positions: list[dict[str, Any]] = []
@@ -721,6 +793,7 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
                 perp_equity=perp_equity,
                 spot_usd=spot_usd,
                 spot_stables_usd=spot_stables,
+                spot_borrow_usd=spot_borrow,
                 hl_collateral_usd=hl_coll,
                 hl_debt_usd=hl_debt,
                 capital_total=cap,
@@ -848,6 +921,10 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
         hl_debt_total = 0.0
     # R-DASHBOARD-SPOT-FIX: aggregate stable-spot bucket across all wallets.
     spot_stables_total = sum(ws.spot_stables_usd for ws in wallet_snaps)
+    # R-WALLET-FIX (2026-06-06): aggregate the REAL borrowed liability (PM
+    # USDC borrow) across all wallets. NOT subject to FLYWHEEL_DEPRECATED — it
+    # is a live native HL borrow, not stale HyperLend flywheel residual.
+    spot_borrow_total = sum(ws.spot_borrow_usd for ws in wallet_snaps)
     upnl_perp_total = sum(ws.upnl_perp for ws in wallet_snaps)
 
     # R-DASHBOARD-RABBY-PARITY (2026-05-06): Pear Protocol staked balance
@@ -948,6 +1025,7 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
         perp_equity_total=perp_equity_total,
         spot_usd_total=spot_usd_total,
         spot_stables_total=spot_stables_total,
+        spot_borrow_total=spot_borrow_total,
         upnl_perp_total=upnl_perp_total,
         main_flywheel=main_flywheel,
         secondary_flywheel=secondary_flywheel,

@@ -263,7 +263,18 @@ async def _fetch_spot(wallet: str) -> list[dict[str, Any]]:
                 total = float(b.get("total", 0) or 0)
             except (TypeError, ValueError):
                 total = 0.0
-            if total <= 0:
+            try:
+                borrowed = float(b.get("borrowed", 0) or 0)
+            except (TypeError, ValueError):
+                borrowed = 0.0
+            # R-WALLET-FIX (2026-06-06): a HyperLiquid Portfolio Margin borrow
+            # shows as a NEGATIVE spot total (USDC total=-10,740) WITH a
+            # ``borrowed`` field (=39,808 — the true gross liability). The
+            # legacy ``total <= 0: continue`` DROPPED that row entirely, so the
+            # fund's USDC debt vanished from accounting → false "deuda $0 /
+            # ratio 0% CALM" and a ~$40K equity overstatement. Keep any row
+            # that is non-zero OR carries a borrow; only skip truly empty dust.
+            if total == 0 and borrowed <= 0:
                 continue
             try:
                 hold = float(b.get("hold", 0) or 0)
@@ -273,11 +284,24 @@ async def _fetch_spot(wallet: str) -> list[dict[str, Any]]:
                 entry_ntl = float(b.get("entryNtl", 0) or 0)
             except (TypeError, ValueError):
                 entry_ntl = 0.0
+            try:
+                supplied = float(b.get("supplied", 0) or 0)
+            except (TypeError, ValueError):
+                supplied = 0.0
+            try:
+                ltv = float(b.get("ltv", 0) or 0)
+            except (TypeError, ValueError):
+                ltv = 0.0
             result.append({
                 "coin": spot_index.resolve_spot_coin(b.get("coin", "?")),
                 "total": total,
                 "hold": hold,
                 "entry_ntl": entry_ntl,
+                # R-WALLET-FIX: preserve PM lending fields so downstream
+                # accounting can net the real borrowed liability.
+                "borrowed": borrowed,
+                "supplied": supplied,
+                "ltv": ltv,
             })
         return result
     except Exception as exc:  # noqa: BLE001

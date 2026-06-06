@@ -124,6 +124,14 @@ class NetCapital:
     # as its own line and folded into ``total_equity_usd``. NEVER added to
     # perp margin or wallet USDC (no double-count).
     vault_deposits_usd: float = 0.0
+    # R-WALLET-FIX (2026-06-06): TRUE borrowed liability from HyperLiquid
+    # Portfolio Margin (USDC borrowed against spot HYPE collateral). The HYPE
+    # collateral is counted GROSS in ``spot_non_stable_usd`` and the perp
+    # account value is counted in ``perp_equity_usd``; this borrow is the debt
+    # side that nets them down to the real Rabby/DeBank net worth. SUBTRACTED
+    # from ``total_equity_usd``. Distinct from ``hl_debt_usd`` (deprecated
+    # HyperLend flywheel) — this is the live native lending borrow.
+    spot_borrow_usd: float = 0.0
 
     @property
     def spot_non_usdc_usd(self) -> float:
@@ -149,6 +157,7 @@ class NetCapital:
             + self.spot_stables_usd
             + self.pear_staked_usd
             + self.vault_deposits_usd
+            - self.spot_borrow_usd
         )
 
 
@@ -170,6 +179,8 @@ def _coerce_floats(d: dict[str, Any]) -> dict[str, float]:
         "pear_staked_total",
         # R-VAULTDEP: fund capital deposited INTO HL vaults.
         "vault_deposits_total",
+        # R-WALLET-FIX: TRUE borrowed liability (PM USDC borrow).
+        "spot_borrow_total",
     ):
         try:
             out[key] = float(d.get(key) or 0.0)
@@ -203,6 +214,7 @@ def compute_net_capital(snap: Any) -> NetCapital:
         upnl = f["upnl_perp_total"]
         pear_staked = f["pear_staked_total"]
         vault_deposits = f["vault_deposits_total"]
+        spot_borrow = f["spot_borrow_total"]
     else:
         def _get(name: str) -> float:
             try:
@@ -223,6 +235,8 @@ def compute_net_capital(snap: Any) -> NetCapital:
         pear_staked = _get("pear_staked_total")
         # R-VAULTDEP: fund capital deposited INTO HL vaults. Defaults to 0.
         vault_deposits = _get("vault_deposits_total")
+        # R-WALLET-FIX: TRUE borrowed liability (PM USDC borrow). Defaults 0.
+        spot_borrow = _get("spot_borrow_total")
 
     hl_net = hl_coll - hl_debt
     # NET = post-leverage capital exposure. UPnL is NOT added separately
@@ -236,11 +250,16 @@ def compute_net_capital(snap: Any) -> NetCapital:
     # GROSS = pre-leverage view (the old "Total" line). Kept informative.
     gross = hl_coll + perp + spot
 
-    total_equity = net + stables + pear_staked + vault_deposits
+    # R-WALLET-FIX (2026-06-06): subtract the real PM borrow. The HYPE
+    # collateral funding that borrow is already in ``spot`` (gross) and the
+    # borrowed dollars deployed into perp are already in ``perp`` — so the
+    # liability must be netted out once here to land on Rabby/DeBank net worth.
+    total_equity = net + stables + pear_staked + vault_deposits - spot_borrow
     log.info(
         "capital_calc: hl_coll=%.2f hl_debt=%.2f hl_net=%.2f perp=%.2f "
         "spot_non_stable=%.2f spot_stables=%.2f pear_staked=%.2f "
-        "vault_deposits=%.2f upnl=%.2f -> net=%.2f total_equity=%.2f gross=%.2f",
+        "vault_deposits=%.2f spot_borrow=%.2f upnl=%.2f -> net=%.2f "
+        "total_equity=%.2f gross=%.2f",
         hl_coll,
         hl_debt,
         hl_net,
@@ -249,6 +268,7 @@ def compute_net_capital(snap: Any) -> NetCapital:
         stables,
         pear_staked,
         vault_deposits,
+        spot_borrow,
         upnl,
         net,
         total_equity,
@@ -267,6 +287,7 @@ def compute_net_capital(snap: Any) -> NetCapital:
         hl_debt_usd=hl_debt,
         pear_staked_usd=pear_staked,
         vault_deposits_usd=vault_deposits,
+        spot_borrow_usd=spot_borrow,
     )
 
 
@@ -341,6 +362,13 @@ def format_net_capital_telegram(net: NetCapital) -> str:
     for _i, (_lbl, _val) in enumerate(_siblings):
         _tee = "└─" if _i == len(_siblings) - 1 else "├─"
         lines.append(f"{_tee} {_lbl}: {_fmt_usd(_val)}")
+    # R-WALLET-FIX (2026-06-06): show the PM borrow as an explicit liability
+    # netted out of TOTAL EQUITY, so the headline can never silently overstate.
+    if net.spot_borrow_usd > 0.01:
+        lines.append(
+            f"⚠️ Deuda PM (USDC borrowed): -{_fmt_usd(net.spot_borrow_usd)}  "
+            "(restada del TOTAL EQUITY)"
+        )
     lines.append("")
     lines.append(
         f"UPnL perp (already en perp account): "
@@ -399,6 +427,12 @@ def render_net_capital_html(
         extra_lines.append(
             f"<p>&nbsp;&nbsp;Vault Deposits (HL): "
             f"{fmt_compact_usd(net.vault_deposits_usd)}</p>"
+        )
+    # R-WALLET-FIX (2026-06-06): explicit PM borrow liability line.
+    if net.spot_borrow_usd > 0.01:
+        extra_lines.append(
+            f"<p>&nbsp;&nbsp;⚠️ Deuda PM (USDC borrowed): "
+            f"-{fmt_compact_usd(net.spot_borrow_usd)}</p>"
         )
     extra_block = "".join(extra_lines)
 

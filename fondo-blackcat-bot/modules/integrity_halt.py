@@ -179,6 +179,13 @@ def _blocklist() -> set[str]:
         return {"ZEC"}
 
 
+# How far (chars) a distinctive protocol/asset NAME may sit from an integrity
+# keyword and still out-rank a merely co-mentioned held ticker. Generous enough
+# to span a full sentence/tweet clause, tight enough that an unrelated coin three
+# sentences away never captures the signal.
+_DISTINCTIVE_WINDOW = 220
+
+
 def _resolve_subjects(
     text_lower: str,
     kw_positions: list[int],
@@ -186,27 +193,45 @@ def _resolve_subjects(
     held_tickers: set[str],
     alias_map: dict[str, str],
 ) -> set[str]:
-    """Bind each integrity-keyword occurrence to the NEAREST named asset.
+    """Bind each integrity-keyword occurrence to the asset it actually NAMES.
 
-    The rumor's subject is the asset it actually names — resolved by proximity
-    so a long daily-report blob that mentions BTC in one place and a Zcash bug
-    in another binds the bug to ZEC (nearest), never to BTC. Detects both held
-    HL tickers and project/coin NAMES via the alias map. Returns the set of
-    resolved tickers, or empty when the text names no known asset (fail-closed:
-    an unresolved rumor must NOT attach to any held position).
+    Subject resolution is proximity-aware but NOT naive-nearest. A *distinctive*
+    name — a protocol/project word like ``orchard``/``zcash``/``sapling`` (≥4
+    chars, not merely a bare ticker) — is a high-confidence subject anchor: when
+    one sits within ``_DISTINCTIVE_WINDOW`` of the keyword it takes PRECEDENCE
+    over any held ticker (e.g. BTC) that merely happens to sit closer in the same
+    multi-coin blob. This kills the live false BTC STOP that fired off a
+    Zcash/Orchard "unlimited mint" rumor: ``unlimited mint``/``orchard``/``zcash``
+    hard-resolve to ZEC regardless of which held coin is textually nearest.
+
+    A held coin only captures a keyword when NO distinctive name is in range —
+    i.e. the rumor genuinely names that held asset (by ticker or its own name).
+    Detects held HL tickers and project/coin NAMES via the alias map. Returns the
+    set of resolved tickers, or empty when the text names no known asset
+    (fail-closed: an unresolved rumor must NOT attach to any held position).
     """
-    mentions: list[tuple[int, str]] = []
+    # mention = (offset, TICKER, is_distinctive_name)
+    mentions: list[tuple[int, str, bool]] = []
     for ticker in held_tickers:
         for pos in _word_positions(ticker, text_lower):
-            mentions.append((pos, ticker.upper()))
+            mentions.append((pos, ticker.upper(), False))
     for name, ticker in alias_map.items():
+        distinctive = len(name) >= 4 and name.lower() != str(ticker).lower()
         for pos in _word_positions(name, text_lower):
-            mentions.append((pos, ticker.upper()))
+            mentions.append((pos, ticker.upper(), distinctive))
     if not mentions:
         return set()
     subjects: set[str] = set()
     for kpos in kw_positions:
-        nearest = min(mentions, key=lambda m: abs(m[0] - kpos))
+        # PRECEDENCE: a distinctive asset/protocol NAME within the local window
+        # wins outright over a nearer bare held ticker. Only when no distinctive
+        # name is in range does the rumor fall back to nearest-overall (so a
+        # genuine "$BTC exploit" with no other named asset still binds BTC).
+        near_distinctive = [
+            m for m in mentions if m[2] and abs(m[0] - kpos) <= _DISTINCTIVE_WINDOW
+        ]
+        pool = near_distinctive or mentions
+        nearest = min(pool, key=lambda m: abs(m[0] - kpos))
         subjects.add(nearest[1])
     return subjects
 

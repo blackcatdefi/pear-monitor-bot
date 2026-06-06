@@ -64,6 +64,15 @@ class PMState:
     hype_px: float
     collateral_breakdown: dict[str, float] = field(default_factory=dict)
     has_data: bool = True
+    # R-WALLET-FIX (2026-06-06): borrow-capacity health factor and the HYPE
+    # price at which the borrow hits the LTV ceiling. HF = (collateral ×
+    # PM_HYPE_LTV) / debt — i.e. the fraction of the LTV-allowed capacity still
+    # covered by collateral. HF < 1 means the borrow has exceeded the 50% LTV
+    # cap (collateral fell or debt grew) and the position is over-extended.
+    # ``liq_price`` is debt / (hype_qty × PM_HYPE_LTV): the HYPE oracle price
+    # at which collateral × LTV == debt. Both 0.0 when there is no debt.
+    health_factor: float = 0.0
+    liq_price: float = 0.0
     # P1.5: capital reserved by resting (non-trigger, non-reduce-only) limit
     # BUY orders. Loaded limit orders reserve margin/notional in HL, so the
     # borrow head-room (``available_usd``) is NOT freely deployable — this is
@@ -159,9 +168,19 @@ def compute_pm_state(
     for sb in spot_balances:
         coin = (sb.get("coin") or "").upper()
         total = _f(sb.get("total"))
-        # Borrowed stable shows as a NEGATIVE spot balance → real debt.
+        # R-WALLET-FIX (2026-06-06): a Portfolio Margin borrow is reported with
+        # a positive ``borrowed`` field (the GROSS liability, e.g. 39,808) AND
+        # a smaller-magnitude negative ``total`` (the net spot USDC after the
+        # borrowed dollars were swept into the perp account). The ``borrowed``
+        # field is authoritative — using the net ``total`` understates the debt
+        # by the swept portion (which is already inside perp accountValue), so
+        # the KPI under-reports liability. Prefer ``borrowed``; fall back to the
+        # negative ``total`` for older payloads that lack the field.
         if coin in _STABLES:
-            if total < 0:
+            borrowed = _f(sb.get("borrowed"))
+            if borrowed > 0:
+                debt += borrowed
+            elif total < 0:
                 debt += abs(total)  # stables are ~1:1 USD
             continue
         if coin in pm_assets:
@@ -194,6 +213,19 @@ def compute_pm_state(
     naked_long = debt > 1.0 and shorts_notional < 1.0
     committed_usd, committed_n = _committed_resting_notional(open_orders)
 
+    # R-WALLET-FIX (2026-06-06): borrow-capacity health factor + liquidation
+    # price. HF = capacity / debt = (collateral × LTV) / debt; HF < 1 means the
+    # borrow exceeds the LTV-allowed capacity (over-extended). liq_price is the
+    # HYPE oracle price at which collateral × LTV == debt, derived purely from
+    # the HYPE leg (the dominant cross collateral). Both 0.0 when no debt.
+    health_factor = (capacity / debt) if debt > 0 else 0.0
+    _hype_px = float(prices.get("HYPE") or 0.0)
+    liq_price = (
+        debt / (hype_qty * PM_HYPE_LTV)
+        if (debt > 0 and hype_qty > 0 and PM_HYPE_LTV > 0)
+        else 0.0
+    )
+
     return PMState(
         collateral_usd=collateral,
         debt_usd=debt,
@@ -204,11 +236,13 @@ def compute_pm_state(
         shorts_notional=shorts_notional,
         naked_long=naked_long,
         hype_qty=hype_qty,
-        hype_px=float(prices.get("HYPE") or 0.0),
+        hype_px=_hype_px,
         collateral_breakdown=breakdown,
         has_data=(collateral > 0 or debt > 0 or len(spot_balances) > 0),
         committed_orders_usd=committed_usd,
         committed_orders_count=committed_n,
+        health_factor=health_factor,
+        liq_price=liq_price,
     )
 
 
@@ -271,6 +305,19 @@ def format_pm_state_telegram(pm: PMState) -> str:
         f"(WARN {PM_WARN_RATIO*100:.0f}% · STRESS {PM_STRESS_RATIO*100:.0f}% · "
         f"CRÍTICO {PM_CRITICAL_RATIO*100:.0f}% · LIQ {PM_LIQ_RATIO*100:.0f}%)"
     )
+    # R-WALLET-FIX (2026-06-06): surface the real health factor + liq price so
+    # the borrow risk is legible (HF < 1 = over LTV cap). Only when debt > 0.
+    if pm.debt_usd > 1.0 and pm.health_factor > 0:
+        hf_flag = " 🔴 <1.0 (sobre el límite LTV)" if pm.health_factor < 1.0 else ""
+        lines.append(
+            f"├─ Health factor (cap/deuda, LTV {PM_HYPE_LTV:.2f}): "
+            f"{pm.health_factor:.2f}{hf_flag}"
+        )
+        if pm.liq_price > 0:
+            lines.append(
+                f"├─ Liq. price HYPE (col×LTV=deuda): ${pm.liq_price:,.2f}"
+                + (f"  (oracle ${pm.hype_px:,.2f})" if pm.hype_px > 0 else "")
+            )
     if pm.shorts_notional > 0:
         lines.append(
             f"└─ Hedge (shorts basket): {_fmt_usd(pm.shorts_notional)} notional "
