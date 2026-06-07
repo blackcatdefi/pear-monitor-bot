@@ -1009,10 +1009,23 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
                         _primary = _d
                         break
         if _primary is not None:
+            # R-PM-MARGIN-MODE-FIX (2026-06-07): the basket is MIXED MARGIN.
+            # Feed the HL account-level ``crossMaintenanceMarginUsed`` (cross-only
+            # by HL definition) as the shared-pool perp liability so the cross
+            # math reflects ONLY the cross legs; the ISOLATED legs (MRVL/HOOD)
+            # are split out inside compute_pm_state and reported separately,
+            # never folded into the pool.
+            try:
+                _acct_cross_mm = float(
+                    _primary.get("cross_maintenance_margin_used") or 0.0
+                )
+            except (TypeError, ValueError):
+                _acct_cross_mm = 0.0
             pm_state = compute_pm_state(
                 _primary.get("spot_balances") or [],
                 _primary.get("positions") or [],
                 _oracle_simple,
+                perp_cross_mm=_acct_cross_mm,
             )
     except Exception as _e:  # noqa: BLE001
         log.warning("portfolio_snapshot: PM state compute failed: %s", _e)

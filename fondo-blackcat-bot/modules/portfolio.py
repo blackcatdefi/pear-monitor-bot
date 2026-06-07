@@ -201,6 +201,20 @@ def _summarize_positions(state: dict[str, Any], dex_label: str = "main") -> dict
             cum_funding_open = float((p.get("cumFunding") or {}).get("sinceOpen") or 0.0)
         except (TypeError, ValueError):
             cum_funding_open = 0.0
+        # R-PM-MARGIN-MODE-FIX (2026-06-07): carry the per-leg margin facts the
+        # PM model needs to distinguish CROSS (shared pool) from ISOLATED
+        # (walled-off) legs — ``margin_used`` is the posted isolated margin on an
+        # isolated leg, ``max_leverage`` lets the cross-pool math derive each
+        # cross leg's maintenance contribution. ``leverage_type`` already tags
+        # the mode (isolated|cross), read live from HL — never hardcoded.
+        try:
+            margin_used = float(p.get("marginUsed", 0) or 0)
+        except (TypeError, ValueError):
+            margin_used = 0.0
+        try:
+            max_leverage = float(p.get("maxLeverage", 0) or 0)
+        except (TypeError, ValueError):
+            max_leverage = 0.0
         positions.append({
             "coin": p.get("coin", "?"),
             "size": szi,
@@ -211,6 +225,8 @@ def _summarize_positions(state: dict[str, Any], dex_label: str = "main") -> dict
             "liq_px": liq_px,
             "leverage": leverage.get("value"),
             "leverage_type": leverage.get("type"),
+            "margin_used": margin_used,
+            "max_leverage": max_leverage,
             "cum_funding_since_open": cum_funding_open,
             "dex": dex_label,
         })

@@ -106,6 +106,18 @@ class PMState:
     # the dry powder already allocated to the ladder.
     committed_orders_usd: float = 0.0
     committed_orders_count: int = 0
+    # R-PM-MARGIN-MODE-FIX (2026-06-07): per-leg margin-mode awareness. The
+    # basket is MIXED MARGIN — some legs are CROSS (share this PM pool, fold
+    # into ``perp_cross_mm`` and the cross liq math) and some are ISOLATED
+    # (walled off, their own margin + own liq price, NEVER in the cross-pool
+    # math). ``shorts_notional`` stays the TOTAL hedge (cross + isolated); the
+    # split below annotates which portion touches the pool. ``isolated_positions``
+    # carries the per-leg ISOLATED report structs (modules.margin_mode.IsolatedLeg).
+    cross_shorts_notional: float = 0.0
+    isolated_shorts_notional: float = 0.0
+    cross_perp_count: int = 0
+    isolated_perp_count: int = 0
+    isolated_positions: tuple = ()
 
 
 def _f(v: Any) -> float:
@@ -274,13 +286,23 @@ def compute_pm_state(
     hype_px: float | None = None,
     open_orders: list[dict[str, Any]] | None = None,
     ltv_map: dict[str, float] | None = None,
-    perp_cross_mm: float = 0.0,
+    perp_cross_mm: float | None = None,
     min_borrow_offset: float = 20.0,
 ) -> PMState:
     """Derive Portfolio Margin state from one wallet's spot + perp data.
 
     ``prices`` is an optional ``{COIN: usd}`` oracle map; when absent the HYPE
     price is fetched live via ``modules.hl_prices``. NEVER raises.
+
+    R-PM-MARGIN-MODE-FIX: the perp basket is MIXED MARGIN. Only CROSS legs share
+    this PM pool; ISOLATED legs are walled off. ``perp_cross_mm`` is the cross
+    perp maintenance margin folded into the shared liability:
+      * pass an explicit value (e.g. the HL account-level
+        ``crossMaintenanceMarginUsed``, which is cross-only by definition) and it
+        is honoured exactly; or
+      * leave it ``None`` (default) and it is DERIVED from the CROSS legs'
+        per-leg maintenance margin (isolated legs never contribute). Fieldless
+        synthetic positions derive 0.0, so prior callers are unchanged.
     """
     spot_balances = spot_balances or []
     positions = positions or []
@@ -344,6 +366,40 @@ def compute_pm_state(
         if sz < 0:
             shorts_notional += ntl
 
+    # R-PM-MARGIN-MODE-FIX: split the basket by margin mode (read live, never
+    # hardcoded). Only the CROSS legs feed the shared-pool maintenance margin;
+    # the ISOLATED legs are walled off and reported separately. The hedge
+    # (``shorts_notional``) still counts BOTH so the naked-long guard sees the
+    # full hedge, but we surface the cross/isolated split for the framing.
+    cross_legs: list[dict[str, Any]] = []
+    isolated_legs_struct: tuple = ()
+    cross_shorts = 0.0
+    isolated_shorts = 0.0
+    isolated_count = 0
+    cross_count = 0
+    try:
+        from modules.margin_mode import (
+            split_legs as _split_legs,
+            build_isolated_legs as _build_iso,
+            cross_perp_maint_margin as _cross_mm,
+            shorts_notional_split as _shorts_split,
+        )
+        cross_legs, _iso_raw = _split_legs(positions)
+        cross_count = len(cross_legs)
+        isolated_count = len(_iso_raw)
+        isolated_legs_struct = tuple(_build_iso(positions, prices))
+        cross_shorts, isolated_shorts = _shorts_split(positions)
+        _derived_cross_mm = _cross_mm(positions)
+    except Exception:  # noqa: BLE001 — margin-mode split is best-effort
+        _derived_cross_mm = 0.0
+
+    # Effective cross perp maintenance margin folded into the shared liability:
+    # honour an explicit value; otherwise derive from the CROSS legs only.
+    if perp_cross_mm is None:
+        effective_cross_mm = _derived_cross_mm
+    else:
+        effective_cross_mm = _f(perp_cross_mm)
+
     capacity = PM_HYPE_LTV * collateral
     available = capacity - debt
     ratio = (debt / capacity) if capacity > 0 else 0.0
@@ -364,7 +420,7 @@ def compute_pm_state(
         hype_qty,
         _hype_px,
         ltv_map=ltv_map,
-        perp_cross_mm=perp_cross_mm,
+        perp_cross_mm=effective_cross_mm,
         min_borrow_offset=min_borrow_offset,
     )
     liq_price = metrics["liq_price"]
@@ -399,7 +455,12 @@ def compute_pm_state(
         price_buffer_pct=price_buffer_pct,
         risk_emoji=risk_emoji,
         risk_label=risk_label,
-        perp_cross_mm=float(perp_cross_mm or 0.0),
+        perp_cross_mm=float(effective_cross_mm or 0.0),
+        cross_shorts_notional=cross_shorts,
+        isolated_shorts_notional=isolated_shorts,
+        cross_perp_count=cross_count,
+        isolated_perp_count=isolated_count,
+        isolated_positions=isolated_legs_struct,
     )
 
 
@@ -506,13 +567,53 @@ def format_pm_state_telegram(pm: PMState) -> str:
         # Clarify that over-max-borrow only blocks NEW draws — liquidation is the
         # maintenance-LTV price, not the 100%-utilization point.
         lines.append(explainer_line(pm.liq_price))
+    # R-PM-MARGIN-MODE-FIX: the hedge framing still shows TOTAL short notional
+    # (cross + isolated) as the macro hedge of the leveraged HYPE long, but it
+    # annotates which portion shares the cross PM pool vs which is walled off.
+    iso_legs = pm.isolated_positions or ()
     if pm.shorts_notional > 0:
+        hedge_lead = "├─" if iso_legs else "└─"
+        split_note = ""
+        if pm.isolated_shorts_notional > 0:
+            split_note = (
+                f" [cross {_fmt_usd(pm.cross_shorts_notional)} en pool · "
+                f"isolated {_fmt_usd(pm.isolated_shorts_notional)} walled-off]"
+            )
         lines.append(
-            f"└─ Hedge (shorts basket): {_fmt_usd(pm.shorts_notional)} notional "
-            f"vs colateral {_fmt_usd(pm.collateral_usd)}"
+            f"{hedge_lead} Hedge (shorts basket): {_fmt_usd(pm.shorts_notional)} notional "
+            f"vs colateral {_fmt_usd(pm.collateral_usd)}{split_note}"
         )
     else:
         lines.append("└─ Hedge (shorts basket): sin shorts abiertos")
+
+    # ── ISOLATED POSITIONS subsection (walled off from the HYPE cross pool) ──
+    if iso_legs:
+        lines.append(
+            "🧱 ISOLATED POSITIONS (margin walled-off — NO tocan el pool cross "
+            "ni el liq price del colateral HYPE):"
+        )
+        n = len(iso_legs)
+        for i, leg in enumerate(iso_legs):
+            lead = "   └─" if i == n - 1 else "   ├─"
+            upnl_sign = "+" if leg.upnl >= 0 else "−"
+            parts = [
+                f"{leg.side} {leg.coin}",
+                f"notional {_fmt_usd(leg.notional_usd)}",
+            ]
+            if leg.entry_px > 0:
+                parts.append(f"entry ${leg.entry_px:,.2f}")
+            if leg.mark_px > 0:
+                parts.append(f"mark ${leg.mark_px:,.2f}")
+            if leg.isolated_margin > 0:
+                parts.append(f"iso-margin {_fmt_usd(leg.isolated_margin)}")
+            if leg.liq_px > 0:
+                liq_bit = f"liq ${leg.liq_px:,.2f}"
+                if leg.distance_to_liq_pct > 0:
+                    liq_bit += f" ({leg.distance_to_liq_pct:.1f}% away)"
+                parts.append(liq_bit)
+            parts.append(f"UPnL {upnl_sign}{_fmt_usd(abs(leg.upnl))}")
+            lines.append(f"{lead} " + " · ".join(parts))
+
     if pm.naked_long:
         lines.append(
             "🚨 WARNING: USDC debt vs HYPE with no shorts open — "

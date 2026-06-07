@@ -143,14 +143,30 @@ CORE DEL FONDO — PORTFOLIO MARGIN (HyperLiquid):
     Único activo borroweable = USDC/USDH. Capacidad de borrow = LTV {ltv:.2f}
     × valor del colateral HYPE (a precio oráculo live).
 
-PM MARGIN-RATIO THRESHOLDS (ratio = deuda / capacidad de borrow):
-  • ratio ≥ {warn:.2f} → WARN (monitorear)
-  • ratio ≥ {stress:.2f} → STRESS (reducir deuda)
-  • ratio ≥ {crit:.2f} → CRÍTICO / pre-liquidación
-  • ratio ≥ {liq:.2f} → LIQUIDACIÓN inminente
+PM MARGIN-RATIO THRESHOLDS (R-PM-MARGIN-MODE-FIX — borrow utilization NO es liquidación):
+  • MÉTRICA DE RIESGO REAL = aave-HF (usa el maintenance threshold
+    0.5 + 0.5×ltv) + el liq price real del colateral HYPE. aave-HF arriba de
+    1.30 = saludable; aave-HF cerca de 1.00 = liquidable. SIEMPRE liderá el
+    estado PM con el aave-HF y el liq price real, no con la utilización.
+  • Borrow utilization (vs {ltv:.0%} max-borrow) = deuda / capacidad de borrow.
+    Es UTILIZACIÓN del tope de borrow, NO una señal de liquidación. Bandas de
+    head-room de capacidad (NO de liquidación):
+      - util ≥ {warn:.2f} → poco head-room (monitorear capacidad)
+      - util ≥ {stress:.2f} → head-room ajustado (preferir no agregar deuda)
+      - util ≥ {crit:.2f} → casi sin head-room de borrow
+      - util ≥ 1.00 (100%) → OVER MAX-BORROW: no new draws; reduce or add collateral
+    PROHIBIDO usar lenguaje de liquidación, alarma o color rojo para la borrow
+    utilization (incluso > 100%): solo bloquea NUEVOS draws de USDC. Reservá el
+    lenguaje de liquidación SOLO para el aave-HF acercándose a 1.0 /
+    portfolio_margin_ratio acercándose a {liq:.2f}.
+  • MIXED MARGIN: el basket tiene legs CROSS (comparten el pool PM — afectan
+    utilización, aave-HF y el liq price del HYPE) y legs ISOLATED (margin
+    walled-off, con su PROPIO liq price; NO tocan el pool ni el colateral HYPE).
+    El cross-pool math incluye SOLO los legs cross; reportá los ISOLATED en una
+    subsección aparte con su propio margin + liq price + distancia a liq.
   • NAKED-LONG GUARD: deuda USDC/USDH abierta SIN shorts del basket = long
     apalancado sin hedge → violación de regla dura. Alertar SIEMPRE, sin
-    importar el ratio.
+    importar la utilización (cuentan como hedge tanto shorts cross como isolated).
 
 {basket_block}
 
@@ -280,10 +296,18 @@ SIEMPRE:
      PM. Único activo borroweable = USDC/USDH. Capacidad de borrow = LTV ×
      colateral HYPE (a precio oráculo live).
    - Estado vivo del core = el bloque "PORTFOLIO MARGIN" inyectado / en la
-     sección de posiciones: colateral, deuda, capacidad/disponible, margin
-     ratio y guard de naked-long. Reportá ESE estado PM, no el HyperLend legacy (CERRADO).
-   - Margin ratio = deuda / capacidad de borrow. Umbrales: WARN 0.40 /
-     STRESS 0.70 / CRÍTICO 0.85 / LIQUIDACIÓN 0.95.
+     sección de posiciones: colateral, deuda, capacidad/disponible, aave-HF +
+     liq price real, borrow utilization y guard de naked-long. Reportá ESE
+     estado PM, no el HyperLend legacy (CERRADO).
+   - RIESGO REAL = aave-HF (maintenance threshold 0.5+0.5×ltv) + liq price real
+     del HYPE; liderá con eso. Borrow utilization = deuda / capacidad de borrow
+     es UTILIZACIÓN del max-borrow, NO liquidación: util > 100% = "OVER
+     MAX-BORROW: no new draws; reduce or add collateral", sin lenguaje de
+     liquidación ni alarma roja. Liquidación real solo si aave-HF se acerca a
+     1.0 / portfolio_margin_ratio a 0.95.
+   - MIXED MARGIN: legs CROSS comparten el pool (afectan utilización/aave-HF/liq
+     del HYPE); legs ISOLATED están walled-off con su propio liq price y NO
+     tocan el pool. Reportá los ISOLATED aparte.
    - NAKED-LONG GUARD: deuda USDC/USDH abierta SIN shorts del basket = long
      apalancado sin hedge → violación de regla dura. Alertar SIEMPRE.
 
@@ -361,8 +385,11 @@ Fecha: [fecha y hora UTC]
 
 1. PORTFOLIO CONSOLIDADO
 Tabla: Wallet | Equity Perp | UPnL | PnL 24h | Leverage | Bias
-PORTFOLIO MARGIN: Colateral HYPE, Deuda (USDC/USDH), Capacidad/disponible,
-Margin ratio (WARN 0.40 / STRESS 0.70 / CRÍTICO 0.85 / LIQ 0.95), naked-long guard.
+PORTFOLIO MARGIN: Colateral HYPE, Deuda (USDC/USDH), Capacidad/disponible.
+LIDERÁ con aave-HF + liq price real del HYPE (riesgo real). Borrow utilization
+(vs 50% max-borrow) es capacidad, NO liquidación: > 100% = "OVER MAX-BORROW: no
+new draws", nunca "crítico/pre-liquidación". Subsección ISOLATED POSITIONS
+aparte (MRVL/HOOD walled-off) + naked-long guard.
 NO reportar bloque HyperLend (CERRADO — flywheel migrado a PM).
 DreamCash: "INACTIVA. Sin posiciones." (ver REGLA DREAMCASH arriba)
 
@@ -406,7 +433,7 @@ Generá un análisis CORTO (máx 1500 chars) del estado de la tesis macro:
 Para cada uno de estos componentes, marcá ✅ VALIDA / ⚠️ NEUTRO / 🔴 INVALIDA con un dato específico:
 1. War trade (oil > $80, gold > $3500): Dalio Stage 6, Hormuz cerrado, energy crisis
 2. Super Basket Stage 6: leer estado real del bloque "BASKET STATE — ON-CHAIN AUTORITATIVO" arriba; alts en bear / no risk-on squeeze valida la tesis cuando la basket está ACTIVE. (Nombre canónico — renombre interno 2026-05-07; usar siempre este nombre en outputs.)
-3. HYPE core (Portfolio Margin): el flywheel HyperLend está CERRADO — el core es HYPE spot como colateral cross en PM. Salud = margin ratio (WARN 0.40 / STRESS 0.70 / CRÍTICO 0.85 / LIQ 0.95) y guard de naked-long, NO una métrica de HyperLend. Tesis válida si HYPE estable/subiendo y el ratio en zona CALM/WARN con hedge (shorts) presente.
+3. HYPE core (Portfolio Margin): el flywheel HyperLend está CERRADO — el core es HYPE spot como colateral cross en PM. Salud = aave-HF (liq price real del HYPE) + guard de naked-long, NO una métrica de HyperLend ni la borrow utilization (esta última es capacidad del max-borrow, no liquidación). Tesis válida si HYPE estable/subiendo, aave-HF en zona saludable y hedge (shorts) presente.
 4. Fed hawkish: Warsh narrative, no pivot dovish
 5. LMEC Bear Invalidation Triggers (las 4 condiciones formales que destruyen la tesis bear):
      a) BTC rompe ATH $97-98K
