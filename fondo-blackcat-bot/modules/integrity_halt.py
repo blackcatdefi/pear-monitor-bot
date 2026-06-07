@@ -490,21 +490,89 @@ def build_notes_block(notes: list[IntegrityNote] | None) -> str:
     return "\n".join(lines)
 
 
+def _norm_excerpt(s: Any) -> str:
+    """Normalise an excerpt for cross-run equality (whitespace + case)."""
+    return " ".join(str(s or "").split()).lower()
+
+
+def reconcile_misattributed(
+    scan: IntegrityScan,
+    active_flags: list[dict[str, Any]] | None,
+) -> list[str]:
+    """Self-heal flags that a SUPERSEDED subject-resolver mis-attributed.
+
+    A flag raised by an older resolver (e.g. the pre-R-INTEGRITY-FIX nearest-
+    ticker logic that bound a Zcash/Orchard "unlimited mint" rumor to the held
+    BTC leg) lingers in SQLite forever because raised flags never auto-clear.
+    Now that the distinctive-name resolver re-reads the SAME rumor excerpt and
+    correctly attributes it to a DIFFERENT concrete asset (ZEC), that old flag
+    is provably a misattribution — not a genuine unresolved risk — so we dismiss
+    it with an audit-trail resolution.
+
+    Strict guards (never clear a real risk):
+      * the flag's asset is NOT in the current scan's fireable hits, AND
+      * the flag is NOT shielded (shielded flags never auto-clear, ever), AND
+      * the SAME excerpt now resolves to a DIFFERENT, concrete (non-None) asset
+        in the current scan (hit OR note).
+
+    Returns the list of assets auto-dismissed. NEVER raises.
+    """
+    dismissed: list[str] = []
+    try:
+        flags = active_flags or []
+        if not flags:
+            return dismissed
+        hit_assets = {h.asset.upper() for h in scan.hits}
+        shielded = shielded_assets()
+        # excerpt(normalised) → set of concrete assets it now resolves to.
+        excerpt_assets: dict[str, set[str]] = {}
+        for item in list(scan.hits) + list(scan.notes):
+            asset = getattr(item, "asset", None)
+            if not asset:
+                continue
+            excerpt_assets.setdefault(
+                _norm_excerpt(getattr(item, "excerpt", "")), set()
+            ).add(str(asset).upper())
+        for f in flags:
+            asset = str(f.get("asset") or "").upper()
+            if not asset or asset in hit_assets:
+                continue
+            if asset in shielded or f.get("shielded"):
+                continue
+            others = excerpt_assets.get(_norm_excerpt(f.get("excerpt")), set())
+            if others and others != {asset} and any(a != asset for a in others):
+                if dismiss(
+                    asset,
+                    resolution="auto-reconcile: rumor re-attributed to "
+                    + ",".join(sorted(a for a in others if a != asset)),
+                ):
+                    dismissed.append(asset)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("reconcile_misattributed failed: %s", exc)
+    return dismissed
+
+
 def run_integrity_halt(
     positions: list[dict[str, Any]] | None,
     intel: Any,
     *,
     plan_assets: set[str] | None = None,
 ) -> tuple[str, list[str]]:
-    """Scan → persist → render. Returns (block_text, newly_raised_assets).
+    """Scan → persist → reconcile → render. Returns (block, newly_raised).
 
     NEVER raises — integrity scanning must never break /reporte. The STOP
     block (persisted, MANUAL-REVIEW) is followed by any low-severity info
-    lines for rumors that were consciously suppressed.
+    lines for rumors that were consciously suppressed. Before rendering, any
+    persisted flag that the (now-corrected) resolver re-attributes to a
+    different concrete asset is auto-dismissed (self-heal of misattribution).
     """
     try:
         scan = scan_integrity(positions, intel, plan_assets=plan_assets)
         newly = raise_flags(scan.hits)
+        # Self-heal BEFORE reading active flags so a misattributed legacy flag
+        # (e.g. a false BTC STOP off a Zcash rumor) is gone from the rendered
+        # block the moment the corrected resolver re-reads the same excerpt.
+        reconcile_misattributed(scan, get_active_flags())
         block = build_integrity_block(get_active_flags())
         notes_block = build_notes_block(scan.notes)
         if notes_block:

@@ -361,19 +361,45 @@ def _pm_health_for_header(
                     break
         if primary is None:
             return "—"
+        try:
+            from modules.hl_borrow_lend import get_collateral_ltv_map
+            _ltv = get_collateral_ltv_map()
+        except Exception:  # noqa: BLE001
+            _ltv = {}
+        try:
+            _cmm = float(primary.get("cross_maintenance_margin_used") or 0.0)
+        except (TypeError, ValueError):
+            _cmm = 0.0
         pm = compute_pm_state(
             primary.get("spot_balances") or [],
             primary.get("positions") or [],
             _build_price_map(market),
             open_orders=primary.get("open_orders") or [],
+            ltv_map=_ltv,
+            perp_cross_mm=_cmm,
         )
         if pm is None or not pm.has_data or pm.collateral_usd <= 0:
             return "—"
-        emoji, band = _display_band(pm.ratio)
-        txt = (
-            f"{pm.ratio * 100:.1f}% {emoji} {band} "
-            f"(col {_fmt_usd(pm.collateral_usd)} / deuda {_fmt_usd(pm.debt_usd)})"
-        )
+        # R-PM-LIQ: lead with the REAL liquidation risk (aave-style HF on the
+        # maintenance threshold), NOT the borrow-utilisation band — the latter
+        # reads "🔴 LIQ-RISK" at >85% utilisation even when the position is far
+        # from liquidation (HF 1.44). Show utilisation + real liq price as
+        # secondary context. NAKED-LONG stays a distinct hedge-missing flag.
+        if pm.debt_usd > 1.0:
+            txt = (
+                f"HF {pm.aave_hf:.2f} {pm.risk_emoji} {pm.risk_label} "
+                f"(col {_fmt_usd(pm.collateral_usd)} / deuda {_fmt_usd(pm.debt_usd)}"
+                f" · util {pm.ratio * 100:.0f}%"
+            )
+            if pm.liq_price > 0:
+                txt += f" · liq HYPE ${pm.liq_price:,.2f}"
+            txt += ")"
+        else:
+            emoji, band = _display_band(pm.ratio)
+            txt = (
+                f"{pm.ratio * 100:.1f}% {emoji} {band} "
+                f"(col {_fmt_usd(pm.collateral_usd)} / deuda {_fmt_usd(pm.debt_usd)})"
+            )
         if pm.naked_long:
             txt += " 🚨 NAKED-LONG"
         return txt
@@ -749,7 +775,12 @@ def format_report_header(
         perp_total = 0.0
         spot_non_stable = 0.0
         spot_stables = 0.0
+        spot_borrow_total = 0.0
         _price_map = _build_price_map(market)
+        try:
+            from modules.portfolio_snapshot import _spot_native_borrow
+        except Exception:  # noqa: BLE001
+            _spot_native_borrow = None  # type: ignore[assignment]
         for w in wallets:
             if not isinstance(w, dict) or w.get("status") != "ok":
                 continue
@@ -759,14 +790,25 @@ def format_report_header(
             except (TypeError, ValueError):
                 pe = 0.0
             perp_total += pe
+            _sb = d.get("spot_balances") or []
             try:
-                ns, st = _estimate_spot_split(
-                    d.get("spot_balances") or [], pe, _price_map
-                )
+                ns, st = _estimate_spot_split(_sb, pe, _price_map)
                 spot_non_stable += float(ns)
                 spot_stables += float(st)
             except Exception:  # noqa: BLE001
                 pass
+            # R-PM-LIQ (P0.2): the Portfolio Margin USDC borrow is a real
+            # liability. ``_estimate_spot_split`` SKIPS stablecoins when a perp
+            # account is active (so the negative USDC total is NOT counted as a
+            # cash-equivalent — avoiding a double count). That means the headline
+            # was NEVER subtracting the borrow → TOTAL EQUITY inflated by ~$40K
+            # (showed ~$99K vs Rabby ~$60-66K). Surface the authoritative
+            # ``borrowed`` field here so compute_net_capital nets it EXACTLY once.
+            if _spot_native_borrow is not None:
+                try:
+                    spot_borrow_total += float(_spot_native_borrow(_sb) or 0.0)
+                except Exception:  # noqa: BLE001
+                    pass
         try:
             pear_total = float(os.getenv("PEAR_STAKED_USD", "0") or 0)
         except (TypeError, ValueError):
@@ -784,6 +826,7 @@ def format_report_header(
             "perp_equity_total": perp_total,
             "spot_usd_total": spot_non_stable,
             "spot_stables_total": spot_stables,
+            "spot_borrow_total": spot_borrow_total,  # R-PM-LIQ: net the PM debt
             "upnl_perp_total": 0.0,  # already in perp accountValue
             "pear_staked_total": pear_total,
             "vault_deposits_total": vault_dep_total,
@@ -894,8 +937,13 @@ def format_quick_positions(wallets: list[dict[str, Any]],
         _perp_total = 0.0
         _spot_non_stable_total = 0.0
         _spot_stables_total = 0.0
+        _spot_borrow_total = 0.0
         _upnl_total = 0.0
         _price_map_qp = _build_price_map(market)
+        try:
+            from modules.portfolio_snapshot import _spot_native_borrow as _snb
+        except Exception:  # noqa: BLE001
+            _snb = None  # type: ignore[assignment]
         for _w in wallets:
             if not isinstance(_w, dict) or _w.get("status") != "ok":
                 continue
@@ -905,18 +953,25 @@ def format_quick_positions(wallets: list[dict[str, Any]],
             except (TypeError, ValueError):
                 _pe = 0.0
             _perp_total += _pe
+            _wsb = _d.get("spot_balances") or []
             try:
                 # R-DASHBOARD-SPOT-FIX: split into non-stable vs stables
                 # so the banner labels exposure accurately and surfaces
                 # stable cash equivalents separately.
                 # R-PMCORE: value non-stable (HYPE) at LIVE oracle price.
-                _ns, _st = _estimate_spot_split(
-                    _d.get("spot_balances") or [], _pe, _price_map_qp
-                )
+                _ns, _st = _estimate_spot_split(_wsb, _pe, _price_map_qp)
                 _spot_non_stable_total += float(_ns)
                 _spot_stables_total += float(_st)
             except Exception:  # noqa: BLE001
                 pass
+            # R-PM-LIQ (P0.2): net the PM USDC borrow in the /reporte capital
+            # banner too — same fix as the DESTACADO header. Without this the
+            # banner's TOTAL EQUITY also overstated by the borrowed amount.
+            if _snb is not None:
+                try:
+                    _spot_borrow_total += float(_snb(_wsb) or 0.0)
+                except Exception:  # noqa: BLE001
+                    pass
             try:
                 _upnl_total += float(_d.get("unrealized_pnl_total") or 0.0)
             except (TypeError, ValueError):
@@ -955,6 +1010,7 @@ def format_quick_positions(wallets: list[dict[str, Any]],
             # stables are surfaced as a separate informative line.
             "spot_usd_total": _spot_non_stable_total,
             "spot_stables_total": _spot_stables_total,
+            "spot_borrow_total": _spot_borrow_total,  # R-PM-LIQ: net PM debt
             "upnl_perp_total": _upnl_total,
             "pear_staked_total": _pear_total,
             "vault_deposits_total": _vault_dep_total,
@@ -980,11 +1036,24 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                         _primary = _wd
                         break
             if _primary is not None:
+                try:
+                    from modules.hl_borrow_lend import get_collateral_ltv_map
+                    _ltv_qp = get_collateral_ltv_map()
+                except Exception:  # noqa: BLE001
+                    _ltv_qp = {}
+                try:
+                    _cmm_qp = float(
+                        _primary.get("cross_maintenance_margin_used") or 0.0
+                    )
+                except (TypeError, ValueError):
+                    _cmm_qp = 0.0
                 _pm = compute_pm_state(
                     _primary.get("spot_balances") or [],
                     _primary.get("positions") or [],
                     _price_map_qp,
                     open_orders=_primary.get("open_orders") or [],
+                    ltv_map=_ltv_qp,
+                    perp_cross_mm=_cmm_qp,
                 )
                 _pm_block = format_pm_state_telegram(_pm)
                 if _pm_block:

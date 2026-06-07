@@ -73,6 +73,33 @@ class PMState:
     # at which collateral × LTV == debt. Both 0.0 when there is no debt.
     health_factor: float = 0.0
     liq_price: float = 0.0
+    # R-PM-LIQ (2026-06-06): the cap-50%-LTV guess for liq_price was WRONG — it
+    # used the BORROW LTV (0.5) as if it were the maintenance threshold, putting
+    # the liquidation price ~50% too high ($60.45 vs the real ~$40.32). The HL
+    # Portfolio Margin maintenance threshold is ``0.5 + 0.5 × ltv`` per
+    # collateral token (0.75 for a 0.5-LTV asset like HYPE), and the app's
+    # "Health Factor %" is borrow UTILISATION (HF_app = capacity/debt), NOT the
+    # liquidation point. These fields separate the two framings cleanly:
+    #   * ``max_ltv``        — borrow LTV cap used for capacity (HYPE 0.50).
+    #   * ``liq_threshold``  — maintenance LTV = 0.5 + 0.5×ltv (HYPE 0.75).
+    #   * ``aave_hf``        — REAL risk metric = Σ(value×liq_threshold)/debt.
+    #                          ≥1 safe, <1 liquidatable. Drives the risk band.
+    #   * ``current_ltv``    — debt / collateral value (informational).
+    #   * ``price_buffer_pct`` — % the HYPE oracle can fall before liq.
+    #   * ``risk_emoji``/``risk_label`` — aave_HF-driven status (NOT the naked
+    #     -long flag, which stays a separate HEDGE-MISSING note).
+    #   * ``perp_cross_mm``  — perp cross maintenance margin folded into the
+    #     liability ONLY when cross perps share the PM account (live: 0).
+    # ``health_factor`` stays HF_app (capacity/debt, "borrow utilization Earn")
+    # and ``liq_price`` is now the REAL maintenance liquidation price for HYPE.
+    max_ltv: float = 0.0
+    liq_threshold: float = 0.0
+    aave_hf: float = 0.0
+    current_ltv: float = 0.0
+    price_buffer_pct: float = 0.0
+    risk_emoji: str = "🟢"
+    risk_label: str = "SIN DEUDA"
+    perp_cross_mm: float = 0.0
     # P1.5: capital reserved by resting (non-trigger, non-reduce-only) limit
     # BUY orders. Loaded limit orders reserve margin/notional in HL, so the
     # borrow head-room (``available_usd``) is NOT freely deployable — this is
@@ -96,6 +123,114 @@ def _classify(ratio: float) -> str:
     if ratio >= PM_WARN_RATIO:
         return "WARN"
     return "CALM"
+
+
+def _liq_threshold_for_ltv(ltv: float) -> float:
+    """HL Portfolio Margin maintenance threshold for a collateral asset.
+
+    The borrow LTV (e.g. 0.50 for HYPE) is the cap at which you can no longer
+    borrow MORE; liquidation happens later, at the maintenance threshold
+    ``0.5 + 0.5 × ltv`` (0.75 for a 0.5-LTV asset). NEVER raises.
+    """
+    try:
+        lv = float(ltv)
+    except (TypeError, ValueError):
+        lv = PM_HYPE_LTV
+    if lv <= 0:
+        lv = PM_HYPE_LTV
+    return 0.5 + 0.5 * lv
+
+
+# R-PM-LIQ aave-style health bands (DRIVEN BY aave_HF, not the borrow ratio):
+#   ≥1.30 🟢 SALUDABLE · 1.15-1.30 🟡 WATCH · 1.05-1.15 🟠 ALERTA
+#   1.00-1.05 🔴 CRÍTICO · <1.00 ⛔ LIQUIDABLE.
+def risk_tier(aave_hf: float, *, has_debt: bool) -> tuple[str, str]:
+    """Map an aave-style health factor to (emoji, label). NEVER raises."""
+    if not has_debt:
+        return "🟢", "SIN DEUDA"
+    try:
+        h = float(aave_hf)
+    except (TypeError, ValueError):
+        return "🟢", "SIN DATOS"
+    if h <= 0:
+        return "🟢", "SIN DATOS"
+    if h < 1.00:
+        return "⛔", "LIQUIDABLE"
+    if h < 1.05:
+        return "🔴", "CRÍTICO"
+    if h < 1.15:
+        return "🟠", "ALERTA"
+    if h < 1.30:
+        return "🟡", "WATCH"
+    return "🟢", "SALUDABLE"
+
+
+def compute_pm_risk_metrics(
+    breakdown: dict[str, float],
+    debt: float,
+    hype_qty: float,
+    hype_px: float,
+    *,
+    ltv_map: dict[str, float] | None = None,
+    perp_cross_mm: float = 0.0,
+    min_borrow_offset: float = 20.0,
+) -> dict[str, float]:
+    """Pure PM risk math. Generic multi-collateral support.
+
+    ``breakdown`` is ``{COIN: usd_value}`` of PM-eligible collateral at oracle.
+    Returns the borrow capacity (Σ value×ltv), the liquidation-weighted
+    collateral (Σ value×liq_threshold), the aave-style HF, the app-style HF
+    (capacity/debt), current LTV, the REAL HYPE maintenance liquidation price
+    (others held constant) and the % price buffer. NEVER raises.
+    """
+    ltv_map = {k.upper(): v for k, v in (ltv_map or {}).items()}
+    total_value = 0.0
+    borrow_capacity = 0.0
+    liq_weighted = 0.0
+    hype_liq_threshold = _liq_threshold_for_ltv(ltv_map.get("HYPE", PM_HYPE_LTV))
+    hype_value_at_oracle = 0.0
+    for coin, value in (breakdown or {}).items():
+        v = _f(value)
+        if v <= 0:
+            continue
+        ltv = _f(ltv_map.get(coin.upper(), PM_HYPE_LTV)) or PM_HYPE_LTV
+        lt = _liq_threshold_for_ltv(ltv)
+        total_value += v
+        borrow_capacity += v * ltv
+        liq_weighted += v * lt
+        if coin.upper() == "HYPE":
+            hype_value_at_oracle += v
+
+    debt = _f(debt)
+    liability = debt + _f(perp_cross_mm)
+    hf_app = (borrow_capacity / debt) if debt > 0 else 0.0
+    aave_hf = (liq_weighted / liability) if liability > 0 else 0.0
+    current_ltv = (debt / total_value) if total_value > 0 else 0.0
+
+    # REAL HYPE maintenance liquidation price: hold every other collateral
+    # constant and solve for the HYPE oracle px at which the liquidation-weighted
+    # collateral equals the liability (+ the 20-USDC min-borrow offset).
+    other_liq = liq_weighted - hype_value_at_oracle * hype_liq_threshold
+    liq_price = 0.0
+    if debt > 0 and hype_qty > 0 and hype_liq_threshold > 0:
+        target = (liability + _f(min_borrow_offset)) - other_liq
+        if target > 0:
+            liq_price = target / (hype_liq_threshold * hype_qty)
+    buffer_pct = 0.0
+    if liq_price > 0 and hype_px > 0:
+        buffer_pct = max(0.0, (hype_px - liq_price) / hype_px * 100.0)
+
+    return {
+        "borrow_capacity": borrow_capacity,
+        "liq_weighted": liq_weighted,
+        "hf_app": hf_app,
+        "aave_hf": aave_hf,
+        "current_ltv": current_ltv,
+        "liq_price": liq_price,
+        "price_buffer_pct": buffer_pct,
+        "max_ltv": _f(ltv_map.get("HYPE", PM_HYPE_LTV)) or PM_HYPE_LTV,
+        "liq_threshold": hype_liq_threshold,
+    }
 
 
 def _committed_resting_notional(
@@ -138,6 +273,9 @@ def compute_pm_state(
     *,
     hype_px: float | None = None,
     open_orders: list[dict[str, Any]] | None = None,
+    ltv_map: dict[str, float] | None = None,
+    perp_cross_mm: float = 0.0,
+    min_borrow_offset: float = 20.0,
 ) -> PMState:
     """Derive Portfolio Margin state from one wallet's spot + perp data.
 
@@ -213,18 +351,29 @@ def compute_pm_state(
     naked_long = debt > 1.0 and shorts_notional < 1.0
     committed_usd, committed_n = _committed_resting_notional(open_orders)
 
-    # R-WALLET-FIX (2026-06-06): borrow-capacity health factor + liquidation
-    # price. HF = capacity / debt = (collateral × LTV) / debt; HF < 1 means the
-    # borrow exceeds the LTV-allowed capacity (over-extended). liq_price is the
-    # HYPE oracle price at which collateral × LTV == debt, derived purely from
-    # the HYPE leg (the dominant cross collateral). Both 0.0 when no debt.
+    # R-WALLET-FIX: HF_app (borrow utilisation) = capacity / debt = the HL app's
+    # "Health Factor %". KEPT as ``health_factor`` for backward compatibility.
     health_factor = (capacity / debt) if debt > 0 else 0.0
     _hype_px = float(prices.get("HYPE") or 0.0)
-    liq_price = (
-        debt / (hype_qty * PM_HYPE_LTV)
-        if (debt > 0 and hype_qty > 0 and PM_HYPE_LTV > 0)
-        else 0.0
+
+    # R-PM-LIQ: the REAL liquidation price uses the MAINTENANCE threshold
+    # (0.5 + 0.5×ltv), not the borrow LTV. aave_HF drives the risk band.
+    metrics = compute_pm_risk_metrics(
+        breakdown,
+        debt,
+        hype_qty,
+        _hype_px,
+        ltv_map=ltv_map,
+        perp_cross_mm=perp_cross_mm,
+        min_borrow_offset=min_borrow_offset,
     )
+    liq_price = metrics["liq_price"]
+    aave_hf = metrics["aave_hf"]
+    current_ltv = metrics["current_ltv"]
+    price_buffer_pct = metrics["price_buffer_pct"]
+    max_ltv = metrics["max_ltv"]
+    liq_threshold = metrics["liq_threshold"]
+    risk_emoji, risk_label = risk_tier(aave_hf, has_debt=(debt > 1.0))
 
     return PMState(
         collateral_usd=collateral,
@@ -243,6 +392,14 @@ def compute_pm_state(
         committed_orders_count=committed_n,
         health_factor=health_factor,
         liq_price=liq_price,
+        max_ltv=max_ltv,
+        liq_threshold=liq_threshold,
+        aave_hf=aave_hf,
+        current_ltv=current_ltv,
+        price_buffer_pct=price_buffer_pct,
+        risk_emoji=risk_emoji,
+        risk_label=risk_label,
+        perp_cross_mm=float(perp_cross_mm or 0.0),
     )
 
 
@@ -282,7 +439,11 @@ def format_pm_state_telegram(pm: PMState) -> str:
     if pm is None or not pm.has_data or pm.collateral_usd <= 0:
         return ""
     emoji, band_label = _display_band(pm.ratio)
-    lines = ["⚖️ PORTFOLIO MARGIN (cuenta primaria — HYPE como colateral cross)"]
+    head_emoji = pm.risk_emoji if pm.debt_usd > 1.0 else "🟢"
+    head_label = f" {head_emoji} {pm.risk_label}" if pm.debt_usd > 1.0 else ""
+    lines = [
+        f"⚖️ PORTFOLIO MARGIN{head_label} (cuenta primaria — HYPE como colateral cross)"
+    ]
     hype_line = f"├─ Colateral: {_fmt_usd(pm.collateral_usd)}"
     if pm.hype_qty > 0 and pm.hype_px > 0:
         hype_line += f"  ({pm.hype_qty:,.1f} HYPE × ${pm.hype_px:,.2f})"
@@ -305,18 +466,32 @@ def format_pm_state_telegram(pm: PMState) -> str:
         f"(WARN {PM_WARN_RATIO*100:.0f}% · STRESS {PM_STRESS_RATIO*100:.0f}% · "
         f"CRÍTICO {PM_CRITICAL_RATIO*100:.0f}% · LIQ {PM_LIQ_RATIO*100:.0f}%)"
     )
-    # R-WALLET-FIX (2026-06-06): surface the real health factor + liq price so
-    # the borrow risk is legible (HF < 1 = over LTV cap). Only when debt > 0.
-    if pm.debt_usd > 1.0 and pm.health_factor > 0:
-        hf_flag = " 🔴 <1.0 (sobre el límite LTV)" if pm.health_factor < 1.0 else ""
+    # R-PM-LIQ: the RISK metric is the aave-style Health factor (uses the
+    # MAINTENANCE liq threshold 0.5+0.5×ltv), NOT the borrow utilisation. Surface
+    # both framings unambiguously, plus the real liquidation price + buffer.
+    if pm.debt_usd > 1.0:
         lines.append(
-            f"├─ Health factor (cap/deuda, LTV {PM_HYPE_LTV:.2f}): "
-            f"{pm.health_factor:.2f}{hf_flag}"
+            f"├─ Health factor (aave, liq-threshold {pm.liq_threshold:.2f}): "
+            f"{pm.aave_hf:.2f} {pm.risk_emoji} {pm.risk_label}"
         )
-        if pm.liq_price > 0:
+        lines.append(
+            f"├─ Utilización borrow (Earn, app HF): {pm.health_factor:.4f} "
+            f"(LTV actual {pm.current_ltv*100:.1f}% · máx borrow {pm.max_ltv*100:.0f}% · "
+            f"maint {pm.liq_threshold*100:.0f}%)"
+        )
+        if pm.perp_cross_mm > 0:
             lines.append(
-                f"├─ Liq. price HYPE (col×LTV=deuda): ${pm.liq_price:,.2f}"
-                + (f"  (oracle ${pm.hype_px:,.2f})" if pm.hype_px > 0 else "")
+                f"├─ Perp cross maint-margin (en cuenta PM): {_fmt_usd(pm.perp_cross_mm)}"
+            )
+        if pm.liq_price > 0:
+            buf = (
+                f" · buffer {pm.price_buffer_pct:.1f}%"
+                if pm.price_buffer_pct > 0 else ""
+            )
+            lines.append(
+                f"├─ Liq. price HYPE (maint-LTV {pm.liq_threshold:.2f}): "
+                f"${pm.liq_price:,.2f}"
+                + (f"  (oracle ${pm.hype_px:,.2f}{buf})" if pm.hype_px > 0 else "")
             )
     if pm.shorts_notional > 0:
         lines.append(

@@ -2129,10 +2129,21 @@ async def _pm_monitor_job(application: Application) -> None:
                     break
         if primary is None:
             return
+        try:
+            from modules.hl_borrow_lend import get_collateral_ltv_map
+            _ltv = get_collateral_ltv_map()
+        except Exception:  # noqa: BLE001
+            _ltv = {}
+        try:
+            _cmm = float(primary.get("cross_maintenance_margin_used") or 0.0)
+        except (TypeError, ValueError):
+            _cmm = 0.0
         pm = compute_pm_state(
             primary.get("spot_balances") or [],
             primary.get("positions") or [],
             prices,
+            ltv_map=_ltv,
+            perp_cross_mm=_cmm,
         )
         # R-PMALERT: edge-trigger via SQLite. evaluate() persists the new state
         # (so a retreat resets silently) and returns the rendered alert.
@@ -2293,10 +2304,21 @@ async def cmd_pm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 reply_markup=MAIN_KEYBOARD,
             )
             return
+        try:
+            from modules.hl_borrow_lend import get_collateral_ltv_map
+            _ltv = get_collateral_ltv_map()
+        except Exception:  # noqa: BLE001
+            _ltv = {}
+        try:
+            _cmm = float(primary.get("cross_maintenance_margin_used") or 0.0)
+        except (TypeError, ValueError):
+            _cmm = 0.0
         pm = compute_pm_state(
             primary.get("spot_balances") or [],
             primary.get("positions") or [],
             prices,
+            ltv_map=_ltv,
+            perp_cross_mm=_cmm,
         )
         block = format_pm_state_telegram(pm) or "⚠️ Sin datos de Portfolio Margin."
         await send_long_message(update, block, reply_markup=MAIN_KEYBOARD)
