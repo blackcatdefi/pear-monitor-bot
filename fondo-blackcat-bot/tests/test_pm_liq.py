@@ -172,8 +172,12 @@ def test_block_renders_real_liq_and_aave_hf():
     assert "$60.45" not in block                            # the OLD wrong price
     # Naked-long is a SEPARATE hedge-missing note, NOT conflated with liq risk.
     assert "naked leveraged long" in block.lower()
-    # R-PMALERT display scale untouched (regression guard).
-    assert "CRÍTICO 85%" in block and "LIQ 95%" in block and "LIQ-RISK" in block
+    # R-PM-RATIO-RELABEL (2026-06-07): the utilization line no longer carries
+    # the WARN/STRESS/CRÍTICO/LIQ scale and NEVER reads "LIQ-RISK" — the borrow
+    # ratio is utilization of the max-borrow cap, not a liquidation signal.
+    assert "Borrow utilization (vs 50% max-borrow)" in block
+    assert "LIQ-RISK" not in block
+    assert "CRÍTICO 85%" not in block and "LIQ 95%" not in block
 
 
 def test_second_oracle_case_hf_app_096():

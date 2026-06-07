@@ -438,9 +438,14 @@ def format_pm_state_telegram(pm: PMState) -> str:
     """Telegram block for the Portfolio Margin state. NEVER raises."""
     if pm is None or not pm.has_data or pm.collateral_usd <= 0:
         return ""
-    emoji, band_label = _display_band(pm.ratio)
-    head_emoji = pm.risk_emoji if pm.debt_usd > 1.0 else "🟢"
-    head_label = f" {head_emoji} {pm.risk_label}" if pm.debt_usd > 1.0 else ""
+    # R-PM-RATIO-RELABEL: the HEADLINE is the aave-HF (distance-to-liquidation),
+    # coloured GREEN≥1.30 / YELLOW 1.10-1.30 / RED<1.10 — NOT the borrow ratio.
+    from modules.pm_panel import (
+        headline_color, borrow_utilization_status, explainer_line,
+    )
+    has_debt = pm.debt_usd > 1.0
+    head_emoji = headline_color(pm.aave_hf, has_debt=has_debt)
+    head_label = f" {head_emoji} {pm.risk_label}" if has_debt else ""
     lines = [
         f"⚖️ PORTFOLIO MARGIN{head_label} (cuenta primaria — HYPE como colateral cross)"
     ]
@@ -461,10 +466,15 @@ def format_pm_state_telegram(pm: PMState) -> str:
             f"├─ Capital comprometido en órdenes resting: "
             f"{_fmt_usd(pm.committed_orders_usd)} ({pm.committed_orders_count} órdenes)"
         )
+    # R-PM-RATIO-RELABEL: the borrow ratio is UTILIZATION of the max-borrow cap,
+    # NOT a liquidation signal. Rename it, drop the WARN/STRESS/CRÍTICO/LIQ
+    # scale, and use non-liquidation status labels (never red, never LIQ-RISK).
+    max_borrow_pct = (pm.max_ltv or PM_HYPE_LTV) * 100.0
+    util_pct = pm.ratio * 100.0
+    util_label, _util_red = borrow_utilization_status(util_pct)
     lines.append(
-        f"├─ Margin ratio: {pm.ratio * 100:.1f}%  {emoji} {band_label}  "
-        f"(WARN {PM_WARN_RATIO*100:.0f}% · STRESS {PM_STRESS_RATIO*100:.0f}% · "
-        f"CRÍTICO {PM_CRITICAL_RATIO*100:.0f}% · LIQ {PM_LIQ_RATIO*100:.0f}%)"
+        f"├─ Borrow utilization (vs {max_borrow_pct:.0f}% max-borrow): "
+        f"{util_pct:.1f}%  — {util_label}"
     )
     # R-PM-LIQ: the RISK metric is the aave-style Health factor (uses the
     # MAINTENANCE liq threshold 0.5+0.5×ltv), NOT the borrow utilisation. Surface
@@ -493,6 +503,9 @@ def format_pm_state_telegram(pm: PMState) -> str:
                 f"${pm.liq_price:,.2f}"
                 + (f"  (oracle ${pm.hype_px:,.2f}{buf})" if pm.hype_px > 0 else "")
             )
+        # Clarify that over-max-borrow only blocks NEW draws — liquidation is the
+        # maintenance-LTV price, not the 100%-utilization point.
+        lines.append(explainer_line(pm.liq_price))
     if pm.shorts_notional > 0:
         lines.append(
             f"└─ Hedge (shorts basket): {_fmt_usd(pm.shorts_notional)} notional "

@@ -193,15 +193,20 @@ def test_rpmcore_pmstate_status_unchanged():
     assert pma.classify_alert_level(pm.ratio) == pma.STRESS
 
 
-def test_display_block_shows_4_level_label_and_scale():
+def test_display_block_shows_borrow_utilization_not_liq_risk():
     from modules.portfolio_margin import compute_pm_state, format_pm_state_telegram
-    # ratio 0.90 → display band LIQ-RISK 🔴 even though _classify says STRESS.
+    # R-PM-RATIO-RELABEL (2026-06-07): ratio 0.90 is borrow UTILIZATION (90% of
+    # the max-borrow cap), NOT a liquidation signal. The panel must show the
+    # renamed utilization line with a non-liquidation status and must NEVER
+    # carry "LIQ-RISK" nor the WARN/STRESS/CRÍTICO/LIQ scale on that line.
     bal = [{"coin": "HYPE", "total": 1000.0}, {"coin": "USDC", "total": -45_000}]
     pm = compute_pm_state(bal, [], {"HYPE": 100.0})
     block = format_pm_state_telegram(pm)
-    assert "LIQ-RISK" in block and "🔴" in block
-    assert "CRÍTICO 85%" in block        # the new tier is in the scale text
-    assert "LIQ 95%" in block            # liquidation tier still shown
+    assert "Borrow utilization (vs 50% max-borrow)" in block
+    assert "NEAR MAX-BORROW" in block    # 90% of the cap → near, not liquidating
+    assert "LIQ-RISK" not in block
+    assert "CRÍTICO 85%" not in block
+    assert "LIQ 95%" not in block
 
 
 def test_display_naked_long_line_preserved():

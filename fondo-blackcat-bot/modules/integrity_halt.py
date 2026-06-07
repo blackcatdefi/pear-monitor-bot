@@ -573,6 +573,17 @@ def run_integrity_halt(
         # (e.g. a false BTC STOP off a Zcash rumor) is gone from the rendered
         # block the moment the corrected resolver re-reads the same excerpt.
         reconcile_misattributed(scan, get_active_flags())
+        # R-INTEGRITY-RECONCILE-FIX (2026-06-07): a feed-window-INDEPENDENT pass
+        # that re-reads each persisted flag's OWN stored excerpt and dismisses it
+        # when the corrected resolver no longer attributes it to a held asset.
+        # This clears orphaned flags (e.g. the false BTC STOP off the Zcash
+        # "unlimited mint" rumor) even after the originating excerpt has rotated
+        # out of the live feed — the exact 2026-06-07 production failure.
+        try:
+            from modules.integrity_reconcile import reconcile_persisted_flags
+            reconcile_persisted_flags(positions, plan_assets=plan_assets)
+        except Exception as _exc:  # noqa: BLE001 — never break /reporte
+            log.warning("reconcile_persisted_flags wiring failed: %s", _exc)
         block = build_integrity_block(get_active_flags())
         notes_block = build_notes_block(scan.notes)
         if notes_block:
