@@ -1714,8 +1714,23 @@ def compile_raw_data(
     except Exception:  # noqa: BLE001
         classification_block = ""
 
+    # R-FULLANALYSIS-PM-TRUTH (2026-06-08): single source of truth for the PM
+    # math. Inject the PRE-COMPUTED PMState (same compute_pm_state the DESTACADO
+    # panel uses) so the FULL ANALYSIS narrative reports the correct aave-HF /
+    # liq price / borrow utilization VERBATIM instead of re-deriving them with
+    # the old capacity/debt (=utilisation inverted) and debt/(qty×0.50) formulas.
+    # Injected ABOVE the raw JSON so the model sees the authoritative numbers
+    # before any raw collateral/debt fields it could otherwise mis-combine.
+    pm_block = ""
+    try:
+        from modules.pm_context import build_pm_llm_block_from_wallets
+        pm_block = build_pm_llm_block_from_wallets(portfolio, market)
+    except Exception:  # noqa: BLE001
+        pm_block = ""
+
     return (
         (classification_block + "\n" if classification_block else "")
+        + (pm_block + "\n\n" if pm_block else "")
         + "RAW DATA (timestamp UTC " + now + "):\n\n"
         "```json\n" + pretty + "\n```\n\n"
         "Generate the report following the system prompt format. "

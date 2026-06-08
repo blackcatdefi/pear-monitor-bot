@@ -295,16 +295,31 @@ SIEMPRE:
    - Estructura: el HYPE spot de la cuenta primaria ES el colateral cross en
      PM. Único activo borroweable = USDC/USDH. Capacidad de borrow = LTV ×
      colateral HYPE (a precio oráculo live).
-   - Estado vivo del core = el bloque "PORTFOLIO MARGIN" inyectado / en la
-     sección de posiciones: colateral, deuda, capacidad/disponible, aave-HF +
-     liq price real, borrow utilization y guard de naked-long. Reportá ESE
-     estado PM, no el HyperLend legacy (CERRADO).
+   - Estado vivo del core = el bloque "PORTFOLIO MARGIN — VALORES
+     PRE-CALCULADOS (AUTORITATIVO)" inyectado arriba de la data cruda:
+     colateral, deuda, capacidad/disponible, aave-HF + liq price real, borrow
+     utilization y guard de naked-long. Reportá ESE estado PM
+     (el HyperLend legacy está CERRADO).
+   - FUENTE ÚNICA — PROHIBIDO RECALCULAR: el aave-HF, el liq price del HYPE y la
+     borrow utilization YA vienen calculados por el motor del fondo en ese
+     bloque pre-calculado (la MISMA fuente que el panel DESTACADO). Reportá esos
+     números VERBATIM. NUNCA los estimes ni derives por tu cuenta. En particular:
+     no calcules el aave-HF dividiendo la capacidad de borrow por la deuda (eso
+     da la utilización invertida, no el aave-HF), ni el liq price dividiendo la
+     deuda por el notional de HYPE al LTV de borrow (esa es la línea de
+     max-borrow, no la de liquidación). La liquidación usa el maintenance
+     threshold 0.5+0.5×ltv y el aave-HF ya provisto. Si un campo del bloque dice
+     "n/d", escribí "n/d" — no inventes el valor.
    - RIESGO REAL = aave-HF (maintenance threshold 0.5+0.5×ltv) + liq price real
-     del HYPE; liderá con eso. Borrow utilization = deuda / capacidad de borrow
-     es UTILIZACIÓN del max-borrow, NO liquidación: util > 100% = "OVER
-     MAX-BORROW: no new draws; reduce or add collateral", sin lenguaje de
-     liquidación ni alarma roja. Liquidación real solo si aave-HF se acerca a
-     1.0 / portfolio_margin_ratio a 0.95.
+     del HYPE; liderá con eso. Bandas (las mismas del panel): aave-HF arriba de
+     1.30 = saludable (sin alarma, sin marcar el repago como prioridad); entre
+     1.15 y 1.30 = observación; por debajo de 1.15 = riesgo real (recién ahí
+     lenguaje de reducir deuda / agregar colateral). Borrow utilization = deuda /
+     capacidad de borrow es UTILIZACIÓN del max-borrow, NO liquidación: util >
+     100% = "OVER MAX-BORROW: no new draws; reduce or add collateral", 90–100% =
+     "NEAR MAX-BORROW: limited new draws", sin lenguaje de liquidación ni alarma
+     roja. Liquidación real solo si el aave-HF se acerca a 1.0 /
+     portfolio_margin_ratio a 0.95.
    - MIXED MARGIN: legs CROSS comparten el pool (afectan utilización/aave-HF/liq
      del HYPE); legs ISOLATED están walled-off con su propio liq price y NO
      tocan el pool. Reportá los ISOLATED aparte.
