@@ -77,7 +77,7 @@ async def user_fills(wallet: str) -> list[dict[str, Any]]:
     return await _info({"type": "userFills", "user": wallet})
 
 
-async def frontend_open_orders(wallet: str) -> list[dict[str, Any]]:
+async def frontend_open_orders(wallet: str, dex: str | None = None) -> list[dict[str, Any]]:
     """Open orders for a wallet (HL ``frontendOpenOrders`` — SAME info endpoint).
 
     R-REPORTE-LIVE (2026-06-03): this is NOT a new data source — it is one
@@ -86,12 +86,46 @@ async def frontend_open_orders(wallet: str) -> list[dict[str, Any]]:
     SL/TP triggers and laddered DCA limit orders. NEVER raises: returns an
     empty list on any failure so a missing/blocked order read can never break
     /reporte (the classifier degrades to attribute-only when orders are empty).
+
+    R-SLTP-NATIVE-DETECT (2026-06-09): ``dex`` param added. CONFIRMED LIVE:
+    frontendOpenOrders WITHOUT ``dex`` returns ONLY main-dex orders (BTC/SOL),
+    NOT the HIP-3 builder-dex ones — the native SL/TP triggers on the xyz:
+    basket legs (xyz:HOOD etc) only surface with ``{"dex": "xyz"}``. That
+    silent omission was the root cause of the false "SIN SL / ACCIÓN URGENTE"
+    on every xyz: leg in the 2026-06-09 /reporte.
     """
     try:
-        res = await _info({"type": "frontendOpenOrders", "user": wallet})
+        payload: dict[str, Any] = {"type": "frontendOpenOrders", "user": wallet}
+        if dex:
+            payload["dex"] = dex
+        res = await _info(payload)
         return res if isinstance(res, list) else []
     except Exception as exc:  # noqa: BLE001
-        log.warning("frontend_open_orders for %s failed: %s", wallet, exc)
+        log.warning("frontend_open_orders for %s (dex=%s) failed: %s", wallet, dex, exc)
+        return []
+
+
+async def fetch_all_open_orders(wallet: str) -> list[dict[str, Any]]:
+    """Open orders across MAIN + every HIP-3 builder dex, merged (R-SLTP-NATIVE-DETECT).
+
+    Queries ``frontendOpenOrders`` once per dex (main = no dex param) — same
+    info endpoint, concurrent, NEVER raises. Without this, any SL/TP or DCA
+    ladder living on a builder dex (xyz:, abcd:, …) is invisible to the
+    position classifier.
+    """
+    try:
+        dex_keys: list[str | None] = [None] + list(HIP3_DEXES)
+        results = await asyncio.gather(
+            *[frontend_open_orders(wallet, dex=d) for d in dex_keys],
+            return_exceptions=True,
+        )
+        merged: list[dict[str, Any]] = []
+        for r in results:
+            if isinstance(r, list):
+                merged.extend(r)
+        return merged
+    except Exception as exc:  # noqa: BLE001
+        log.warning("fetch_all_open_orders for %s failed: %s", wallet, exc)
         return []
 
 
@@ -433,7 +467,11 @@ async def fetch_wallet(wallet: str, label: str) -> dict[str, Any]:
             dex_tasks = [_fetch_dex(wallet, d) for d in dex_keys]
             spot_task = _fetch_spot(wallet)
             orders_enabled = os.getenv("OPEN_ORDERS_FETCH_ENABLED", "true").lower() == "true"
-            orders_task = frontend_open_orders(wallet) if orders_enabled else _empty_orders()
+            # R-SLTP-NATIVE-DETECT (2026-06-09): fetch orders across MAIN +
+            # every HIP-3 dex — frontendOpenOrders without ``dex`` omits the
+            # builder-dex SL/TP triggers (xyz: legs), which caused the false
+            # "SIN SL" classification on the whole basket.
+            orders_task = fetch_all_open_orders(wallet) if orders_enabled else _empty_orders()
             all_results = await asyncio.gather(*dex_tasks, spot_task, orders_task)
             open_orders = all_results[-1] if isinstance(all_results[-1], list) else []
             spot_balances = all_results[-2]  # second-to-last result is spot

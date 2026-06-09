@@ -89,6 +89,12 @@ class PositionTag:
     # BCD — never an auto-action.
     manual_review: bool = False
     manual_review_reasons: list[str] = field(default_factory=list)
+    # R-SLTP-NATIVE-DETECT (2026-06-09): per-leg native SL/TP detail. has_sl_tp
+    # stays as the legacy union (has_sl OR has_tp) so cycle gating is unchanged.
+    has_sl: bool = False
+    has_tp: bool = False
+    sl_px: float | None = None
+    tp_px: float | None = None
 
 
 def _to_float(v: Any) -> float | None:
@@ -101,8 +107,75 @@ def _to_float(v: Any) -> float | None:
 
 
 def _orders_for_coin(open_orders: list[dict[str, Any]], coin: str) -> list[dict[str, Any]]:
-    c = (coin or "").upper()
-    return [o for o in (open_orders or []) if (o.get("coin") or "").upper() == c]
+    """Orders matching ``coin`` by CANONICAL asset identity (R-SLTP-NATIVE-DETECT).
+
+    Position "xyz:HOOD" must match orders surfaced as "xyz:HOOD", "HOOD" or
+    any other dex-qualified form — exact string equality silently failed for
+    every HIP-3 leg (the 2026-06-09 false "SIN SL" bug). Single helper
+    ``asset_norm.normalize_asset`` on BOTH sides; never per-ticker hardcoded.
+    """
+    from modules.asset_norm import same_asset
+    return [o for o in (open_orders or []) if same_asset(o.get("coin"), coin)]
+
+
+def _sl_tp_for_position(
+    coin_orders: list[dict[str, Any]],
+    is_long: bool,
+    mark_px: float | None,
+) -> tuple[bool, bool, float | None, float | None]:
+    """Detect native SL / TP among a position's own orders (R-SLTP-NATIVE-DETECT).
+
+    A protective STOP-LOSS = an open reduceOnly TRIGGER order of stop type
+    (orderType contains "stop" or tpsl=="sl") in the protective direction:
+    for a SHORT a BUY stop with triggerPx ABOVE mark; for a LONG a SELL stop
+    BELOW mark. When mark/trigger price is unavailable the direction check
+    degrades gracefully (side-only) — a missing mark never erases a real
+    stop. A TAKE-PROFIT = a reduceOnly trigger of take-profit type
+    (orderType contains "take profit" or tpsl=="tp").
+
+    Returns (has_sl, has_tp, sl_px, tp_px). NEVER raises.
+    """
+    has_sl = False
+    has_tp = False
+    sl_px: float | None = None
+    tp_px: float | None = None
+    for o in coin_orders:
+        try:
+            if not (o.get("reduce_only") and (o.get("is_trigger") or o.get("is_sl_tp"))):
+                continue
+            otype = (o.get("order_type") or "").lower()
+            tpsl = (o.get("tpsl") or "").lower()
+            trig = _to_float(o.get("trigger_px"))
+            oside = (o.get("side") or "").upper()
+            is_stop = ("stop" in otype) or (tpsl == "sl")
+            is_take = ("take profit" in otype) or (tpsl == "tp")
+            if is_stop:
+                # Protective direction: SHORT → BUY stop above mark;
+                # LONG → SELL stop below mark. Side mismatch = not protective.
+                side_ok = (oside == "SELL") if is_long else (oside == "BUY")
+                px_ok = True
+                if trig is not None and trig > 0 and mark_px and mark_px > 0:
+                    px_ok = (trig < mark_px) if is_long else (trig > mark_px)
+                if side_ok and px_ok:
+                    has_sl = True
+                    if trig is not None and trig > 0:
+                        sl_px = trig
+            elif is_take:
+                has_tp = True
+                if trig is not None and trig > 0:
+                    tp_px = trig
+        except Exception:  # noqa: BLE001
+            continue
+    return has_sl, has_tp, sl_px, tp_px
+
+
+def _sl_tp_label(has_sl: bool, has_tp: bool) -> str:
+    """Spanish SL/TP label: both → "SL/TP=sí"; one → which leg; none → "SL/TP=no"."""
+    if has_sl and has_tp:
+        return "SL/TP=sí"
+    if has_sl or has_tp:
+        return f"SL={'sí' if has_sl else 'no'} TP={'sí' if has_tp else 'no'}"
+    return "SL/TP=no"
 
 
 def classify_position(
@@ -131,7 +204,11 @@ def classify_position(
     notional = abs(_to_float(position.get("notional_usd") or position.get("positionValue")) or 0.0)
 
     coin_orders = _orders_for_coin(open_orders or [], coin)
-    has_sl_tp = any(o.get("is_sl_tp") for o in coin_orders)
+    # R-SLTP-NATIVE-DETECT (2026-06-09): native SL/TP detail (protective
+    # direction aware). has_sl_tp keeps the legacy union semantics so the
+    # cycle-accumulation gate (isolated + NO sl/tp + ladder) is unchanged.
+    has_sl, has_tp, sl_px, tp_px = _sl_tp_for_position(coin_orders, is_long, mark_px)
+    has_sl_tp = has_sl or has_tp or any(o.get("is_sl_tp") for o in coin_orders)
 
     # Resting (non-trigger, non-reduce-only) limit orders on the accumulation
     # side: below price for a LONG (BUY), above price for a SHORT (SELL).
@@ -243,6 +320,17 @@ def classify_position(
                 "❔ Órdenes no visibles este run — NO sugerir cierre a ciegas; "
                 "podría ser ACUMULACIÓN CICLO sin confirmar"
             )
+        # R-SLTP-NATIVE-DETECT: GENUINE no-stop warning — emitted ONLY when a
+        # TACTICAL leg verifiably lacks a protective stop with orders visible.
+        # NEVER for a leg with a detected native stop (the 2026-06-09 false
+        # "SIN SL / ACCIÓN URGENTE" on the whole xyz: basket), NEVER for a
+        # CYCLE leg (no-SL is its design) and NEVER when orders are not
+        # visible (can't prove absence).
+        if not has_sl and orders_available and bucket == TACTICAL:
+            flags.append(
+                "⚠️ SIN SL — sin stop-loss protectivo detectado "
+                f"(TP={'sí' if has_tp else 'no'})"
+            )
 
     return PositionTag(
         coin=coin,
@@ -266,6 +354,10 @@ def classify_position(
         mark_px=mark_px,
         manual_review=bool(manual_review_reasons),
         manual_review_reasons=manual_review_reasons,
+        has_sl=has_sl,
+        has_tp=has_tp,
+        sl_px=sl_px,
+        tp_px=tp_px,
     )
 
 
@@ -387,13 +479,30 @@ def build_classification_block(tags: list[PositionTag]) -> str:
         icon = "🟢" if t.bucket == CYCLE else "⚙️"
         head = f"{icon} {t.side} {t.coin} — {t.tag_es}"
         lines.append(head)
+        # R-SLTP-NATIVE-DETECT: show the per-leg SL/TP detail (both → sí;
+        # only one → which) with trigger prices when available, so the LLM
+        # consumes the DETECTED protection verbatim and can never invent a
+        # "SIN SL / ACCIÓN URGENTE" on a leg that carries a native stop.
+        if t.has_sl_tp and not (t.has_sl or t.has_tp):
+            # Legacy union fired (is_sl_tp order of unparsable type) — still
+            # protected, never claim "no".
+            sl_tp_label = "SL/TP=sí"
+        else:
+            sl_tp_label = _sl_tp_label(t.has_sl, t.has_tp)
         detail = (
-            f"   margin={t.margin_mode} · SL/TP={'sí' if t.has_sl_tp else 'no'} "
+            f"   margin={t.margin_mode} · {sl_tp_label} "
             f"· ladder={t.ladder_count}"
         )
         if t.notional_usd:
             detail += f" · notional=${t.notional_usd:,.0f}"
         lines.append(detail)
+        px_bits = []
+        if t.has_sl and t.sl_px:
+            px_bits.append(f"SL @ ${t.sl_px:,.4g}")
+        if t.has_tp and t.tp_px:
+            px_bits.append(f"TP @ ${t.tp_px:,.4g}")
+        if px_bits:
+            lines.append("   stops nativos HL: " + " · ".join(px_bits))
         # Liq distance + ladder detail surface for ANY laddered isolated
         # position (CYCLE *and* TÁCTICA like BTC/SOL), so the ride-or-liq
         # structural floor is always visible when a ladder exists (P1.5).

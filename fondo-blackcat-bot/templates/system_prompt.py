@@ -385,6 +385,14 @@ CLASIFICACIÓN DE POSICIONES — REGLA DURA (FIX 2):
   fondeada más baja. La acción por defecto es MANTENER/AGREGAR en piso, no SALIR.
 - Posiciones tageadas "TÁCTICA": aplica la lógica normal de cierre por ruptura
   de tesis (SL/TP, basket activa).
+- SL/TP NATIVO — CONSUMO VERBATIM (R-SLTP-NATIVE-DETECT): los flags SL/TP de
+  cada pierna en el bloque CLASIFICACIÓN salen de los trigger orders NATIVOS
+  de HyperLiquid leídos en vivo (todos los dexes, incl. builder-deployed
+  xyz:). Consumilos VERBATIM. PROHIBIDO afirmar "SIN SL", "sin stop",
+  "posición más vulnerable" o escalar "ACCIÓN URGENTE por falta de stop"
+  sobre una pierna cuya línea de clasificación diga SL=sí o SL/TP=sí. Solo
+  una pierna explícitamente marcada "⚠️ SIN SL" en el bloque puede recibir
+  esa advertencia — y aun ahí, citá el flag, no lo re-derives.
 
 FRESHNESS + CONSISTENCIA (FIX 1 / FIX 3):
 - Cualquier dato marcado STALE / "_freshness" / cache fallback / >6h NO es

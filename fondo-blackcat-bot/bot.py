@@ -530,6 +530,20 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception:  # noqa: BLE001
         log.exception("integrity-halt block failed (non-fatal)")
 
+    # ─── Section 2a-quater: Embedded screener (R-REPORTE-SCREENER-EMBED) ─────
+    # Compact TOP-15 SHORT + TOP-15 LONG over the FULL HL+VAR universe — the
+    # SAME R-SCREEN 5-gate engine /unlockcheck uses (modules.screener_core
+    # calls universal_screener.compute_screen, pure read), surfacing ONLY the
+    # 30 names (no RESTO, no DATA-INSUF — full detail stays in /unlockcheck).
+    # LONG block carries the tactical/AiPear/not-mandate disclaimer. Non-fatal.
+    try:
+        from modules.screener_core import build_embedded_screener_block
+        _scr_block = await build_embedded_screener_block()
+        if _scr_block:
+            await send_long_message(update, _scr_block, reply_markup=MAIN_KEYBOARD)
+    except Exception:  # noqa: BLE001
+        log.exception("embedded screener block failed (non-fatal)")
+
     # ─── Section 2b: TraderMap BTC (R-BOT-FEEDS-EXPAND Task 1) ────────────────
     # Surface the BTC chart snapshot (price + indicators when env vars set)
     # next to positions so BCD sees price-action context in /reporte without
