@@ -126,10 +126,16 @@ def long_top(res: ScreenResult, n: int = EMBED_TOP_N) -> list[ScreenRow]:
     are never padded in. Deterministic (score desc, ticker asc tiebreak)."""
     cands = [
         r for r in res.ranked
-        # z-oversold is a HARD requirement (the mirror of the short z gate):
-        # without it, "not capitulating + data" alone would let overbought
-        # names leak into the LONG top — that is noise, never longable.
-        if r.data_ok and r.long.z_oversold and not r.long.capitulating
+        # HARD requirements (the symmetric criteria the engine's long read
+        # already uses — never invented here): z-oversold, Hurst mean-revert,
+        # NO capitulation (falling knife) and squeeze CLEAR (a name in an
+        # up-squeeze blow-off is momentum, not a mean-revert long). Without
+        # these, overbought / trending / squeezing names would leak into the
+        # LONG top — noise, never longable. funding≤0 stays a soft component
+        # (score/ count), exactly as in the engine's long_read.
+        if r.data_ok and r.long.z_oversold and r.long.mean_reverting
+        and not r.long.capitulating
+        and not (r.gate is not None and r.gate.squeeze_flag)
         and long_component_count(r) >= MIN_SIGNAL_COUNT
     ]
     cands.sort(key=lambda r: (-long_score(r), r.ticker))

@@ -175,6 +175,22 @@ def test_b4_long_ranking_symmetric_order():
     assert "KNIFE" not in tickers                # falling knife excluded
     assert "HOT" not in tickers                  # overbought is not longable
     assert all(long_component_count(r) >= 3 for r in tops)
+    assert all(r.long.mean_reverting for r in tops)  # Hurst mean-revert is HARD
+
+
+def test_b4_long_top_excludes_squeeze_and_trending():
+    """Symmetric criteria are HARD: an oversold name that is in an up-squeeze
+    or Hurst-trending (not mean-reverting) never enters the LONG top — caught
+    leaking in the 2026-06-09 live smoke before this guard."""
+    import dataclasses as dc
+    deep = _long_row("DEEP", z=-2.5)
+    sq = _long_row("SQLONG", z=-2.0)
+    sq = dc.replace(sq, gate=dc.replace(sq.gate, squeeze_flag=True, squeeze_reasons=["RSI70+HH"]))
+    trend = _long_row("TREND", z=-2.2)
+    trend = dc.replace(trend, long=dc.replace(trend.long, mean_reverting=False))
+    res = _result([deep, sq, trend])
+    tickers = [r.ticker for r in long_top(res)]
+    assert tickers == ["DEEP"]
 
 
 # ─── B5: mandate disclaimer present in the LONG block ────────────────────────
