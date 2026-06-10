@@ -112,6 +112,7 @@ COMMANDS: List[BotCommand] = [
     BotCommand("silent", "Toggle silent mode (on/off/status) — R-SILENT denoise", "admin", "cmd_silent"),
     BotCommand("pat_status", "GitHub PAT expiry — días restantes + verdict (R-PAT-RENEW)", "admin", "cmd_pat_status"),
 
+    BotCommand("setcatalyst", "Catalysts engine: add/del/list (FRED+FOMC+manual) — WI-1", "trading", "cmd_setcatalyst"),
     BotCommand("lmec_status", "LMEC bear-invalidation telemetry (R-BOT-LMEC-AUTOFEED)", "trading", "cmd_lmec_status"),
     BotCommand("setlmec", "Set manual LMEC inputs: MACD/RSI/MA50w semanal (P1.9)", "trading", "cmd_setlmec"),
 

@@ -23,16 +23,28 @@ BASE = "https://api.bcra.gob.ar/estadisticas/v4.0"  # v3.0 deprecated 2026-02-28
 HTTP_TIMEOUT = 12.0
 
 # Canonical variable IDs per BCRA catalog. Subject to change — module degrades gracefully.
+# R-BOT-DEFINITIVE WI-9a (2026-06-10): the v4.0 catalog was re-verified LIVE:
+#   * id 5 is "Tipo de cambio mayorista de referencia" (A3500, ~$1,446/USD) —
+#     the old mapping labelled it "Tasa Política Monetaria" → the bogus
+#     "Tasa Politica Monetaria 1,446%" line.
+#   * The policy-rate series (160/161) is DISCONTINUED (last datum 2025-07-10);
+#     the active reference rate is TAMAR (id 44, bancos privados).
+#   * id 4 is "Tipo de cambio minorista (promedio vendedor)".
 TRACKED = {
     1: "Reservas Intl. (USD M)",
     15: "Base Monetaria ($M)",
     27: "Inflación mensual (%)",
     28: "Inflación interanual (%)",
-    # 34 (TAMAR) returns 400 in v4.0 — variable likely renumbered; pruned 2026-05-08
     7: "BADLAR Bancos Privados (%)",
-    5: "Tasa Política Monetaria (%)",
-    4: "TC mayorista A3500 ($/USD)",
+    44: "Tasa TAMAR Bancos Privados (%, ref. política)",
+    5: "TC mayorista A3500 ($/USD)",
+    4: "TC minorista ($/USD)",
 }
+
+# Interest-rate series: sanity bounds 0-200% — anything outside renders n/d
+# and is logged (a mis-mapped FX series can never print as a rate again).
+RATE_IDS = frozenset({7, 44})
+RATE_BOUNDS = (0.0, 200.0)
 
 
 async def _get(url: str) -> Any:
@@ -123,8 +135,8 @@ def format_for_telegram(data: dict[str, Any]) -> str:
     if not vars_:
         return "\n".join(lines + ["  ⚠️ sin datos"])
 
-    # Group: tasa de política first, BM/Reservas, then inflación
-    priority = [5, 1, 15, 4, 27, 28, 34, 7]
+    # Group: tasa de referencia (TAMAR) first, BM/Reservas, FX, then inflación
+    priority = [44, 7, 1, 15, 5, 4, 27, 28]
     by_id = {v.get("id"): v for v in vars_ if isinstance(v, dict)}
     rendered = 0
     for pid in priority:
@@ -135,6 +147,16 @@ def format_for_telegram(data: dict[str, Any]) -> str:
         name = v.get("name", "?")
         fecha = v.get("fecha", "")
         if isinstance(val, (int, float)):
+            # WI-9a sanity bounds: a rate series outside 0-200% is a parsing /
+            # mapping error — print n/d and log, never a bogus 1,446% rate.
+            if pid in RATE_IDS and not (RATE_BOUNDS[0] <= val <= RATE_BOUNDS[1]):
+                log.warning(
+                    "bcra var %s (%s) out of rate bounds: %s — rendering n/d",
+                    pid, name, val,
+                )
+                lines.append(f"  • {name}: n/d (valor fuera de rango)")
+                rendered += 1
+                continue
             # Format M numbers (>1000) with commas; else %
             if abs(val) > 1000:
                 lines.append(f"  • {name}: {val:,.0f} ({fecha})")

@@ -220,22 +220,35 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
     # quedan como red de seguridad de fondo.
     wallets = await fetch_all_wallets()
 
-    # 6b. R-ONDEMAND (2026-05-09) — Margin stress watchdog.
-    # Edge-triggered alert on any wallet whose ratio
-    #   total_margin_used / account_value > MARGIN_STRESS_ALERT_PCT (default 90)
-    # Operative meaning: <10% buffer to forced liquidation on the perp side.
-    # Single fire per breach; clears when ratio drops below threshold.
+    # 6b. R-BOT-DEFINITIVE WI-3 (2026-06-10) — margin alerting redesigned.
+    # The legacy edge-triggered MARGIN STRESS watchdog (1 fire per breach but
+    # re-armed by state churn → 6 identical alerts/night, wrong "buffer to
+    # liquidation" copy) is replaced by modules.alerts_margin:
+    #   * "Perp margin used vs perp equity" — band transitions (<90/90-100/
+    #     100-110/>110) + >5pp worsening, 6h cooldown, SQLite persisted, copy
+    #     states >100% only blocks NEW positions (never liquidation language).
+    #   * REAL-risk channel — PM aave-HF crossings 1.30/1.20/1.10 + any single
+    #     position liq distance <12% / <8% (fed by compute_pm_state + live
+    #     position data only).
     try:
-        from modules.cron_state import (
-            margin_stress_enabled,
-            margin_stress_threshold_pct,
-        )
+        from modules.cron_state import margin_stress_enabled
         if margin_stress_enabled():
-            await _run_margin_stress_alerts(
-                bot, state, wallets, threshold_pct=margin_stress_threshold_pct(),
-            )
+            from modules.alerts_margin import run_margin_alerts
+            await run_margin_alerts(bot, wallets)
     except Exception:  # noqa: BLE001
-        log.exception("margin stress watchdog failed (non-fatal)")
+        log.exception("margin alerts (WI-3) failed (non-fatal)")
+
+    # 6b-bis. R-BOT-DEFINITIVE WI-5/WI-6 — SL reachability + trailing rule.
+    try:
+        from modules.sl_validator import run_sl_reachability_alerts
+        await run_sl_reachability_alerts(bot, wallets)
+    except Exception:  # noqa: BLE001
+        log.exception("SL reachability alerts failed (non-fatal)")
+    try:
+        from modules.trailing_monitor import run_trailing_alerts
+        await run_trailing_alerts(bot, wallets)
+    except Exception:  # noqa: BLE001
+        log.exception("trailing rule alerts failed (non-fatal)")
 
     # 7. BCD DCA zone watchdog (Round 13)
     # Para cada asset en BCD_DCA_PLAN chequear si el precio entra en un range
@@ -387,12 +400,17 @@ async def _run_margin_stress_alerts(
         ident = f"{label} ({short_addr})" if label else short_addr
         key = f"margin_stress_{wallet_addr[-8:]}" if wallet_addr else "margin_stress_unknown"
         if ratio >= threshold:
+            # R-BOT-DEFINITIVE WI-3: honest copy — this metric is perp margin
+            # used vs perp equity (utilization). Above 100% it only blocks NEW
+            # positions; it is NOT liquidation proximity. (Legacy path kept for
+            # compatibility; production routes via modules.alerts_margin.)
             msg = (
                 f"\U0001f6a8 MARGIN STRESS \u2014 {ident} \u2014 "
-                f"used/equity = {ratio*100:.1f}% (threshold {threshold_pct:.0f}%). "
+                f"Perp margin used vs perp equity = {ratio*100:.1f}% "
+                f"(threshold {threshold_pct:.0f}%). "
                 f"margin_used=${used:,.0f} \u00b7 account_value=${eq:,.0f}. "
-                f"Buffer to liquidation <{(1-ratio)*100:.1f}% \u2014 "
-                f"reduce size or add collateral."
+                "Por encima de 100% solo bloquea ABRIR posiciones nuevas \u2014 "
+                "NO es proximidad de liquidaci\u00f3n."
             )
             await _emit(bot, key, state, msg)
         else:

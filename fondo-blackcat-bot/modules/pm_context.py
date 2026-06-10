@@ -234,6 +234,21 @@ def build_pm_llm_block(pm) -> str:
             )
         else:
             lines.append("• Liq. price HYPE (maint-LTV): n/d")
+        # R-BOT-DEFINITIVE WI-7: pre-computed HYPE threshold prices per aave-HF
+        # band — IDENTICAL to the panel line. The model is FORBIDDEN from
+        # deriving its own observation/action zones or mapping HYPE prices to
+        # HF bands by any other arithmetic.
+        _p130 = _f(getattr(pm, "hype_price_at_hf_130", 0.0))
+        _p120 = _f(getattr(pm, "hype_price_at_hf_120", 0.0))
+        _p110 = _f(getattr(pm, "hype_price_at_hf_110", 0.0))
+        if _p120 > 0 or _p110 > 0:
+            lines.append(
+                f"• Umbrales HYPE (pre-calculados, ÚNICOS válidos): "
+                f"HF1.30 ${_p130:,.2f} · HF1.20 ${_p120:,.2f} (observación) · "
+                f"HF1.10 ${_p110:,.2f} (acción) · liq ${pm.liq_price:,.2f}. "
+                "PROHIBIDO derivar otras zonas de observación/acción o mapear "
+                "precios de HYPE a bandas de HF por tu cuenta — usá SOLO estos."
+            )
     else:
         lines.append("• aave-HF: n/d (sin deuda — no hay riesgo de liquidación)")
         lines.append("• Liq. price HYPE: n/d (sin deuda)")

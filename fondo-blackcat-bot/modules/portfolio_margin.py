@@ -118,6 +118,17 @@ class PMState:
     cross_perp_count: int = 0
     isolated_perp_count: int = 0
     isolated_positions: tuple = ()
+    # R-BOT-DEFINITIVE WI-7 (2026-06-10) — OUTPUTS ONLY (no math change): the
+    # HYPE oracle price at which the aave-HF crosses each observation band,
+    # computed on the SAME debt + perp cross maint-margin basis as ``aave_hf``
+    # (other collateral held constant). Solves
+    #   aave_HF(px) = (other_liq + px × hype_qty × liq_threshold) / liability
+    # for px at HF targets 1.30 / 1.20 / 1.10. 0.0 when no debt / no HYPE.
+    # These are the ONLY threshold prices the narrative may use — the LLM is
+    # forbidden from deriving its own observation zones.
+    hype_price_at_hf_130: float = 0.0
+    hype_price_at_hf_120: float = 0.0
+    hype_price_at_hf_110: float = 0.0
 
 
 def _f(v: Any) -> float:
@@ -232,6 +243,16 @@ def compute_pm_risk_metrics(
     if liq_price > 0 and hype_px > 0:
         buffer_pct = max(0.0, (hype_px - liq_price) / hype_px * 100.0)
 
+    # R-BOT-DEFINITIVE WI-7 — HYPE price at aave-HF thresholds (OUTPUT ONLY,
+    # same liability basis as aave_hf: debt + perp cross maint margin; other
+    # collateral held constant). px(HF=h) = (h×liability − other_liq) /
+    # (hype_qty × liq_threshold).
+    def _px_at_hf(h: float) -> float:
+        if liability <= 0 or hype_qty <= 0 or hype_liq_threshold <= 0:
+            return 0.0
+        target = h * liability - other_liq
+        return (target / (hype_liq_threshold * hype_qty)) if target > 0 else 0.0
+
     return {
         "borrow_capacity": borrow_capacity,
         "liq_weighted": liq_weighted,
@@ -242,6 +263,9 @@ def compute_pm_risk_metrics(
         "price_buffer_pct": buffer_pct,
         "max_ltv": _f(ltv_map.get("HYPE", PM_HYPE_LTV)) or PM_HYPE_LTV,
         "liq_threshold": hype_liq_threshold,
+        "hype_price_at_hf_130": _px_at_hf(1.30),
+        "hype_price_at_hf_120": _px_at_hf(1.20),
+        "hype_price_at_hf_110": _px_at_hf(1.10),
     }
 
 
@@ -461,6 +485,9 @@ def compute_pm_state(
         cross_perp_count=cross_count,
         isolated_perp_count=isolated_count,
         isolated_positions=isolated_legs_struct,
+        hype_price_at_hf_130=metrics.get("hype_price_at_hf_130", 0.0),
+        hype_price_at_hf_120=metrics.get("hype_price_at_hf_120", 0.0),
+        hype_price_at_hf_110=metrics.get("hype_price_at_hf_110", 0.0),
     )
 
 
@@ -563,6 +590,14 @@ def format_pm_state_telegram(pm: PMState) -> str:
                 f"├─ Liq. price HYPE (maint-LTV {pm.liq_threshold:.2f}): "
                 f"${pm.liq_price:,.2f}"
                 + (f"  (oracle ${pm.hype_px:,.2f}{buf})" if pm.hype_px > 0 else "")
+            )
+        # R-BOT-DEFINITIVE WI-7: aave-HF threshold prices for HYPE — the ONLY
+        # observation/action zones the narrative may cite (panel parity).
+        if pm.hype_price_at_hf_120 > 0 or pm.hype_price_at_hf_110 > 0:
+            lines.append(
+                f"├─ Umbrales HYPE: HF1.20 ${pm.hype_price_at_hf_120:,.2f} (observación) | "
+                f"HF1.10 ${pm.hype_price_at_hf_110:,.2f} (acción) | "
+                f"liq ${pm.liq_price:,.2f}"
             )
         # Clarify that over-max-borrow only blocks NEW draws — liquidation is the
         # maintenance-LTV price, not the 100%-utilization point.

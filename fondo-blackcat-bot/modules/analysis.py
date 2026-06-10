@@ -499,6 +499,17 @@ async def generate_report(
             except Exception:  # noqa: BLE001
                 log.exception("report_consistency pass failed (non-fatal)")
 
+        # ── R-BOT-DEFINITIVE WI-8: fund hard-rules strike filter — remove any
+        # line proposing to sell HYPE, repay debt with HYPE, reopen ZEC, or
+        # close the basket on environment grounds. Logged, never fatal.
+        try:
+            from modules.fund_rules import strike_forbidden_lines
+            report_text, _struck = strike_forbidden_lines(report_text)
+            if _struck:
+                log.info("fund_rules struck %d forbidden line(s)", len(_struck))
+        except Exception:  # noqa: BLE001
+            log.exception("fund_rules strike pass failed (non-fatal)")
+
         report_text += f"\n\n_An\u00e1lisis generado por: {provider}_"
 
         _save_last_analysis(report_text, provider)

@@ -930,6 +930,14 @@ def _reset_for_tests() -> None:
 
 # ─── Network (wrapped, keyless) ──────────────────────────────────────────────
 async def _hl_post(payload: dict[str, Any]) -> Any:
+    # R-BOT-DEFINITIVE WI-4: route through the SHARED rate-limited + TTL-cached
+    # HL client unless the test/env points at a non-default HL_INFO_URL.
+    if HL_INFO_URL.rstrip("/").endswith("hyperliquid.xyz/info"):
+        try:
+            from modules.hl_client import post_info
+            return await post_info(payload)
+        except ImportError:  # pragma: no cover
+            pass
     if not _HTTPX_OK:
         raise RuntimeError("httpx unavailable")
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_S, follow_redirects=True) as client:

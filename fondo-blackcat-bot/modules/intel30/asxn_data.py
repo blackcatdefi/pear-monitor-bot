@@ -189,9 +189,8 @@ def _parse_dashboard_html(html: str) -> dict[str, Any]:
 def format_for_telegram(data: dict[str, Any]) -> str:
     lines = ["🟪 *ASXN — HYPE Flywheel*"]
     if data.get("_error"):
-        lines.append(f"  ⚠️ SPA sin API pública ({data['_error'][:50]})")
-        lines.append(f"  → ver dashboard: {DASHBOARD}")
-        return "\n".join(lines)
+        # WI-9e: degrade to ONE short line — no URLs, no fragments.
+        return "🟪 ASXN: fuente no disponible este run"
     payload = data.get("data") or {}
     if not payload:
         lines.append("  • (empty)")

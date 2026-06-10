@@ -71,9 +71,11 @@ async def fetch_all() -> dict[str, Any]:
 def format_for_telegram(data: dict[str, Any]) -> str:
     lines = ["🐋 *Arkham — Whale/Entity Transfers*"]
     if data.get("_global_error"):
-        lines.append(f"  ⚠️ {data['_global_error']}")
-        lines.append("  → Set ARKHAM_API_KEY env var (free signup at intel.arkm.com)")
-        return "\n".join(lines)
+        # WI-9e: without ARKHAM_API_KEY the section is skipped SILENTLY (no
+        # nag line); any other global failure degrades to one short line.
+        if "ARKHAM_API_KEY" in str(data.get("_global_error")):
+            return ""
+        return "🐋 Arkham: fuente no disponible este run"
     entities = data.get("entities") or []
     rendered = 0
     for e in entities:
@@ -101,6 +103,6 @@ def format_for_telegram(data: dict[str, Any]) -> str:
                     lines.append(f"    – {token} {amt} @ {ts}")
         rendered += 1
     if rendered == 0:
-        errs = [e.get("_error", "?")[:40] for e in entities if isinstance(e, dict) and e.get("_error")]
-        lines.append(f"  ⚠️ todos los entities fallaron — {errs[0] if errs else '?'}")
+        # WI-9e: ONE short line, no stack fragments.
+        return "🐋 Arkham: fuente no disponible este run"
     return "\n".join(lines)

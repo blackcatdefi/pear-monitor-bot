@@ -67,6 +67,7 @@ def _parse_latest_row(html: str) -> dict[str, Any]:
     rows = re.findall(r"<tr[^>]*>(.*?)</tr>", html, flags=re.DOTALL | re.IGNORECASE)
     latest_date = None
     latest_total = None
+    pending = False
     for row in reversed(rows):  # bottom-up = newest first in Farside layout
         cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row, flags=re.DOTALL | re.IGNORECASE)
         if len(cells) < 2:
@@ -76,20 +77,25 @@ def _parse_latest_row(html: str) -> dict[str, Any]:
         # Date format: "07 May 2026"
         if not re.match(r"^\d{1,2}\s+\w+\s+\d{4}$", clean[0]):
             continue
-        # last numeric col = total
-        for c in reversed(clean[1:]):
-            # parse number with - or () for negatives, may include commas
+        # Parse every numeric cell in the row; last numeric col = total.
+        numeric: list[float] = []
+        for c in clean[1:]:
             cleaned = c.replace(",", "").replace("(", "-").replace(")", "").strip()
             try:
-                v = float(cleaned)
-                latest_date = clean[0]
-                latest_total = v
-                break
+                numeric.append(float(cleaned))
             except (TypeError, ValueError):
                 continue
-        if latest_date:
+        if numeric:
+            latest_date = clean[0]
+            latest_total = numeric[-1]
+            # R-BOT-DEFINITIVE WI-9b: BEFORE the daily publication Farside
+            # pre-fills the row with zeros — a 0.0 total with NO non-zero
+            # per-ETF cell is "pending", NOT a real net-zero day. A real zero
+            # requires at least one explicitly non-zero per-ETF cell.
+            if latest_total == 0.0 and not any(abs(x) > 0 for x in numeric[:-1]):
+                pending = True
             break
-    return {"date": latest_date, "total_flow_musd": latest_total}
+    return {"date": latest_date, "total_flow_musd": latest_total, "pending": pending}
 
 
 BITBO_URLS = {
@@ -149,6 +155,7 @@ async def fetch_etf(asset: str) -> dict[str, Any]:
                         "asset": asset.upper(),
                         "date": parsed["date"],
                         "flow_musd": parsed["total_flow_musd"],
+                        "pending": bool(parsed.get("pending")),
                         "source": "farside",
                         "_error": None,
                     }
@@ -218,6 +225,12 @@ def format_for_telegram(data: dict[str, Any]) -> str:
         d = f.get("date", "?")
         flow = f.get("flow_musd")
         src = f.get("source") or "farside"
+        # R-BOT-DEFINITIVE WI-9b: a pre-publication 0.0 renders "pending" —
+        # a real $0.0M is shown ONLY when the source explicitly shows zero.
+        if f.get("pending"):
+            lines.append(f"  ⏳ {asset}: pending (sin publicar aún — {d})")
+            rendered += 1
+            continue
         if isinstance(flow, (int, float)):
             arrow = "📈" if flow > 0 else ("📉" if flow < 0 else "➖")
             tag = f" [{src}]" if src != "farside" else ""

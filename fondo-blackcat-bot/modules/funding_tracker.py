@@ -241,4 +241,13 @@ def build_funding_block(
     head = "💸 FUNDING POR POSICIÓN (8h rate · dirección · carry acumulado desde entry)"
     if flagged:
         head += f" — {flagged} pagando carry caro (MANUAL REVIEW)"
+    # R-BOT-DEFINITIVE WI-4: when the shared HL client had to serve the funding
+    # source from an expired cache, label it instead of pretending it's live.
+    try:
+        from modules.hl_client import stale_note
+        note = stale_note("metaAndAssetCtxs")
+        if note:
+            head += f" ({note})"
+    except Exception:  # noqa: BLE001
+        pass
     return head + "\n" + "\n".join(rows)

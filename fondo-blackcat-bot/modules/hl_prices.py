@@ -53,6 +53,12 @@ _cache: dict[str, Any] = {"ts": 0.0, "prices": {}}
 
 
 def _post(payload: dict) -> Any:
+    # R-BOT-DEFINITIVE WI-4: shared rate-limited + cached HL client first.
+    try:
+        from modules.hl_client import post_info_sync
+        return post_info_sync(payload)
+    except ImportError:  # pragma: no cover
+        pass
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
         _INFO_URL,

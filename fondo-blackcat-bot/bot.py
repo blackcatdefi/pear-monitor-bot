@@ -607,7 +607,10 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if not isinstance(res, Exception):
                 intel30_payload[key] = res
                 try:
-                    intel30_blocks.append(mod.format_for_telegram(res))
+                    _blk = mod.format_for_telegram(res)
+                    # WI-9e: silent-skip sources (e.g. Arkham sin key) return ""
+                    if _blk and _blk.strip():
+                        intel30_blocks.append(_blk)
                 except Exception:  # noqa: BLE001
                     log.exception("intel30 %s format failed", key)
         if intel30_payload:
@@ -1072,6 +1075,21 @@ async def cmd_reconcile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def cmd_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """R17 — Upcoming catalysts from the macro calendar."""
     text = cal_format()
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_setcatalyst(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-BOT-DEFINITIVE WI-1 — manage the catalysts engine table.
+
+    Usage:
+      /setcatalyst add YYYY-MM-DD [HH:MM] <nombre> [impact]
+      /setcatalyst del <id>
+      /setcatalyst list
+    """
+    from modules.catalysts import handle_setcatalyst
+    text = handle_setcatalyst(list(context.args or []))
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
@@ -3042,6 +3060,15 @@ async def post_init(application: Application) -> None:
     except Exception:  # noqa: BLE001
         log.exception("macro_calendar seed failed (non-fatal)")
 
+    # R-BOT-DEFINITIVE WI-1: seed + refresh the catalysts engine (FRED CPI/PPI/
+    # NFP + official FOMC calendar + ticket seed events). Non-fatal.
+    try:
+        from modules.catalysts import refresh_catalysts
+        _cat_res = await refresh_catalysts()
+        log.info("catalysts engine refreshed at boot: %s", _cat_res)
+    except Exception:  # noqa: BLE001
+        log.exception("catalysts engine boot refresh failed (non-fatal)")
+
     # Round 21: drift guard — mark already-past events as alerted so the
     # scheduler can never re-fire stale alerts after a redeploy.
     try:
@@ -3282,6 +3309,23 @@ async def post_init(application: Application) -> None:
                      os.getenv("PM_MONITOR_INTERVAL_MIN", "15"))
         else:
             log.info("PM monitor scheduler DISABLED (PM_MONITOR_ENABLED=false)")
+
+        # R-BOT-DEFINITIVE WI-1: catalysts engine daily refresh (FRED release
+        # dates + FOMC sync). Cheap, keyless beyond the existing FRED key.
+        try:
+            from modules.catalysts import refresh_catalysts as _cat_refresh
+            scheduler.add_job(
+                _cat_refresh,
+                "cron",
+                hour=int(os.getenv("CATALYSTS_REFRESH_HOUR_UTC", "6")),
+                minute=15,
+                id="catalysts_refresh",
+                max_instances=1,
+                coalesce=True,
+            )
+            log.info("Catalysts engine daily refresh ENABLED (06:15 UTC)")
+        except Exception:  # noqa: BLE001
+            log.exception("catalysts refresh job registration failed (non-fatal)")
 
         # R-UNLOCK: basket-entry-unlock watchdog — every 30 min. Edge-triggered
         # (only on escalation NONE→WATCH→APPROACHING→UNLOCK), R-SILENT aware
@@ -3610,6 +3654,7 @@ HANDLER_MAP = {
     "status": cmd_status,
     "reconcile": cmd_reconcile,
     "calendar": cmd_calendar,
+    "setcatalyst": cmd_setcatalyst,  # R-BOT-DEFINITIVE WI-1
     "add_event": cmd_add_event,
     "remove_event": cmd_remove_event,
     "kill_status": cmd_kill_status,

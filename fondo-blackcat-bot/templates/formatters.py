@@ -444,6 +444,65 @@ def _basket_upnl_for_header(wallets: list[dict[str, Any]]) -> tuple[float, int]:
     return 0.0, 0
 
 
+def _perp_upnl_split(
+    wallets: list[dict[str, Any]],
+) -> tuple[float, int, float, list[str], float]:
+    """R-BOT-DEFINITIVE WI-2 — truth-in-labeling UPnL split for the header.
+
+    Classifies the trading wallet's perp legs by REAL structure:
+      * BASKET   = SHORT legs on a HIP-3 builder dex (``dex != "main"``) —
+        the Super Basket Stage 6 xyz: shorts.
+      * TACTICAL = every other leg (the BTC/SOL main-dex longs, plus anything
+        that isn't a builder-dex short) — so basket + tactical == account
+        total BY CONSTRUCTION (asserted in tests).
+
+    Returns ``(basket_upnl, basket_legs, tactical_upnl, tactical_coins,
+    total_upnl)``. NEVER raises.
+    """
+    basket_addr = "0xc7ae23316b47f7e75f455f53ad37873a18351505"
+    try:
+        from config import PM_PRIMARY_WALLET as _pmw
+        if _pmw:
+            basket_addr = _pmw.lower()
+    except Exception:  # noqa: BLE001
+        pass
+    basket_upnl = 0.0
+    basket_n = 0
+    tactical_upnl = 0.0
+    tactical_coins: list[str] = []
+    total = 0.0
+    for w in wallets or []:
+        if not isinstance(w, dict) or w.get("status") != "ok":
+            continue
+        d = w.get("data") or {}
+        if (d.get("wallet") or "").lower() != basket_addr:
+            continue
+        for p in d.get("positions") or []:
+            try:
+                upnl = float(p.get("unrealized_pnl") or p.get("upnl") or 0.0)
+            except (TypeError, ValueError):
+                upnl = 0.0
+            try:
+                sz = float(p.get("size") or p.get("szi") or 0.0)
+            except (TypeError, ValueError):
+                sz = 0.0
+            side = str(p.get("side") or ("LONG" if sz > 0 else "SHORT")).upper()
+            dex = str(p.get("dex") or "main").lower()
+            total += upnl
+            if side == "SHORT" and dex not in ("", "main"):
+                basket_upnl += upnl
+                basket_n += 1
+            else:
+                tactical_upnl += upnl
+                coin = str(p.get("coin") or "?")
+                # Strip any dex prefix for the label (xyz:HOOD → HOOD).
+                coin = coin.split(":", 1)[-1].upper()
+                if coin not in tactical_coins:
+                    tactical_coins.append(coin)
+        break
+    return basket_upnl, basket_n, tactical_upnl, tactical_coins, total
+
+
 def _cat_date_label(dt: datetime) -> str:
     """Compact UTC date like '6 Jun' (no leading zero, platform-agnostic)."""
     return f"{dt.day} {dt.strftime('%b')}"
@@ -589,6 +648,25 @@ def _next_catalyst_for_header(
     candidates: list[dict[str, Any]] = []
     impact_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
     impact_emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}
+
+    # ── Source 0 (R-BOT-DEFINITIVE WI-1): the catalysts engine table —
+    #    FRED releases (CPI/PPI/NFP) + official FOMC calendar + manual
+    #    /setcatalyst entries. This is the PRIMARY macro source; the legacy
+    #    macro_calendar roadmap and the unlock feed still merge below. ──
+    try:
+        from modules.catalysts import next_catalyst_candidates
+        for c in next_catalyst_candidates(window_hours=window_hours, now=now) or []:
+            label = str(c.get("label") or "?").strip()
+            if len(label) > 48:
+                label = label[:45] + "…"
+            candidates.append({
+                "label": label,
+                "dt": c["dt"],
+                "emoji": c.get("emoji") or "⚪",
+                "rank": int(c.get("rank") or 0),
+            })
+    except Exception:  # noqa: BLE001
+        pass
 
     # ── Source 1: curated macro calendar (already purges ts < now in SQL,
     #    but we re-check the window here against the run timestamp). ──────
@@ -841,17 +919,24 @@ def format_report_header(
         total_equity_text = "—"
     lines.append(f"💰 TOTAL EQUITY: {total_equity_text}")
 
-    # 2. BASKET UPnL
+    # 2. UPnL — truth in labeling (R-BOT-DEFINITIVE WI-2): the basket line is
+    #    ONLY the HIP-3 short legs; tactical longs (BTC/SOL) get their own
+    #    line; the account total is the asserted sum of both.
     try:
-        upnl, n_pos = _basket_upnl_for_header(wallets)
-        sign = "+" if upnl >= 0 else ""
-        if n_pos > 0:
+        b_upnl, b_n, t_upnl, t_coins, tot_upnl = _perp_upnl_split(wallets)
+        if b_n > 0 or t_coins:
+            bs = "+" if b_upnl >= 0 else ""
             lines.append(
-                f"📉 BASKET UPnL: {sign}{_fmt_usd(upnl)} ({n_pos} legs · Super Basket Stage 6)"
+                f"📉 BASKET UPnL ({b_n} short legs): {bs}{_fmt_usd(b_upnl)}"
             )
-        elif upnl != 0:
+            ts = "+" if t_upnl >= 0 else ""
+            tc = ", ".join(t_coins) if t_coins else "sin tácticas"
             lines.append(
-                f"📉 BASKET UPnL: {sign}{_fmt_usd(upnl)} (Super Basket Stage 6 — wallet-total)"
+                f"🎯 TACTICAL LONGS UPnL ({tc}): {ts}{_fmt_usd(t_upnl)}"
+            )
+            os_ = "+" if tot_upnl >= 0 else ""
+            lines.append(
+                f"Σ PERP ACCOUNT UPnL (total): {os_}{_fmt_usd(tot_upnl)}"
             )
         else:
             lines.append("📉 BASKET UPnL: $0 (basket idle / sin posiciones perp)")
@@ -1263,6 +1348,7 @@ def format_quick_positions(wallets: list[dict[str, Any]],
         DUST_THRESHOLD_USD = 50.0
         real_coins: list[tuple[str, list[dict[str, Any]], float, float]] = []  # (coin, entries, amt, usd)
         dust_coins: list[tuple[str, float, float]] = []  # (coin, amount, usd_value)
+        negative_balances: list[tuple[str, float, float]] = []  # WI-9c
 
         for coin, entries in by_coin.items():
             total_amount = sum(e.get("total", 0) for e in entries)
@@ -1276,7 +1362,12 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                     e.get("entry_ntl", 0) or 0,
                     price_map,
                 )
-            if total_usd_now >= DUST_THRESHOLD_USD:
+            # R-BOT-DEFINITIVE WI-9c: a NEGATIVE balance (e.g. USDC −7,200 from
+            # the PM borrow sweep) is a LIABILITY, never "dust". Route it to
+            # its own "Borrowed / negative balances" line tied to the PM debt.
+            if total_amount < 0 or total_usd_now < 0:
+                negative_balances.append((coin, total_amount, total_usd_now))
+            elif total_usd_now >= DUST_THRESHOLD_USD:
                 real_coins.append((coin, entries, total_amount, total_usd_now))
             else:
                 dust_coins.append((coin, total_amount, total_usd_now))
@@ -1347,6 +1438,18 @@ def format_quick_positions(wallets: list[dict[str, Any]],
             for i in range(0, len(dust_parts), 4):
                 chunk = " | ".join(dust_parts[i:i+4])
                 lines.append(f"    {chunk}")
+
+        # R-BOT-DEFINITIVE WI-9c: negative stable balances = the PM borrow
+        # liability (already netted once in TOTAL EQUITY). Own line, never dust.
+        if negative_balances:
+            neg_parts = [
+                f"{coin} {amount:,.2f} ({_fmt_usd(usd)})"
+                for coin, amount, usd in sorted(negative_balances, key=lambda x: x[2])
+            ]
+            lines.append(
+                "  Borrowed / saldos negativos (deuda PM — ver bloque "
+                "PORTFOLIO MARGIN, NO es dust): " + " | ".join(neg_parts)
+            )
 
     # HyperLend section — detailed view with HF, collateral breakdown, debt.
     # R-REPORTE-LIVE (2026-06-03) FIX 1: when the flywheel is migrated to
@@ -1728,9 +1831,29 @@ def compile_raw_data(
     except Exception:  # noqa: BLE001
         pm_block = ""
 
+    # R-BOT-DEFINITIVE WI-8: the fund's hard rules are injected into EVERY
+    # FULL ANALYSIS / tesis prompt (constant block, single source).
+    rules_block = ""
+    try:
+        from modules.fund_rules import build_fund_rules_block
+        rules_block = build_fund_rules_block()
+    except Exception:  # noqa: BLE001
+        rules_block = ""
+
+    # R-BOT-DEFINITIVE WI-1: deterministic catalysts table (next 7 days) so
+    # the catalysts section of the narrative is never written from LLM memory.
+    catalysts_block = ""
+    try:
+        from modules.catalysts import build_llm_catalyst_block
+        catalysts_block = build_llm_catalyst_block(days=7)
+    except Exception:  # noqa: BLE001
+        catalysts_block = ""
+
     return (
-        (classification_block + "\n" if classification_block else "")
+        (rules_block + "\n\n" if rules_block else "")
+        + (classification_block + "\n" if classification_block else "")
         + (pm_block + "\n\n" if pm_block else "")
+        + (catalysts_block + "\n\n" if catalysts_block else "")
         + "RAW DATA (timestamp UTC " + now + "):\n\n"
         "```json\n" + pretty + "\n```\n\n"
         "Generate the report following the system prompt format. "

@@ -137,16 +137,14 @@ VAULT_DUST_USD = float(os.getenv("VAULT_DUST_USD", "1.0") or 1.0)
 def _load_vault_deposits() -> list[dict]:
     raw = os.getenv("BLACKCAT_VAULT_DEPOSITS", "").strip()
     if not raw:
-        # Seed por defecto: el depósito HyperGrowth confirmado on-chain
-        # (depositante = wallet BlackCatDeFi EVM trading 0xc7ae…1505).
-        return [
-            {
-                "vault_address": "0xd6e56265890b76413d1d527eb9b75e334c0c5b42",
-                "depositor_address": "0xc7ae23316b47f7e75f455f53ad37873a18351505",
-                "label": "Systemic Strategies HyperGrowth",
-                "cost_basis": 5000.0,
-            }
-        ]
+        # R-BOT-DEFINITIVE WI-9d (2026-06-10): el seed hardcodeado "Systemic
+        # Strategies HyperGrowth" fue REMOVIDO — el fondo ya salió de ese vault
+        # y la entrada fija renderizaba "n/a (depositante no encontrado)" para
+        # siempre. Los depósitos activos se AUTO-DESCUBREN dinámicamente vía el
+        # endpoint userVaultEquities (VAULT_AUTODISCOVER, default on) para
+        # 0xc7ae + todas las fund wallets. Config manual sigue disponible vía
+        # la env var (para fijar cost basis / labels).
+        return []
     try:
         import json as _json
 

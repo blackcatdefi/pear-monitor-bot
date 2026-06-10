@@ -332,6 +332,18 @@ def classify_position(
                 f"(TP={'sí' if has_tp else 'no'})"
             )
 
+    # R-BOT-DEFINITIVE WI-5 — SL structural reachability (both buckets): a
+    # native SL beyond the position's liquidation price can NEVER execute
+    # (liquidation fires first). Inline flag; one-time alert lives in
+    # modules.sl_validator. Zero false positives: requires a DETECTED native
+    # SL trigger price AND a live liq price.
+    try:
+        from modules.sl_validator import sl_unreachable, unreachable_flag_text
+        if has_sl and sl_px and liq_px and sl_unreachable(side, sl_px, liq_px):
+            flags.append(unreachable_flag_text(float(sl_px), float(liq_px)))
+    except Exception:  # noqa: BLE001
+        pass
+
     return PositionTag(
         coin=coin,
         side=side.upper(),

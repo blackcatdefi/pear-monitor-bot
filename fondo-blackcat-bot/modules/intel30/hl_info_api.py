@@ -24,6 +24,13 @@ HTTP_TIMEOUT = 8.0
 
 
 async def _post(payload: dict[str, Any]) -> Any:
+    # R-BOT-DEFINITIVE WI-4: route through the SHARED rate-limited + cached HL
+    # client (kills the 429s on perpDexs / predictedFundings during /reporte).
+    try:
+        from modules.hl_client import post_info
+        return await post_info(payload)
+    except ImportError:  # pragma: no cover — isolated import contexts
+        pass
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         r = await client.post(API_URL, json=payload, headers={"Content-Type": "application/json"})
         r.raise_for_status()
@@ -116,7 +123,8 @@ def format_for_telegram(data: dict[str, Any]) -> str:
 
     dexs = pd_data.get("dexs") or []
     if pd_data.get("_error"):
-        lines.append(f"  ⚠️ perpDexs err: {pd_data['_error'][:60]}")
+        # WI-9e: ONE short line on failure — no error fragments.
+        lines.append("  ⚠️ perpDexs: fuente no disponible este run")
     elif dexs:
         lines.append(f"  • HIP-3 deployers activos: *{len(dexs)}*")
         for d in dexs[:8]:
@@ -130,7 +138,7 @@ def format_for_telegram(data: dict[str, Any]) -> str:
 
     fundings = fd_data.get("fundings") or {}
     if fd_data.get("_error"):
-        lines.append(f"  ⚠️ predictedFundings err: {fd_data['_error'][:60]}")
+        lines.append("  ⚠️ predictedFundings: fuente no disponible este run")
     elif fundings:
         # show top 5 most extreme fundings on HL venue
         hl_funds = []

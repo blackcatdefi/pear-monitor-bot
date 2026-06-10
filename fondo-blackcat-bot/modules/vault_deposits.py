@@ -113,6 +113,13 @@ class VaultDepositsResult:
 
 def _post_user_vault_equities(depositor: str) -> list[dict]:
     """POST userVaultEquities for one depositor. Raises on transport error."""
+    # R-BOT-DEFINITIVE WI-4: shared rate-limited + cached HL client first.
+    try:
+        from modules.hl_client import post_info_sync
+        data = post_info_sync({"type": "userVaultEquities", "user": depositor})
+        return data if isinstance(data, list) else []
+    except ImportError:  # pragma: no cover
+        pass
     body = json.dumps(
         {"type": "userVaultEquities", "user": depositor}
     ).encode()
@@ -382,8 +389,12 @@ def format_vault_deposits_telegram(
     if not result.ok:
         return "🏦 Vault Deposits (HL): n/a (vault read failed)"
 
+    # R-BOT-DEFINITIVE WI-9d: with discovery live, an empty result is a REAL
+    # state ("the fund holds no vault deposits") — say so explicitly instead
+    # of rendering nothing (silent omission looked like a data gap). Configured
+    # entries that exist but weren't found still surface per-line below.
     if not result.deposits:
-        return ""  # nothing configured → render nothing
+        return "🏦 Vault Deposits (HL): sin depósitos activos en vaults"
 
     # Show found deposits (each vault on its OWN line — never aggregated).
     shown = [d for d in result.deposits if d.found or not getattr(d, "auto_discovered", False)]

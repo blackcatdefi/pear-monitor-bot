@@ -46,4 +46,13 @@ async def get_json(url: str, **kwargs: Any) -> Any:
 
 
 async def post_json(url: str, json_body: Any, **kwargs: Any) -> Any:
+    # R-BOT-DEFINITIVE WI-4: every HyperLiquid info-API POST is routed through
+    # the SHARED rate-limited + TTL-cached client (modules.hl_client) so one
+    # /reporte never re-issues the same request and 429s get jittered backoff.
+    try:
+        if url.rstrip("/").endswith("hyperliquid.xyz/info") and isinstance(json_body, dict):
+            from modules.hl_client import post_info
+            return await post_info(json_body)
+    except ImportError:  # pragma: no cover — isolated tests without modules pkg
+        pass
     return await request_json("POST", url, json=json_body, **kwargs)

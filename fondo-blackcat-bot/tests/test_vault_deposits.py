@@ -137,19 +137,17 @@ def test_no_config_entries(monkeypatch):
     assert r.ok is True
     assert r.total_usd == 0.0
     assert r.deposits == []
-    assert vd.format_vault_deposits_telegram(r) == ""
+    # R-BOT-DEFINITIVE WI-9d: the empty state is REAL information — say it.
+    assert "sin depósitos activos" in vd.format_vault_deposits_telegram(r)
 
 
 # ─── config seed default ─────────────────────────────────────────────────────
-def test_config_seed_default_present():
+def test_config_seed_default_empty(monkeypatch):
+    # R-BOT-DEFINITIVE WI-9d: the hardcoded "Systemic Strategies" seed was
+    # REMOVED — active deposits are auto-discovered via userVaultEquities.
+    monkeypatch.delenv("BLACKCAT_VAULT_DEPOSITS", raising=False)
     import config
-    seed = config._load_vault_deposits()
-    assert any(
-        e["vault_address"] == "0xd6e56265890b76413d1d527eb9b75e334c0c5b42"
-        and e["depositor_address"] == "0xc7ae23316b47f7e75f455f53ad37873a18351505"
-        and e["cost_basis"] == 5000.0
-        for e in seed
-    )
+    assert config._load_vault_deposits() == []
 
 
 def test_config_env_override(monkeypatch):

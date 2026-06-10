@@ -177,10 +177,18 @@ class TestEiaOil(unittest.TestCase):
 
 
 class TestArkham(unittest.TestCase):
-    def test_format_no_key(self):
+    def test_format_no_key_silent_skip(self):
+        # R-BOT-DEFINITIVE WI-9e: without ARKHAM_API_KEY the section is
+        # skipped SILENTLY (empty string) — no nag line in /reporte.
         from modules.intel30 import arkham_intel
         out = arkham_intel.format_for_telegram({"_global_error": "ARKHAM_API_KEY not set"})
-        self.assertIn("ARKHAM_API_KEY", out)
+        self.assertEqual(out, "")
+
+    def test_format_other_failure_one_line(self):
+        from modules.intel30 import arkham_intel
+        out = arkham_intel.format_for_telegram({"_global_error": "timeout"})
+        self.assertEqual(out, "🐋 Arkham: fuente no disponible este run")
+        self.assertEqual(len(out.splitlines()), 1)
 
 
 class TestAsxn(unittest.TestCase):

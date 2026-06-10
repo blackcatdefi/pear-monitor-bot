@@ -72,9 +72,8 @@ def format_for_telegram(data: dict[str, Any]) -> str:
     lines = ["🪶 *HypurrScan — HIP-1 Auctions*"]
     auc = data.get("auctions") or {}
     if auc.get("_error"):
-        lines.append(f"  ⚠️ API path no expuesto ({auc['_error'][:60]})")
-        lines.append("  → ver auctions en vivo: https://hypurrscan.io/auctions")
-        return "\n".join(lines)
+        # WI-9e: degrade to ONE short line — no truncated URLs / fragments.
+        return "🪶 HypurrScan: fuente no disponible este run"
     payload = auc.get("data")
     if not payload:
         lines.append("  • sin datos")
