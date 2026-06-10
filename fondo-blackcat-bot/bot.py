@@ -19,6 +19,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -2922,29 +2923,81 @@ async def _heartbeat_job(application: Application) -> None:
         log.exception("heartbeat job failed")
 
 
+def _risk_validator_state_path() -> str:
+    """Path of the persisted drift-alert dedup state (survives restarts)."""
+    try:
+        from config import DATA_DIR as _dd
+    except Exception:  # noqa: BLE001
+        _dd = os.getenv("DATA_DIR", "/tmp")
+    return os.path.join(_dd, "risk_validator_state.json")
+
+
+def _risk_validator_should_alert(fingerprint: str, *, now: float | None = None) -> bool:
+    """Edge-trigger + cooldown for the drift alert (R-RISK-VALIDATOR-HOTFIX).
+
+    At a 5-minute cadence a standing drift would otherwise re-fire 288x/day.
+    Fire only when the failure fingerprint CHANGES or when
+    RISK_VALIDATOR_REALERT_HOURS (default 6h) elapsed since the last send.
+    State is persisted to DATA_DIR so a restart never re-fires an unchanged
+    drift inside the cooldown window. NEVER raises.
+    """
+    import json as _json
+    ts = float(now if now is not None else time.time())
+    try:
+        realert_sec = float(os.getenv("RISK_VALIDATOR_REALERT_HOURS", "6") or 6) * 3600.0
+    except ValueError:
+        realert_sec = 6 * 3600.0
+    path = _risk_validator_state_path()
+    prev_fp, prev_ts = None, 0.0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            prev = _json.load(fh)
+        prev_fp = prev.get("fingerprint")
+        prev_ts = float(prev.get("sent_at") or 0.0)
+    except Exception:  # noqa: BLE001 — first run / corrupt state → treat as new
+        pass
+    if fingerprint == prev_fp and (ts - prev_ts) < realert_sec:
+        return False
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            _json.dump({"fingerprint": fingerprint, "sent_at": ts}, fh)
+    except Exception:  # noqa: BLE001
+        log.exception("risk_validator state persist failed (non-fatal)")
+    return True
+
+
 async def _risk_validator_job(application: Application) -> None:
-    """R18 audit: every 2h — auto-run risk_check; alert only on FAIL.
+    """R-RISK-VALIDATOR-HOTFIX: every 5min — auto-run risk_check; alert on FAIL.
 
     Read-only. Surfaces drift in env-var policy gates so BCD doesn't have
-    to remember to /risk_check manually. Silent on PASS.
+    to remember to /risk_check manually. Silent on PASS. Drift alerts are
+    edge-triggered (fingerprint change) with a 6h re-alert cooldown,
+    persisted across restarts. Logs ONE INFO line per successful execution
+    (job name, duration, findings count) so liveness is verifiable in
+    Railway logs.
     """
     if r18_risk_check_report is None or not r18_risk_check_enabled():
         return
+    _t0 = time.monotonic()
     try:
         from modules.risk_config_validator import run_checks as _rcv_run
         results = _rcv_run()
         failures = [c for c in results if not c.ok]
-        if not failures:
-            return
-        chat_id = TELEGRAM_CHAT_ID
-        if not chat_id:
-            return
-        lines = ["\u26a0\ufe0f RISK CONFIG DRIFT \u2014 auto-detect"]
-        for c in failures:
-            lines.append(f"  \u2022 {c.name}: {c.detail} (expected: {c.expected})")
-        lines.append("")
-        lines.append("Run /risk_check for details, adjust env vars in Railway.")
-        await send_bot_message(application.bot, chat_id, "\n".join(lines))
+        if failures:
+            chat_id = TELEGRAM_CHAT_ID
+            fingerprint = "|".join(sorted(f"{c.name}:{c.detail}" for c in failures))
+            if chat_id and _risk_validator_should_alert(fingerprint):
+                lines = ["\u26a0\ufe0f RISK CONFIG DRIFT \u2014 auto-detect"]
+                for c in failures:
+                    lines.append(f"  \u2022 {c.name}: {c.detail} (expected: {c.expected})")
+                lines.append("")
+                lines.append("Run /risk_check for details, adjust env vars in Railway.")
+                await send_bot_message(application.bot, chat_id, "\n".join(lines))
+        log.info(
+            "risk_validator_job OK — duration=%.2fs findings=%d",
+            time.monotonic() - _t0,
+            len(failures),
+        )
     except Exception:  # noqa: BLE001
         log.exception("risk_validator job failed")
 
@@ -2988,14 +3041,22 @@ async def _cryexc_monitor_job(application: Application) -> None:
 
 
 def _gated_broadcast(coro_factory, gate_fn, label: str):
-    """Return a sync callable suitable for APScheduler ``add_job(...)``.
+    """Return an ASYNC callable suitable for APScheduler ``add_job(...)``.
 
     ``coro_factory`` is a 0-arg callable that, when invoked, returns the
     coroutine to dispatch. ``gate_fn`` is a 0-arg sync callable returning
     True if the broadcast should run. The wrapper short-circuits with a
     debug log when the gate is closed — no Telegram traffic, no exception.
+
+    R-RISK-VALIDATOR-HOTFIX (2026-06-10): the previous SYNC wrapper called
+    ``asyncio.create_task(...)``. AsyncIOScheduler dispatches sync callables
+    to a thread-pool executor where NO event loop is running, so create_task
+    raised RuntimeError("no running event loop") on every cycle and the
+    wrapped broadcast NEVER executed. An ``async def`` runner is detected by
+    AsyncIOScheduler's iscoroutinefunction check and scheduled natively on
+    the bot's running loop — same mechanism as the healthy ``_alert_job``.
     """
-    def _runner() -> None:
+    async def _runner() -> None:
         try:
             if not gate_fn():
                 log.debug("R-ONDEMAND gate closed: %s skipped", label)
@@ -3003,9 +3064,9 @@ def _gated_broadcast(coro_factory, gate_fn, label: str):
         except Exception:  # noqa: BLE001
             log.exception("R-ONDEMAND gate eval failed for %s (failing open)", label)
         try:
-            asyncio.create_task(coro_factory())
+            await coro_factory()
         except Exception:  # noqa: BLE001
-            log.exception("R-ONDEMAND broadcast %s task creation failed", label)
+            log.exception("R-ONDEMAND broadcast %s failed", label)
     return _runner
 
 
@@ -3396,10 +3457,14 @@ async def post_init(application: Application) -> None:
                      os.getenv("MORNING_BRIEF_HOUR_UTC", "8"))
         # Basket close detector — every 30s (cheap, edge-triggered)
         if r18_basket_close_emit is not None and r18_basket_close_enabled():
+            # R-RISK-VALIDATOR-HOTFIX: async coroutine registered natively
+            # (the old sync lambda + create_task raised RuntimeError in the
+            # thread-pool executor — job never ran).
             scheduler.add_job(
-                lambda: asyncio.create_task(r18_basket_close_emit(application.bot)),
+                r18_basket_close_emit,
                 "interval",
                 seconds=30,
+                args=[application.bot],
                 id="basket_close_detector",
                 max_instances=1,
                 coalesce=True,
@@ -3478,32 +3543,43 @@ async def post_init(application: Application) -> None:
                 hb_hours = float(os.getenv("HEARTBEAT_INTERVAL_HOURS", "6"))
             except ValueError:
                 hb_hours = 6.0
+            # R-RISK-VALIDATOR-HOTFIX: async coroutine registered natively
+            # (same dead create_task-in-executor anti-pattern as risk validator).
             scheduler.add_job(
-                lambda: asyncio.create_task(_heartbeat_job(application)),
+                _heartbeat_job,
                 "interval",
                 hours=hb_hours,
+                args=[application],
                 id="heartbeat",
                 max_instances=1,
                 coalesce=True,
             )
             log.info("R18 add-on heartbeat ENABLED (every %.1fh)", hb_hours)
 
-        # R18 audit: risk_config_validator proactive scheduler (every 2h)
+        # R18 audit: risk_config_validator proactive scheduler.
+        # R-RISK-VALIDATOR-HOTFIX (2026-06-10): the old registration was
+        # ``lambda: asyncio.create_task(_risk_validator_job(application))`` —
+        # a SYNC callable that AsyncIOScheduler dispatched to a thread-pool
+        # executor with no running event loop → RuntimeError every cycle and
+        # the job NEVER executed in production. Now registered as a native
+        # async job (same mechanism as the healthy _alert_job) and promoted
+        # to a 5-minute cadence: risk checks must not wait 2 hours.
         if r18_risk_check_report is not None and r18_risk_check_enabled():
             try:
-                rcv_hours = float(os.getenv("RISK_VALIDATOR_INTERVAL_HOURS", "2"))
+                rcv_minutes = int(os.getenv("RISK_VALIDATOR_INTERVAL_MIN", "5"))
             except ValueError:
-                rcv_hours = 2.0
+                rcv_minutes = 5
             scheduler.add_job(
-                lambda: asyncio.create_task(_risk_validator_job(application)),
+                _risk_validator_job,
                 "interval",
-                hours=rcv_hours,
+                minutes=rcv_minutes,
+                args=[application],
                 id="risk_config_validator",
                 max_instances=1,
                 coalesce=True,
-                next_run_time=datetime.now(timezone.utc) + timedelta(minutes=5),
+                next_run_time=datetime.now(timezone.utc) + timedelta(minutes=2),
             )
-            log.info("R18 risk_config_validator ENABLED (every %.1fh)", rcv_hours)
+            log.info("R18 risk_config_validator ENABLED (every %dmin, native async)", rcv_minutes)
 
         # R21: morning brief — anchor message at MORNING_BRIEF_HOUR_UTC every day
         # R-ONDEMAND: gated by REPORT_CRON_ENABLED (broadcast surface).

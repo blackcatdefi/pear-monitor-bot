@@ -238,8 +238,19 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
     try:
         from modules.cron_state import margin_stress_enabled
         if margin_stress_enabled():
+            import time as _time
             from modules.alerts_margin import run_margin_alerts
-            await run_margin_alerts(bot, wallets)
+            _t0 = _time.monotonic()
+            _sent = await run_margin_alerts(bot, wallets)
+            # R-RISK-VALIDATOR-HOTFIX: liveness proof for the REAL-risk
+            # channel (PM aave-HF bands 1.30/1.20/1.10 + per-position liq
+            # distance <12%/<8%) — one INFO line per successful execution
+            # so health is verifiable in Railway logs.
+            log.info(
+                "real_risk_channel OK — duration=%.2fs alerts_sent=%d",
+                _time.monotonic() - _t0,
+                int(_sent or 0),
+            )
     except Exception:  # noqa: BLE001
         log.exception("margin alerts (WI-3) failed (non-fatal)")
 
