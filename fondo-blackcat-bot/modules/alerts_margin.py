@@ -40,6 +40,10 @@ DB_PATH = os.path.join(DATA_DIR, "margin_alerts.db")
 
 COOLDOWN_SEC = float(os.getenv("MARGIN_ALERT_COOLDOWN_HOURS", "6") or 6) * 3600.0
 WORSEN_PP = float(os.getenv("MARGIN_ALERT_WORSEN_PP", "5") or 5)
+# R-MARGIN-STRESS-HOTFIX: iso-only informational line cooldown (24h, persisted).
+ISO_INFO_COOLDOWN_SEC = float(
+    os.getenv("MARGIN_ISO_INFO_COOLDOWN_HOURS", "24") or 24
+) * 3600.0
 
 # Margin-used bands (ratio in %): index = severity (higher = worse).
 _BANDS = ((0.0, 90.0), (90.0, 100.0), (100.0, 110.0), (110.0, float("inf")))
@@ -112,8 +116,90 @@ def margin_used_band(ratio_pct: float) -> int:
     return len(_BANDS) - 1
 
 
+def count_cross_positions(positions: list[dict[str, Any]] | None) -> int:
+    """Number of open perp legs in CROSS margin mode.
+
+    ``leverage_type`` is read LIVE from HL (R-PM-MARGIN-MODE-FIX); a leg is
+    isolated ONLY when HL says so explicitly. Missing/unknown mode counts as
+    cross (conservative: never suppresses the alert on ambiguous data).
+    """
+    n = 0
+    for p in positions or []:
+        if not isinstance(p, dict):
+            continue
+        try:
+            sz = abs(float(p.get("size") or p.get("szi") or 0.0))
+        except (TypeError, ValueError):
+            sz = 0.0
+        if sz <= 0:
+            continue
+        if str(p.get("leverage_type") or "").lower() != "isolated":
+            n += 1
+    return n
+
+
+def format_margin_stress_alert(ident: str, ratio_pct: float, used: float, eq: float) -> str:
+    """R-MARGIN-STRESS-HOTFIX mandated copy — CROSS metric, no liquidation
+    language. Only used when cross perp positions actually exist."""
+    band = margin_used_band(ratio_pct)
+    label = _BAND_LABELS[band]
+    return (
+        f"🚨 MARGIN STRESS — {ident}\n"
+        f"Perp cross margin used vs cross equity = {ratio_pct:.1f}%. "
+        "Above 100% blocks NEW positions. Liquidation risk is tracked per "
+        "position and in the PM panel, not by this metric.\n"
+        f"cross_margin_used=${used:,.0f} · cross_equity=${eq:,.0f} · "
+        f"banda {label}."
+    )
+
+
+def format_iso_only_info(ident: str) -> str:
+    """One-time informational line on transition into iso-only state."""
+    return (
+        f"ℹ️ PERP MARGIN — {ident}\n"
+        "Perp USDC fully allocated to isolated margins. New positions blocked "
+        "until margin is freed. NOT a liquidation risk.\n"
+        "(Cuenta sin posiciones cross: la métrica de stress de margen no "
+        "aplica — el riesgo de liquidación de cada pata aislada se sigue por "
+        "su liq price y en el panel PM.)"
+    )
+
+
+def evaluate_iso_only_transition(
+    key: str,
+    iso_only: bool,
+    *,
+    now: float | None = None,
+) -> bool:
+    """Fire the informational line ONLY on state transition INTO iso-only.
+
+    Persisted in SQLite (``isoonly:{key}``) so restarts do not re-fire.
+    Cooldown ``ISO_INFO_COOLDOWN_SEC`` (24h default). NEVER raises.
+    """
+    try:
+        now = now or time.time()
+        skey = f"isoonly:{key}"
+        band = 1 if iso_only else 0
+        last_band, _lv, last_sent = _get_state(skey)
+        if not iso_only:
+            if last_band != 0:
+                # Transition out of iso-only — re-arm silently, keep sent_at.
+                _set_state(skey, 0, 0.0, float(last_sent or 0.0))
+            return False
+        if last_band == 1:
+            return False  # already known iso-only → silence
+        cooled = (now - float(last_sent or 0.0)) >= ISO_INFO_COOLDOWN_SEC
+        _set_state(skey, band, 1.0, now if cooled else float(last_sent or 0.0))
+        return cooled
+    except Exception:  # noqa: BLE001
+        log.exception("evaluate_iso_only_transition failed for %s", key)
+        return False
+
+
 def format_margin_used_alert(ident: str, ratio_pct: float, used: float, eq: float) -> str:
-    """Honest copy: utilization metric, NOT liquidation proximity."""
+    """LEGACY formatter (blended metric) — kept for compatibility/tests only.
+    Production routes via :func:`format_margin_stress_alert` (cross-only).
+    Honest copy: utilization metric, NOT liquidation proximity."""
     band = margin_used_band(ratio_pct)
     label = _BAND_LABELS[band]
     over_note = (
@@ -291,7 +377,13 @@ def _liq_dist_message(coin: str, dist_pct: float, band: int) -> str:
 async def run_margin_alerts(bot, wallets: list[dict[str, Any]] | None) -> int:
     """Evaluate both channels and send what fires. Returns alerts sent.
 
-    Channel 1 input: each ok wallet's total_margin_used / account_value.
+    Channel 1 input (R-MARGIN-STRESS-HOTFIX): each ok wallet's CROSS margin
+    used vs CROSS equity (HL ``crossMarginSummary``) — NEVER the blended
+    ``marginSummary``, which counts isolated margin in both used and equity
+    (iso-only account → 100% by construction, permanent false alarm).
+    No-cross guard: zero cross perp legs → MARGIN STRESS is structurally not
+    applicable and never fires; at most ONE informational line on transition
+    into iso-only (24h cooldown, persisted).
     Channel 2 input: the primary PMState (compute_pm_state — single source)
     + every open position's live liq distance. NEVER raises.
     """
@@ -304,34 +396,59 @@ async def run_margin_alerts(bot, wallets: list[dict[str, Any]] | None) -> int:
     if not TELEGRAM_CHAT_ID:
         return 0
 
-    # ── Channel 1: perp margin used vs perp equity ──
+    # ── Channel 1: perp CROSS margin used vs CROSS equity ──
     for w in wallets or []:
         if not isinstance(w, dict) or w.get("status") != "ok":
             continue
         d = w.get("data") or {}
         addr = (d.get("wallet") or "").lower()
         label = d.get("label") or ""
+        key = addr[-8:] if addr else (label or "unknown")
+        short = (addr[:6] + "…" + addr[-4:]) if addr else ""
+        ident = f"{label} ({short})" if label else short
+        positions = d.get("positions") or []
+        n_cross = count_cross_positions(positions)
+        if n_cross == 0:
+            # No-cross guard: with zero cross legs the stress metric is
+            # structurally meaningless — NEVER fire MARGIN STRESS. If there
+            # ARE isolated legs, emit at most one informational line on the
+            # transition into iso-only (24h cooldown, SQLite persisted).
+            has_iso = any(
+                isinstance(p, dict)
+                and str(p.get("leverage_type") or "").lower() == "isolated"
+                for p in positions
+            )
+            if evaluate_iso_only_transition(key, has_iso):
+                try:
+                    await send_bot_message(
+                        bot, TELEGRAM_CHAT_ID, format_iso_only_info(ident)
+                    )
+                    sent += 1
+                except Exception:  # noqa: BLE001
+                    log.exception("iso-only info send failed")
+            continue
+        # Cross legs exist → re-arm the iso-only latch silently.
+        evaluate_iso_only_transition(key, False)
         try:
-            eq = float(d.get("account_value") or 0.0)
-            used = float(d.get("total_margin_used") or 0.0)
+            cross_eq = float(d.get("cross_account_value") or 0.0)
+            cross_used = float(d.get("cross_margin_used") or 0.0)
         except (TypeError, ValueError):
             continue
-        if eq <= 0:
+        if cross_eq <= 0 or "cross_margin_used" not in d:
+            # Cross data unavailable (stale cache / API gap) → SKIP. The
+            # blended marginSummary is never used as a fallback for this alert.
             continue
-        ratio_pct = used / eq * 100.0
-        key = addr[-8:] if addr else (label or "unknown")
+        ratio_pct = cross_used / cross_eq * 100.0
         should, _band = evaluate_margin_used(key, ratio_pct)
         if should:
-            short = (addr[:6] + "…" + addr[-4:]) if addr else ""
-            ident = f"{label} ({short})" if label else short
             try:
                 await send_bot_message(
                     bot, TELEGRAM_CHAT_ID,
-                    format_margin_used_alert(ident, ratio_pct, used, eq),
+                    format_margin_stress_alert(ident, ratio_pct, cross_used, cross_eq),
                 )
                 sent += 1
             except Exception:  # noqa: BLE001
-                log.exception("margin-used alert send failed")
+                log.exception("margin-stress alert send failed")
 
     # ── Channel 2: real risk (aave-HF + per-position liq distance) ──
     try:

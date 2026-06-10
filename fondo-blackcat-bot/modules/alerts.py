@@ -224,9 +224,14 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
     # The legacy edge-triggered MARGIN STRESS watchdog (1 fire per breach but
     # re-armed by state churn → 6 identical alerts/night, wrong "buffer to
     # liquidation" copy) is replaced by modules.alerts_margin:
-    #   * "Perp margin used vs perp equity" — band transitions (<90/90-100/
-    #     100-110/>110) + >5pp worsening, 6h cooldown, SQLite persisted, copy
-    #     states >100% only blocks NEW positions (never liquidation language).
+    #   * R-MARGIN-STRESS-HOTFIX (2026-06-10): metric = CROSS margin used vs
+    #     CROSS equity (HL crossMarginSummary), NEVER the blended marginSummary
+    #     (iso-only account → 100% by construction = permanent false alarm).
+    #     Zero cross legs → structurally N/A, never fires; at most one
+    #     iso-only info line on transition (24h cooldown, persisted).
+    #     Band transitions (<90/90-100/100-110/>110) + >5pp worsening, 6h
+    #     cooldown per band, SQLite persisted, copy states >100% only blocks
+    #     NEW positions (never liquidation language).
     #   * REAL-risk channel — PM aave-HF crossings 1.30/1.20/1.10 + any single
     #     position liq distance <12% / <8% (fed by compute_pm_state + live
     #     position data only).

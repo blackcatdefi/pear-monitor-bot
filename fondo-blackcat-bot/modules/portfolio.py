@@ -277,6 +277,12 @@ def _summarize_positions(state: dict[str, Any], dex_label: str = "main") -> dict
         "total_ntl_pos": _f(margin.get("totalNtlPos")),
         "total_margin_used": _f(margin.get("totalMarginUsed")),
         "cross_account_value": _f(cross.get("accountValue")),
+        # R-MARGIN-STRESS-HOTFIX (2026-06-10): cross-only margin used, straight
+        # from HL ``crossMarginSummary.totalMarginUsed``. The blended
+        # ``marginSummary`` double-counts isolated margin in BOTH used and
+        # equity (iso-only account → used/equity == 100% by construction), so
+        # the margin-stress alert must read THIS field, never the blended one.
+        "cross_margin_used": _f(cross.get("totalMarginUsed")),
         # R-PM-LIQ: cross-perp maintenance margin. Only CROSS perps share the
         # PM account's collateral and therefore raise the spot liquidation
         # point; isolated perps are walled off (live fund = isolated → 0.0).
@@ -300,6 +306,7 @@ async def _fetch_dex(wallet: str, dex: str | None) -> dict[str, Any]:
             "total_ntl_pos": 0.0,
             "total_margin_used": 0.0,
             "cross_account_value": 0.0,
+            "cross_margin_used": 0.0,
             "cross_maintenance_margin_used": 0.0,
             "withdrawable": 0.0,
             "positions": [],
@@ -484,6 +491,8 @@ async def fetch_wallet(wallet: str, label: str) -> dict[str, Any]:
             withdrawable = 0.0
             unrealized_total = 0.0
             cross_maint_margin = 0.0
+            cross_account_value = 0.0
+            cross_margin_used = 0.0
             for r in dex_results:
                 positions.extend(r.get("positions") or [])
                 account_value += r.get("account_value", 0.0)
@@ -492,6 +501,8 @@ async def fetch_wallet(wallet: str, label: str) -> dict[str, Any]:
                 withdrawable += r.get("withdrawable", 0.0)
                 unrealized_total += r.get("unrealized_pnl_total", 0.0)
                 cross_maint_margin += r.get("cross_maintenance_margin_used", 0.0)
+                cross_account_value += r.get("cross_account_value", 0.0)
+                cross_margin_used += r.get("cross_margin_used", 0.0)
 
             summary = {
                 "wallet": wallet,
@@ -499,7 +510,11 @@ async def fetch_wallet(wallet: str, label: str) -> dict[str, Any]:
                 "account_value": account_value,
                 "total_ntl_pos": total_ntl_pos,
                 "total_margin_used": total_margin_used,
-                "cross_account_value": account_value,
+                # R-MARGIN-STRESS-HOTFIX: REAL cross equity (sum of per-dex
+                # crossMarginSummary.accountValue) — the old value here was the
+                # blended account_value, which made cross metrics meaningless.
+                "cross_account_value": cross_account_value,
+                "cross_margin_used": cross_margin_used,
                 # R-PM-LIQ: aggregated cross-perp maintenance margin (0.0 for the
                 # live fund — its perps are isolated). Consumed by compute_pm_state
                 # to fold cross perp risk into the spot liquidation point.
