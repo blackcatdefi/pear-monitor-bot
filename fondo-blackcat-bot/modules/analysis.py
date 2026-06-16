@@ -453,7 +453,22 @@ async def generate_report(
     Critical tasks route to Sonnet first, fallback to Haiku, then Gemini.
     If all fail: returns degraded raw data report + cached analysis.
     """
-    user_content = compile_raw_data(portfolio, hyperlend, market, unlocks, telegram_intel)
+    # R-FUNDING-TRUTH (2026-06-15): fetch live 8h funding rates so the FULL
+    # ANALYSIS LLM context carries the PRE-COMPUTED per-position funding verdict
+    # (PAGA/RECIBE + carry-caro), the single source of truth shared with the
+    # funding_por_posición block. Keyless HL endpoint; {} on failure (the verdict
+    # then falls back to the realized-carry sign). NEVER breaks the report.
+    _funding_rates: dict[str, Any] = {}
+    try:
+        from modules.funding_tracker import fetch_funding_rates
+        _funding_rates = await fetch_funding_rates()
+    except Exception:  # noqa: BLE001
+        _funding_rates = {}
+
+    user_content = compile_raw_data(
+        portfolio, hyperlend, market, unlocks, telegram_intel,
+        funding_rates=_funding_rates,
+    )
 
     state = _load_thesis()
     prev_thesis = _thesis_context(state)

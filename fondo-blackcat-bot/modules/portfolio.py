@@ -231,10 +231,21 @@ def _summarize_positions(state: dict[str, Any], dex_label: str = "main") -> dict
         # (HL cumFunding.sinceOpen, USD; HL convention: positive = paid out,
         # negative = received). Captured here so the funding tracker can show
         # carry-to-date per position without a second API round-trip.
-        try:
-            cum_funding_open = float((p.get("cumFunding") or {}).get("sinceOpen") or 0.0)
-        except (TypeError, ValueError):
-            cum_funding_open = 0.0
+        # R-FUNDING-TRUTH (2026-06-15) / FIX 2 (never fabricate a value):
+        # distinguish a GENUINE zero (the cumFunding block is present and
+        # sinceOpen really is 0.0) from a MISSING value (a partial/failed HL
+        # payload with no cumFunding block at all). A genuine 0.0 stays 0.0; a
+        # missing block becomes ``None`` so downstream renders "n/d" instead of a
+        # confident "+0.00 USD" carry. HL always includes cumFunding.sinceOpen
+        # on a healthy assetPositions payload, so its absence is a real signal.
+        _cf = p.get("cumFunding")
+        if isinstance(_cf, dict) and _cf.get("sinceOpen") is not None:
+            try:
+                cum_funding_open = float(_cf.get("sinceOpen"))
+            except (TypeError, ValueError):
+                cum_funding_open = None
+        else:
+            cum_funding_open = None
         # R-PM-MARGIN-MODE-FIX (2026-06-07): carry the per-leg margin facts the
         # PM model needs to distinguish CROSS (shared pool) from ISOLATED
         # (walled-off) legs — ``margin_used`` is the posted isolated margin on an

@@ -1750,6 +1750,8 @@ def compile_raw_data(
     unlocks: dict[str, Any] | None,
     telegram_intel: dict[str, Any] | None,
     bounce_tech: list[dict[str, Any]] | None = None,
+    *,
+    funding_rates: dict[str, float] | None = None,
 ) -> str:
     """Build the user message that we feed to Claude with all raw data."""
     import json
@@ -1831,6 +1833,28 @@ def compile_raw_data(
     except Exception:  # noqa: BLE001
         pm_block = ""
 
+    # R-FUNDING-TRUTH (2026-06-15): single source of truth for funding DIRECTION.
+    # Same pattern as pm_block — inject the PRE-COMPUTED per-position funding
+    # verdict (modules.funding_tracker.funding_verdict, the SAME function the
+    # funding_por_posición block uses) so the FULL ANALYSIS narrative verbalizes
+    # PAGA/RECIBE VERBATIM instead of re-deriving direction from the rate sign
+    # and getting it backwards (the 2026-06-15 "LONG COBRA" inversion bug).
+    # ``funding_rates`` is fetched by the caller (generate_report); when absent,
+    # the verdict still resolves direction from the realized-carry sign.
+    funding_block = ""
+    try:
+        from modules.funding_tracker import build_funding_llm_block
+        _all_pos: list[dict[str, Any]] = []
+        for _w in portfolio_clean or []:
+            if isinstance(_w, dict):
+                _wd = _w.get("data") if isinstance(_w.get("data"), dict) else _w
+                for _p in (_wd.get("positions") or []):
+                    if isinstance(_p, dict):
+                        _all_pos.append(_p)
+        funding_block = build_funding_llm_block(_all_pos, funding_rates)
+    except Exception:  # noqa: BLE001
+        funding_block = ""
+
     # R-BOT-DEFINITIVE WI-8: the fund's hard rules are injected into EVERY
     # FULL ANALYSIS / tesis prompt (constant block, single source).
     rules_block = ""
@@ -1853,6 +1877,7 @@ def compile_raw_data(
         (rules_block + "\n\n" if rules_block else "")
         + (classification_block + "\n" if classification_block else "")
         + (pm_block + "\n\n" if pm_block else "")
+        + (funding_block + "\n\n" if funding_block else "")
         + (catalysts_block + "\n\n" if catalysts_block else "")
         + "RAW DATA (timestamp UTC " + now + "):\n\n"
         "```json\n" + pretty + "\n```\n\n"
