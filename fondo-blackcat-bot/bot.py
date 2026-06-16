@@ -1313,24 +1313,45 @@ async def cmd_setlmec(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
       /setlmec ma50w <valor>   → current 50-week MA (USD)
       /setlmec clear <campo>   → clear one input (back to awaiting)
     """
-    from modules.lmec_state import get_manual_inputs, set_manual_input
+    from modules.lmec_state import (
+        get_computed_inputs,
+        get_computed_meta,
+        get_manual_inputs,
+        set_manual_input,
+    )
 
     args = context.args or []
     if not args:
         cur = get_manual_inputs()
+        comp = get_computed_inputs()
+        meta = get_computed_meta()
+
         def _show(k, label):
-            v = cur.get(k)
-            return f"  • {label}: {v if v is not None else '⏳ awaiting'}"
+            # OVERRIDE wins and is flagged; otherwise show the COMPUTED value.
+            ov = cur.get(k)
+            if ov is not None:
+                return f"  • {label}: {ov}  [OVERRIDE /setlmec]"
+            cv = comp.get(k)
+            if cv is not None:
+                shown = f"{cv:.1f}" if isinstance(cv, float) else cv
+                return f"  • {label}: {shown}  [COMPUTED]"
+            return f"  • {label}: n/d (auto-cómputo sin datos)"
+
+        src = meta.get("source") or "—"
+        wc = meta.get("weekly_close_ts_utc") or "—"
+        fresh = "fresh" if meta.get("fresh") else ("STALE" if meta.get("present") else "—")
         text = (
-            "🧭 /setlmec — inputs manuales LMEC (TradingView)\n\n"
+            "🧭 /setlmec — inputs LMEC (auto-computados; /setlmec = override manual)\n\n"
             + _show("macd_weekly_positive", "MACD semanal positivo") + "\n"
             + _show("rsi_weekly", "RSI semanal") + "\n"
             + _show("ma50w_usd", "MA50w (USD)") + "\n\n"
-            "Uso:\n"
+            + f"📊 Fuente computada: {src} ({fresh})\n"
+            + f"   weekly close: {wc}\n\n"
+            "Uso (override manual):\n"
             "  /setlmec macd pos|neg\n"
             "  /setlmec rsi 72.5\n"
             "  /setlmec ma50w 88000\n"
-            "  /setlmec clear macd|rsi|ma50w"
+            "  /setlmec clear macd|rsi|ma50w   (vuelve a COMPUTED)"
         )
         await update.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
         return
@@ -1345,7 +1366,7 @@ async def cmd_setlmec(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 raise ValueError("campo a limpiar: macd|rsi|ma50w")
             set_manual_input(key, None)
             await update.message.reply_text(
-                f"🧹 LMEC {val} limpiado (vuelve a ⏳ awaiting).", reply_markup=MAIN_KEYBOARD
+                f"🧹 LMEC {val} override limpiado (vuelve a COMPUTED).", reply_markup=MAIN_KEYBOARD
             )
             return
         if field == "macd":
@@ -2758,6 +2779,15 @@ async def _lmec_weekly_recheck_job(application: Application) -> None:
             record_outcome(payload)
         except Exception:  # noqa: BLE001
             log.exception("LMEC weekly: tradermap warm failed (non-fatal)")
+        # R-LMEC-AUTOCOMPUTE: refresh the computed weekly TA snapshot on the
+        # weekly close BEFORE flip detection, so legs 2/3/4 reflect the new
+        # closed candle without any manual /setlmec step.
+        try:
+            from modules.btc_weekly_indicators import refresh_and_persist
+
+            await refresh_and_persist()
+        except Exception:  # noqa: BLE001
+            log.exception("LMEC weekly: indicator refresh failed (non-fatal)")
         from modules.lmec_triggers import detect_and_alert_flips
         from modules.market import fetch_market_data
 
@@ -2800,6 +2830,16 @@ async def _lmec_counter_refresh_job() -> None:
     except Exception:  # noqa: BLE001
         pass
     try:
+        # R-LMEC-AUTOCOMPUTE: recompute the weekly MACD/RSI/MA50w snapshot from
+        # real closed weekly candles BEFORE evaluating, so legs 2/3/4 read the
+        # bot's own computed values (no manual /setlmec needed).
+        try:
+            from modules.btc_weekly_indicators import refresh_and_persist
+
+            await refresh_and_persist()
+        except Exception:  # noqa: BLE001
+            log.exception("LMEC weekly indicator refresh failed (non-fatal)")
+
         from modules.lmec_triggers import evaluate_lmec_triggers
         from modules.market import fetch_market_data
 

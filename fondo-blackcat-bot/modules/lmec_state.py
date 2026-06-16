@@ -69,6 +69,16 @@ LMEC_MA50W_BROKEN_THRESHOLD_WEEKS = _env_int(
     "LMEC_MA50W_BROKEN_THRESHOLD_WEEKS", 2
 )
 
+# R-LMEC-AUTOCOMPUTE (2026-06-16): a persisted computed-indicator snapshot is
+# considered FRESH only while its compute timestamp is within this window. Past
+# it, the snapshot is treated as unavailable (→ "n/d") so a stale prior value
+# can never fire or false-clear a trigger. Default 10 days comfortably covers a
+# weekly cadence plus the 6h refresh job, while expiring a feed that has gone
+# dark for more than one full week.
+LMEC_COMPUTED_MAX_AGE_SEC = _env_int(
+    "LMEC_COMPUTED_MAX_AGE_SEC", 10 * 24 * 3600
+)
+
 
 def _path() -> str:
     try:
@@ -99,6 +109,10 @@ def _empty_state() -> dict[str, Any]:
         # RSI weekly / MA50w), persisted on the Volume via /setlmec so they
         # survive restarts without an env-var redeploy. None = awaiting input.
         "manual_inputs": {},
+        # R-LMEC-AUTOCOMPUTE: the bot's own computed weekly TA snapshot
+        # (MACD/RSI/MA50w from real CLOSED weekly candles). Default source for
+        # legs 2/3/4 when no /setlmec override is set. Empty = not yet computed.
+        "computed_inputs": {},
     }
 
 
@@ -132,6 +146,76 @@ def set_manual_input(key: str, value: Any) -> dict[str, Any]:
     state["manual_inputs"] = mi
     save(state)
     return mi
+
+
+# R-LMEC-AUTOCOMPUTE — computed weekly TA snapshot persistence.
+_COMPUTED_KEYS = ("macd_weekly_positive", "rsi_weekly", "ma50w_usd")
+
+
+def set_computed_inputs(payload: dict[str, Any]) -> None:
+    """Persist the bot-computed weekly indicator snapshot. Never raises.
+
+    ``payload`` is expected to carry the three indicator values plus metadata
+    (``computed_ts_utc``, ``weekly_close_ts_utc``, ``source``, …) produced by
+    :func:`modules.btc_weekly_indicators.refresh_and_persist`.
+    """
+    try:
+        state = load()
+        state["computed_inputs"] = dict(payload or {})
+        save(state)
+    except Exception:  # noqa: BLE001
+        log.exception("lmec_state: set_computed_inputs failed (non-fatal)")
+
+
+def _is_computed_fresh(ci: dict[str, Any], *, now: datetime | None = None) -> bool:
+    """True if the snapshot's compute timestamp is within the freshness window."""
+    ts = ci.get("computed_ts_utc")
+    if not ts:
+        return False
+    try:
+        dt = datetime.fromisoformat(str(ts))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    except Exception:  # noqa: BLE001
+        return False
+    now = now or datetime.now(timezone.utc)
+    age = (now - dt).total_seconds()
+    return 0 <= age <= LMEC_COMPUTED_MAX_AGE_SEC
+
+
+def get_computed_inputs(*, now: datetime | None = None) -> dict[str, Any]:
+    """Return the FRESH computed indicator values (possibly empty). Never raises.
+
+    Only indicator keys whose value is non-None are returned, and only when the
+    snapshot is fresh (see :data:`LMEC_COMPUTED_MAX_AGE_SEC`). A stale or absent
+    snapshot returns ``{}`` so the evaluator treats those legs as "n/d" rather
+    than acting on a stale prior value.
+    """
+    try:
+        ci = load().get("computed_inputs") or {}
+        if not ci or not _is_computed_fresh(ci, now=now):
+            return {}
+        return {k: ci[k] for k in _COMPUTED_KEYS if ci.get(k) is not None}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def get_computed_meta(*, now: datetime | None = None) -> dict[str, Any]:
+    """Return the snapshot metadata (source, timestamps, freshness). Never raises."""
+    try:
+        ci = load().get("computed_inputs") or {}
+        return {
+            "present": bool(ci),
+            "fresh": _is_computed_fresh(ci, now=now) if ci else False,
+            "computed_ts_utc": ci.get("computed_ts_utc"),
+            "weekly_close_ts_utc": ci.get("weekly_close_ts_utc"),
+            "source": ci.get("source"),
+            "weekly_boundary": ci.get("weekly_boundary"),
+            "n_closes": ci.get("n_closes"),
+            "last_close": ci.get("last_close"),
+        }
+    except Exception:  # noqa: BLE001
+        return {"present": False, "fresh": False}
 
 
 def load() -> dict[str, Any]:

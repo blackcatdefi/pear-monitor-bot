@@ -106,12 +106,38 @@ def _env_bool_optional(name: str) -> bool | None:
 
 
 def _manual_lmec_inputs() -> dict[str, object]:
-    """P1.9: BCD's persisted /setlmec inputs (MACD/RSI/MA50w). Never raises."""
+    """P1.9: BCD's persisted /setlmec inputs (MACD/RSI/MA50w). Never raises.
+
+    These are the MANUAL OVERRIDE layer — they take precedence over the
+    bot-computed values when explicitly set via /setlmec.
+    """
     try:
         from modules.lmec_state import get_manual_inputs
         return get_manual_inputs()
     except Exception:  # noqa: BLE001
         return {}
+
+
+def _computed_lmec_inputs() -> dict[str, object]:
+    """R-LMEC-AUTOCOMPUTE: the bot's own weekly TA snapshot (MACD/RSI/MA50w),
+    computed from real CLOSED weekly candles. Default source for legs 2/3/4 when
+    no /setlmec override is set. Returns only FRESH, non-None values (stale or
+    missing → {} so the leg degrades to n/d). Network-free read. Never raises."""
+    try:
+        from modules.lmec_state import get_computed_inputs
+        return get_computed_inputs()
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+# Human-readable tag appended to a leg detail so every LMEC surface always
+# shows whether the number is the bot's computed value or a manual override.
+_SOURCE_TAG = {
+    "override": "[OVERRIDE /setlmec]",
+    "computed": "[COMPUTED]",
+    "tradermap": "[tradermap]",
+    "env": "[env]",
+}
 
 
 def _btc_price_from_market(market: dict[str, Any] | None) -> float | None:
@@ -234,58 +260,77 @@ def evaluate_lmec_triggers(market: dict[str, Any] | None = None) -> dict[str, An
         })
 
     # ── 2. Weekly MACD positive ──────────────────────────────────────
-    # Precedence: TraderMap override > manual /setlmec input > LMEC env var.
+    # R-LMEC-AUTOCOMPUTE precedence (legs 2/3/4):
+    #   manual /setlmec OVERRIDE > bot COMPUTED > TraderMap > LMEC env var.
+    # The computed value is the bot's own MACD on real closed weekly candles;
+    # /setlmec only wins when BCD has explicitly set an override.
     _manual = _manual_lmec_inputs()
-    if "macd_weekly_positive" in tm_over:
-        macd_pos = bool(tm_over["macd_weekly_positive"])
-    elif _manual.get("macd_weekly_positive") is not None:
-        macd_pos = bool(_manual["macd_weekly_positive"])
+    _computed = _computed_lmec_inputs()
+    macd_src = None
+    if _manual.get("macd_weekly_positive") is not None:
+        macd_pos = bool(_manual["macd_weekly_positive"]); macd_src = "override"
+    elif _computed.get("macd_weekly_positive") is not None:
+        macd_pos = bool(_computed["macd_weekly_positive"]); macd_src = "computed"
+    elif "macd_weekly_positive" in tm_over:
+        macd_pos = bool(tm_over["macd_weekly_positive"]); macd_src = "tradermap"
     else:
         macd_pos = _env_bool_optional("LMEC_MACD_WEEKLY_POSITIVE")
+        macd_src = "env" if macd_pos is not None else None
     if macd_pos is None:
         conditions.append({
             "id": "macd_weekly_positive",
             "name": "MACD semanal terreno positivo",
             "status": "AWAITING_BCD",
-            "detail": "⏳ esperando input de BCD (MACD semanal vía TradingView) — usá /setlmec macd <pos|neg>",
+            "source": "none",
+            "detail": "⏳ n/d — auto-cómputo semanal sin datos; esperando feed o /setlmec macd <pos|neg> (override)",
         })
     else:
+        tag = _SOURCE_TAG.get(macd_src or "", "")
         conditions.append({
             "id": "macd_weekly_positive",
             "name": "MACD semanal terreno positivo",
             "status": "VALIDA" if macd_pos else "INVALIDA",
+            "source": macd_src,
             "detail": (
-                "MACD weekly > 0 (bull crossover)"
-                if macd_pos
-                else "MACD weekly ≤ 0 (bear/neutro)"
+                ("MACD weekly > 0 (bull crossover)" if macd_pos
+                 else "MACD weekly ≤ 0 (bear/neutro)") + (f" {tag}" if tag else "")
             ),
         })
 
     # ── 3. Weekly RSI > 70 ───────────────────────────────────────────
-    # TraderMap override > LMEC env var.
-    if "rsi_weekly" in tm_over:
+    # Precedence: manual /setlmec OVERRIDE > bot COMPUTED > TraderMap > env.
+    rsi: float | None = None
+    rsi_src = None
+    if _manual.get("rsi_weekly") is not None:
         try:
-            rsi: float | None = float(tm_over["rsi_weekly"])
+            rsi = float(_manual["rsi_weekly"]); rsi_src = "override"
         except (TypeError, ValueError):
             rsi = None
-    elif _manual.get("rsi_weekly") is not None:
+    if rsi is None and _computed.get("rsi_weekly") is not None:
         try:
-            rsi = float(_manual["rsi_weekly"])
+            rsi = float(_computed["rsi_weekly"]); rsi_src = "computed"
         except (TypeError, ValueError):
             rsi = None
-    else:
-        rsi = _env_float("LMEC_RSI_WEEKLY", None)
+    if rsi is None and "rsi_weekly" in tm_over:
+        try:
+            rsi = float(tm_over["rsi_weekly"]); rsi_src = "tradermap"
+        except (TypeError, ValueError):
+            rsi = None
     if rsi is None:
-        rsi = _env_float("LMEC_RSI_WEEKLY", None)
+        env_rsi = _env_float("LMEC_RSI_WEEKLY", None)
+        if env_rsi is not None:
+            rsi = env_rsi; rsi_src = "env"
     rsi_neutral_band = _env_float("LMEC_RSI_NEUTRAL_BAND", 5.0) or 5.0
     if rsi is None:
         conditions.append({
             "id": "rsi_weekly_above_70",
             "name": "RSI semanal > 70",
             "status": "AWAITING_BCD",
-            "detail": "⏳ esperando input de BCD (RSI semanal vía TradingView) — usá /setlmec rsi <valor>",
+            "source": "none",
+            "detail": "⏳ n/d — auto-cómputo semanal sin datos; esperando feed o /setlmec rsi <valor> (override)",
         })
     else:
+        tag = _SOURCE_TAG.get(rsi_src or "", "")
         if rsi > 70.0:
             status = "VALIDA"
             detail = f"RSI weekly {rsi:.1f} > 70 (overheated)"
@@ -301,7 +346,8 @@ def evaluate_lmec_triggers(market: dict[str, Any] | None = None) -> dict[str, An
             "id": "rsi_weekly_above_70",
             "name": "RSI semanal > 70",
             "status": status,
-            "detail": detail,
+            "source": rsi_src,
+            "detail": detail + (f" {tag}" if tag else ""),
         })
 
     # ── 4. 50-week MA broken with sustained force ────────────────────
@@ -309,20 +355,28 @@ def evaluate_lmec_triggers(market: dict[str, Any] | None = None) -> dict[str, An
     # is now AUTO-MANAGED via lmec_state.update_weeks_counter, with the
     # legacy LMEC_MA50W_BROKEN_WEEKS env var as manual override).
     # Precedence: TraderMap override > manual /setlmec input > LMEC env var.
-    if "ma50w" in tm_over:
+    # Precedence: manual /setlmec OVERRIDE > bot COMPUTED > TraderMap > env.
+    ma50w: float | None = None
+    ma50w_src = None
+    if _manual.get("ma50w_usd") is not None:
         try:
-            ma50w: float | None = float(tm_over["ma50w"])
+            ma50w = float(_manual["ma50w_usd"]); ma50w_src = "override"
         except (TypeError, ValueError):
             ma50w = None
-    elif _manual.get("ma50w_usd") is not None:
+    if ma50w is None and _computed.get("ma50w_usd") is not None:
         try:
-            ma50w = float(_manual["ma50w_usd"])
+            ma50w = float(_computed["ma50w_usd"]); ma50w_src = "computed"
         except (TypeError, ValueError):
             ma50w = None
-    else:
-        ma50w = _env_float("LMEC_MA50W_USD", None)
+    if ma50w is None and "ma50w" in tm_over:
+        try:
+            ma50w = float(tm_over["ma50w"]); ma50w_src = "tradermap"
+        except (TypeError, ValueError):
+            ma50w = None
     if ma50w is None:
-        ma50w = _env_float("LMEC_MA50W_USD", None)
+        env_ma = _env_float("LMEC_MA50W_USD", None)
+        if env_ma is not None:
+            ma50w = env_ma; ma50w_src = "env"
 
     # R-BOT-LMEC-AUTOFEED: auto-managed counter (lmec_state.json on Railway Volume).
     # Manual env-var override still wins so BCD can force a value if needed.
@@ -347,8 +401,8 @@ def evaluate_lmec_triggers(market: dict[str, Any] | None = None) -> dict[str, An
         # P1.9: if the only thing missing is BCD's MA50w value, this is an
         # AWAITING_BCD state (clean) rather than a generic UNKNOWN error.
         if ma50w is None:
-            detail = ("⏳ esperando input de BCD (MA50w semanal vía TradingView) "
-                      "— usá /setlmec ma50w <valor>")
+            detail = ("⏳ n/d — auto-cómputo MA50w semanal sin datos; "
+                      "esperando feed o /setlmec ma50w <valor> (override)")
             status_ma = "AWAITING_BCD"
         else:
             detail = "Inputs incompletos — falta el feed de BTC o el contador de semanas"
@@ -357,9 +411,11 @@ def evaluate_lmec_triggers(market: dict[str, Any] | None = None) -> dict[str, An
             "id": "ma50w_broken_sustained",
             "name": "MA50w rota con fuerza sostenida 2-3 semanas",
             "status": status_ma,
+            "source": ma50w_src or "none",
             "detail": detail,
         })
     else:
+        tag = _SOURCE_TAG.get(ma50w_src or "", "")
         gap_ma_pct = (btc_price - ma50w) / ma50w * 100.0
         if weeks_broken >= sustained_min_weeks and btc_price > ma50w:
             status = "VALIDA"
@@ -381,18 +437,36 @@ def evaluate_lmec_triggers(market: dict[str, Any] | None = None) -> dict[str, An
             "id": "ma50w_broken_sustained",
             "name": "MA50w rota con fuerza sostenida 2-3 semanas",
             "status": status,
-            "detail": detail,
+            "source": ma50w_src,
+            "detail": detail + (f" {tag} MA50w" if tag else ""),
         })
 
     triggered = sum(1 for c in conditions if c["status"] == "VALIDA")
 
-    # R-BOT-LMEC-AUTOFEED: surface scraper health + indicator data source.
-    if tm_over and not tradermap_unhealthy:
+    # R-LMEC-AUTOCOMPUTE: surface the active indicator source. Computed is the
+    # live default; "override" appears when any leg used a /setlmec override.
+    leg_sources = {c.get("source") for c in conditions if c.get("source")}
+    if "override" in leg_sources and "computed" in leg_sources:
+        data_source = "computed+override"
+    elif "override" in leg_sources:
+        data_source = "override"
+    elif "computed" in leg_sources:
+        data_source = "computed"
+    elif tm_over and not tradermap_unhealthy:
         data_source = "tradermap"
     elif tradermap_unhealthy:
         data_source = "env (tradermap unhealthy)"
     else:
         data_source = "env"
+
+    # Computed-snapshot metadata (source/timestamps/freshness) for surfaces.
+    computed_meta: dict[str, Any] = {}
+    try:
+        from modules.lmec_state import get_computed_meta
+
+        computed_meta = get_computed_meta()
+    except Exception:  # noqa: BLE001
+        computed_meta = {}
 
     result = {
         "ts_utc": datetime.now(timezone.utc).isoformat(),
@@ -403,6 +477,7 @@ def evaluate_lmec_triggers(market: dict[str, Any] | None = None) -> dict[str, An
         "triggered_count": triggered,
         "total": len(conditions),
         "data_source": data_source,
+        "computed_meta": computed_meta,
         "tradermap_unhealthy": tradermap_unhealthy,
         "autofeed_enabled": autofeed_enabled,
     }
@@ -460,6 +535,7 @@ def format_lmec_block(result: dict[str, Any] | None = None) -> str:
         "NEUTRO": "⚠️",
         "INVALIDA": "🔴",
         "UNKNOWN": "❓",
+        "AWAITING_BCD": "⏳",
     }
     for c in result.get("conditions") or []:
         icon = icon_map.get(c.get("status", "UNKNOWN"), "❓")
@@ -499,6 +575,20 @@ def format_lmec_status(result: dict[str, Any] | None = None) -> str:
     lines.append("🔬 /lmec_status — bear-invalidation telemetry")
     lines.append("")
     lines.append(format_lmec_block(result))
+    lines.append("")
+    lines.append("── Computed weekly TA (auto) ──")
+    cm = result.get("computed_meta") or {}
+    if cm.get("present"):
+        fresh = "fresh" if cm.get("fresh") else "STALE→n/d"
+        lines.append(f"  source: {cm.get('source') or '?'} ({fresh})")
+        lines.append(f"  weekly close: {cm.get('weekly_close_ts_utc') or '—'}")
+        lines.append(f"  boundary: {cm.get('weekly_boundary') or '—'}")
+        lines.append(
+            f"  computed at: {cm.get('computed_ts_utc') or '—'} "
+            f"(n={cm.get('n_closes') or '?'} closes, last={cm.get('last_close')})"
+        )
+    else:
+        lines.append("  (no computed snapshot yet — runs on the 6h refresh / weekly job)")
     lines.append("")
     lines.append("── Persisted state (lmec_state.json) ──")
     lines.append(f"  weeks counter (Leg 4): {st.get('ma50w_consecutive_weeks', 0)}")
