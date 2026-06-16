@@ -1,16 +1,23 @@
-"""Round 17 — Kill triggers monitor para basket v5 + flywheel.
+"""Kill triggers monitor para el fondo (post-migración a Portfolio Margin).
 
 Reglas embebidas en código (zero-config) — son los kill scenarios que BCD
 decidió manualmente. Si una condición se cumple, alerta Telegram con
 sugerencia ("alert_only" | "suggest_close"). NUNCA cierra automáticamente
 posiciones — la decisión final es siempre humana.
 
-Triggers actuales:
-  1. BTC > $82K sostenido 4h (invalida bear trap)
-  2. BTC en zona DCA $63-65K (zona verde multipropósito — suggest_close)
-  3. HF flywheel < 1.10 (zona crítica → suggest_close)
-  4. Basket UPnL < -$2,000 (drawdown extremo → alert_only)
-  5. Funding HL negativo + Hormuz signal (geopolitical) — placeholder
+Triggers actuales (cada uno con input LIVE — nunca valores fabricados):
+  1. BTC > $82K sostenido 4h (invalida bear trap) — live spot price.
+  2. BTC en zona DCA $63-65K (zona verde multipropósito) — live spot price.
+  3. PM aave-HF < 1.10 (zona crítica → suggest_close) — fuente ÚNICA
+     ``modules.portfolio_margin.compute_pm_state`` sobre el colateral HYPE
+     del Portfolio Margin nativo (HL Earn), MISMA que el panel y el canal
+     real-risk. NO lee HyperLend (protocolo muerto, el fondo no lo usa).
+  4. Basket UPnL < -$2,000 (drawdown extremo → alert_only) — live perps.
+
+R-BOT-DEFINITIVE-KILLCLEAN (2026-06-15): eliminado el trigger
+``ueth_apy_above_10`` (UETH borrow APY del flywheel HyperLend pair-trade).
+Ese concepto está MUERTO — no mapea a ninguna posición viva y disparaba ruido
+("KILL TRIGGER ACTIVE / UETH borrow APY = 26.21%") contra el mandato vigente.
 
 Rate limit: cada trigger dispara MÁX 1× por día (key = trigger_id+UTC date).
 """
@@ -178,35 +185,48 @@ async def _evaluate_btc_dca_zone() -> TriggerResult:
     )
 
 
-async def _evaluate_hf_flywheel() -> TriggerResult:
-    from modules.hyperlend import fetch_all_hyperlend
-    hl = await fetch_all_hyperlend()
-    hf_min: float | None = None
-    if isinstance(hl, list):
-        for r in hl:
-            if r.get("status") != "ok":
-                continue
-            hf = r["data"].get("health_factor")
-            if hf is not None and (hf_min is None or hf < hf_min):
-                hf_min = float(hf)
+async def _evaluate_pm_hf() -> TriggerResult:
+    """PM aave-HF < 1.10 on the primary HYPE-collateral Portfolio Margin.
+
+    Single source of truth: ``compute_pm_state`` over live HyperLiquid wallet
+    data (the SAME math the DESTACADO panel and the real-risk alert channel
+    use). NEVER reads HyperLend. If PM data is unavailable or there is no debt
+    (no liquidation risk), the trigger reports n/d and NEVER fires on a
+    fabricated or stale value.
+    """
+    aave_hf: float | None = None
+    has_debt = False
+    try:
+        from modules.portfolio import fetch_all_wallets
+        from modules.pm_context import select_primary_pm_state
+        wallets = await fetch_all_wallets()
+        pm = select_primary_pm_state(wallets, None)
+        if pm is not None and pm.has_data:
+            has_debt = pm.debt_usd > 1.0
+            if has_debt and pm.aave_hf > 0:
+                aave_hf = float(pm.aave_hf)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("pm_hf trigger: PM state unavailable: %s", exc)
+
     fired = False
     distance = "far"
-    detail = ""
-    if hf_min is not None:
-        if hf_min < 1.10:
-            fired = True
-            distance = "ACTIVE"
-            detail = f"HF flywheel = {hf_min:.3f} < 1.10 — CRITICAL ZONE"
-        elif hf_min < 1.20:
-            distance = "near"
-            detail = f"HF flywheel = {hf_min:.3f} (monitor zone)"
-        else:
-            detail = f"HF flywheel = {hf_min:.3f} (healthy)"
+    if not has_debt:
+        # No USDC/USDH borrowed → no liquidation risk → nothing to fire on.
+        detail = "PM aave-HF n/d (sin deuda — no hay riesgo de liquidación)"
+    elif aave_hf is None:
+        detail = "PM aave-HF n/d (dato no disponible)"
+    elif aave_hf < 1.10:
+        fired = True
+        distance = "ACTIVE"
+        detail = f"PM aave-HF = {aave_hf:.3f} < 1.10 — ZONA CRÍTICA"
+    elif aave_hf < 1.20:
+        distance = "near"
+        detail = f"PM aave-HF = {aave_hf:.3f} (zona observación)"
     else:
-        detail = "HF data unavailable"
+        detail = f"PM aave-HF = {aave_hf:.3f} (saludable)"
     return TriggerResult(
-        trigger_id="hf_flywheel_below_110",
-        name="HF flywheel < 1.10 (critical zone)",
+        trigger_id="pm_hf_below_110",
+        name="PM aave-HF < 1.10 (colateral HYPE — zona crítica)",
         fired=fired,
         distance_text=distance,
         detail=detail,
@@ -261,47 +281,11 @@ async def _evaluate_basket_drawdown() -> TriggerResult:
     )
 
 
-async def _evaluate_ueth_borrow_apy() -> TriggerResult:
-    from modules.hyperlend import fetch_reserve_rates
-    payload = await fetch_reserve_rates()
-    apy: float | None = None
-    if payload.get("status") == "ok":
-        rates_map = payload.get("rates") or {}
-        # rates_map keyed by symbol; accept UETH or eth_chain entries
-        for sym, v in rates_map.items():
-            sym_u = (sym or "").upper()
-            if sym_u in ("UETH", "WETH", "ETH"):
-                apy = float(v.get("apy_borrow") or 0.0) * 100
-                break
-    fired = False
-    distance = "far"
-    if apy is None:
-        detail = "UETH APY data unavailable"
-    elif apy > 10:
-        fired = True
-        distance = "ACTIVE"
-        detail = f"UETH borrow APY = {apy:.2f}% > 10% (unsustainable for flywheel)"
-    elif apy > 6:
-        distance = "near"
-        detail = f"UETH borrow APY = {apy:.2f}% > 6% (warning zone)"
-    else:
-        detail = f"UETH borrow APY = {apy:.2f}%"
-    return TriggerResult(
-        trigger_id="ueth_apy_above_10",
-        name="UETH borrow APY > 10% (flywheel unsustainable)",
-        fired=fired,
-        distance_text=distance,
-        detail=detail,
-        action="alert_only",
-    )
-
-
 _TRIGGERS: list[Callable[[], Awaitable[TriggerResult]]] = [
     _evaluate_btc_above_82k,
     _evaluate_btc_dca_zone,
-    _evaluate_hf_flywheel,
+    _evaluate_pm_hf,
     _evaluate_basket_drawdown,
-    _evaluate_ueth_borrow_apy,
 ]
 
 
@@ -320,7 +304,7 @@ async def evaluate_all() -> list[TriggerResult]:
 
 
 def format_kill_status(results: list[TriggerResult]) -> str:
-    lines = ["🎯 KILL TRIGGERS — basket v5 + flywheel", "─" * 40]
+    lines = ["🎯 KILL TRIGGERS — basket + Portfolio Margin", "─" * 40]
     for r in results:
         if r.fired:
             tag = "🚨 ACTIVE"

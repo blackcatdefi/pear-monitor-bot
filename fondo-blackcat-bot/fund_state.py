@@ -87,14 +87,22 @@ BASKET_V5_PLAN: dict[str, object] = {
     ],
 }
 
-# ─── Flywheel HyperLend — by-design pair trade ─────────────────────────────
+# ─── Core risk mechanic — Portfolio Margin nativo (HL Earn) ────────────────
+# R-BOT-DEFINITIVE-KILLCLEAN (2026-06-15): el flywheel HyperLend pair-trade
+# (LONG kHYPE colateral / SHORT UETH deuda) ESTÁ MUERTO — el fondo migró 100% a
+# HyperLiquid Portfolio Margin. Ya no existe deuda UETH, ni borrow APY, ni
+# utilization de pool HyperLend. Esta nota describe el ÚNICO mecanismo de riesgo
+# vivo para que el LLM no razone sobre el concepto muerto.
 FLYWHEEL_NOTE = (
-    "El flywheel HyperLend es un pair trade INTENCIONAL LONG kHYPE / SHORT "
-    "ETH. La exposición direccional NO es un riesgo — es la tesis. Solo "
-    "alertar si: (a) HF < 1.10, (b) UETH utilization > 90% (riesgo liquidez "
-    "pool), (c) APY borrow UETH > 6% (costo del pair trade se hace "
-    "insostenible). ETH outperform HYPE NO es alerta — es el caso adverso "
-    "intrínseco de la estrategia, no un bug."
+    "El core del fondo es Portfolio Margin nativo en HyperLiquid: el HYPE spot "
+    "es colateral cross y se pide prestado SOLO USDC/USDH, cubierto por el short "
+    "book (el basket = el hedge). El riesgo real de liquidación se mide con el "
+    "aave-HF (Σ valor×liq_threshold / deuda, liq_threshold=0.5+0.5×ltv), el liq "
+    "price del HYPE y la utilización del borrow. Solo alertar si: (a) aave-HF < "
+    "1.10 (zona acción), (b) el HYPE se acerca a su liq price, (c) hay deuda "
+    "USDC abierta SIN shorts (naked long — viola la regla dura del hedge). NO "
+    "existe HyperLend, NO existe deuda UETH ni borrow APY: cualquier mención de "
+    "eso es un concepto muerto y no debe reportarse."
 )
 
 # ─── Trade classifier — distinguish Core DCA vs Basket trades ──────────────
@@ -135,8 +143,8 @@ BCD_DCA_PLAN: dict[str, dict] = {
             {"pct": 32, "range": [1100, 1200], "status": "pending"},
             {"pct": 25, "range": [900, 1000], "status": "pending"},
         ],
-        # Zona donde flipeamos UETH debt a stable (USDT0/USDC) para
-        # congelar el short ETH y evitar mark-to-market adverso en el piso.
+        # (DEPRECADO R-BOT-DEFINITIVE-KILLCLEAN 2026-06-15) Antes marcaba la
+        # zona del flywheel-pair-trade muerto; ya no la consume ninguna alerta.
         "debt_flip_range": [900, 1200],
     },
     "HYPE": {

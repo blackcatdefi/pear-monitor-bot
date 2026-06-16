@@ -37,15 +37,16 @@ GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
 
 # ─── Chains ─────────────────────────────────────────────────────────────────
 HYPERLIQUID_API = os.getenv("HYPERLIQUID_API", "https://api.hyperliquid.xyz")
+# HyperEVM RPC sigue VIVO: lo usa modules.bounce_tech (leveraged tokens en
+# HyperEVM). NO tiene relación con HyperLend (protocolo Aave-fork muerto).
 HYPEREVM_RPC = os.getenv("HYPEREVM_RPC", "https://rpc.hyperliquid.xyz/evm")
 HYPEREVM_CHAIN_ID = 999
 
-HYPERLEND_POOL_ADDRESS = os.getenv(
-    "HYPERLEND_POOL_ADDRESS",
-    "0x00A89d7a5A02160f20150EbEA7a2b5E4879A1A8b",
-)
+# R-BOT-DEFINITIVE-KILLCLEAN (2026-06-15): HYPERLEND_POOL_ADDRESS y
+# HYPERLEND_WALLET ELIMINADOS — el fondo no usa HyperLend y ningún code path
+# llama ya a su Pool contract / RPC.
 
-# ─── Fund wallets (HyperLiquid + HyperLend) — env-driven ───────────────────
+# ─── Fund wallets (HyperLiquid) — env-driven ───────────────────────────────
 def _load_fund_wallets() -> dict[str, str]:
     wallets: dict[str, str] = {}
     for i in range(1, 6):
@@ -62,9 +63,6 @@ def _load_fund_wallets() -> dict[str, str]:
     return wallets
 
 FUND_WALLETS: dict[str, str] = _load_fund_wallets()
-
-# Wallet usada para HyperLend flywheel (colateral kHYPE) — env-driven
-HYPERLEND_WALLET = os.getenv("HYPERLEND_WALLET", "").strip().lower()
 
 # ─── R-PMCORE (2026-06-01) — POST-MIGRACIÓN a HyperLiquid Portfolio Margin ──
 # El fondo migró el 100% del capital FUERA de HyperLend y DENTRO de

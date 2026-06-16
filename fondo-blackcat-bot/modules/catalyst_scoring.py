@@ -100,19 +100,22 @@ async def _active_position_keys() -> set[str]:
     except Exception:
         pass
 
+    # R-BOT-DEFINITIVE-KILLCLEAN (2026-06-15): the HyperLend flywheel lookup was
+    # removed (dead protocol). The live HYPE-collateral exposure is the native
+    # Portfolio Margin — key on it via compute_pm_state, never HyperLend.
     try:
-        from modules.hyperlend import fetch_all_hyperlend
-        hl = await fetch_all_hyperlend()
-        if isinstance(hl, list):
-            for entry in hl:
-                if not isinstance(entry, dict):
-                    continue
-                hf = entry.get("hf") or entry.get("health_factor")
-                if isinstance(hf, (int, float)) and hf > 0:
-                    keys.add("flywheel")
-                    break
+        from modules.portfolio import fetch_all_wallets
+        from modules.pm_context import select_primary_pm_state
+        wallets = await fetch_all_wallets()
+        pm = select_primary_pm_state(wallets, None)
+        if pm is not None and pm.has_data and pm.collateral_usd > 0:
+            keys.add("portfolio_margin")
+            # Back-compat: existing catalyst events may tag the HYPE-collateral
+            # core exposure as "flywheel" (the word now describes the live PM
+            # mechanic, not the dead HyperLend pair-trade).
+            keys.add("flywheel")
     except Exception:
-        log.exception("catalyst_scoring: hyperlend lookup failed")
+        log.exception("catalyst_scoring: PM state lookup failed")
 
     # R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): Trade del Ciclo (Blofin) ELIMINADO.
 

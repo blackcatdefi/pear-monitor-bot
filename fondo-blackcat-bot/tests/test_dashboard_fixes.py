@@ -235,103 +235,13 @@ class TestDashboardUpnlMatchesPosiciones:
 # ---------------------------------------------------------------------------
 
 class TestDashboardFlywheelShowsAssetSymbols:
-    """hyperlend_reader must persist collateral/debt symbols so the flywheel
-    card shows 'kHYPE / UETH' even when per-reserve RPC balanceOf() fails."""
+    """Dashboard rendering with the PM-era state (HyperLend flywheel CLOSED).
 
-    def test_persist_ok_stores_symbols(self):
-        """_persist_ok caches collateral_symbol and debt_symbol."""
-        from auto.hyperlend_reader import _persist_ok
-
-        cache: dict = {}
-        entry = {
-            "status": "ok",
-            "hf_status": "OK",
-            "data": {
-                "wallet": "0xa44e",
-                "health_factor": 1.214,
-                "total_collateral_usd": 72700.0,
-                "total_debt_usd": 30500.0,
-                "collateral_symbol": "kHYPE",
-                "collateral_balance": 1750.0,
-                "debt_symbol": "UETH",
-                "debt_balance": 19.27,
-            },
-        }
-        _persist_ok(entry, cache)
-        stored = cache.get("0xa44e")
-        assert stored is not None, "Cache entry missing"
-        assert stored.get("collateral_symbol") == "kHYPE", (
-            f"Expected kHYPE, got {stored.get('collateral_symbol')}"
-        )
-        assert stored.get("debt_symbol") == "UETH", (
-            f"Expected UETH, got {stored.get('debt_symbol')}"
-        )
-        assert abs(stored.get("collateral_balance", 0) - 1750.0) < 0.01
-        assert abs(stored.get("debt_balance", 0) - 19.27) < 0.01
-
-    def test_maybe_recover_restores_symbols(self):
-        """_maybe_recover_from_cache restores symbols from persisted cache entry."""
-        from auto.hyperlend_reader import _maybe_recover_from_cache
-
-        cache = {
-            "0xa44e": {
-                "hf": 1.214,
-                "collateral_usd": 72700.0,
-                "debt_usd": 30500.0,
-                "collateral_symbol": "kHYPE",
-                "collateral_balance": 1750.0,
-                "debt_symbol": "UETH",
-                "debt_balance": 19.27,
-                "ts_epoch": 1746270000.0,
-                "ts_utc": "2026-05-03T10:00:00+00:00",
-            }
-        }
-        bad_entry = {
-            "status": "ok",
-            "data": {
-                "wallet": "0xa44e",
-                "total_collateral_usd": 72700.0,
-                "total_debt_usd": 30500.0,
-                "health_factor": float("nan"),  # per-reserve failed
-                "collateral_symbol": None,
-                "collateral_balance": 0.0,
-                "debt_symbol": None,
-                "debt_balance": 0.0,
-            },
-        }
-        recovered = _maybe_recover_from_cache(bad_entry, cache)
-        data = recovered.get("data") or {}
-        assert data.get("collateral_symbol") == "kHYPE", (
-            f"Expected kHYPE after recovery, got {data.get('collateral_symbol')}"
-        )
-        assert data.get("debt_symbol") == "UETH", (
-            f"Expected UETH after recovery, got {data.get('debt_symbol')}"
-        )
-        assert abs(data.get("collateral_balance", 0) - 1750.0) < 0.01
-
-    def test_entries_from_cache_only_returns_symbols(self):
-        """_entries_from_cache_only must return non-None symbols from cache."""
-        from auto.hyperlend_reader import _entries_from_cache_only
-
-        cache = {
-            "0xa44e": {
-                "hf": 1.214,
-                "collateral_usd": 72700.0,
-                "debt_usd": 30500.0,
-                "collateral_symbol": "kHYPE",
-                "collateral_balance": 1750.0,
-                "debt_symbol": "UETH",
-                "debt_balance": 19.27,
-                "ts_epoch": 1746270000.0,
-                "ts_utc": "2026-05-03T10:00:00+00:00",
-            }
-        }
-        entries = _entries_from_cache_only(cache)
-        assert len(entries) == 1
-        data = entries[0].get("data") or {}
-        assert data.get("collateral_symbol") == "kHYPE"
-        assert data.get("debt_symbol") == "UETH"
-        assert abs(data.get("collateral_balance", 0) - 1750.0) < 0.01
+    R-BOT-DEFINITIVE-KILLCLEAN (2026-06-15): the three hyperlend_reader cache
+    tests (_persist_ok / _maybe_recover_from_cache / _entries_from_cache_only)
+    were removed — that module is deleted and the fund no longer reads
+    HyperLend. The surviving tests exercise the dashboard's graceful render
+    when there is no flywheel state (main_flywheel=None)."""
 
     def test_secondary_flywheel_format_no_zero_placeholder(self):
         """Secondary flywheel renders '—' not '0.0000' when balance is zero/None."""

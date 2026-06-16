@@ -5,7 +5,6 @@ desde snapshots) y devuelve un block compacto. Sirve como reemplazo barato
 de /reporte para BCD cuando solo quiere ver capital + HF + UPnL rápido.
 
 Sources tocadas:
-    - hyperlend.fetch_all_hyperlend()  (cache 30s on second call)
     - market.fetch_market_data()       (cache 60s)
     - portfolio.fetch_all_wallets()    (cached if available)
     - fund_state.BASKET_V5_STATUS
@@ -132,26 +131,13 @@ async def build_status_block() -> str:
     lines.append("🐱‍⬛ STATUS — " + now_utc)
     lines.append(sep)
     lines.append(f"💰 Capital total: {_fmt_usd(total_capital)}")
-    lines.append(f"   HL collateral: {_fmt_usd(hl_collateral_usd)} | debt: {_fmt_usd(hl_debt_usd)}")
     lines.append(f"   Account Value (perp+USDC unif.): {_fmt_usd(perp_account_value)}")
     lines.append(f"📊 UPnL perp: {_fmt_signed_usd(perp_unrealized)}")
     lines.append("")
-    if flywheel_hf is not None:
-        try:
-            hf_str = f"{flywheel_hf:.3f}"
-        except Exception:
-            hf_str = "—"
-        lines.append(f"🔁 Flywheel HF: {hf_str}")
-        if flywheel_collateral_bal is not None and flywheel_collateral_sym:
-            lines.append(
-                f"   Collateral: {flywheel_collateral_bal:.2f} {flywheel_collateral_sym}"
-            )
-        if flywheel_debt_bal is not None and flywheel_debt_sym:
-            lines.append(
-                f"   Debt: {flywheel_debt_bal:.4f} {flywheel_debt_sym}"
-            )
-    else:
-        lines.append("🔁 Flywheel: no active collateral or RPC offline")
+    # R-BOT-DEFINITIVE-KILLCLEAN (2026-06-15): el flywheel HyperLend está MUERTO.
+    # El riesgo de liquidación vivo es el Portfolio Margin nativo (aave-HF / liq
+    # price sobre el colateral HYPE) — ver /hf y el panel PM de /reporte.
+    lines.append("⚖️ PM (riesgo real): ver /hf · panel PM en /reporte")
     lines.append("")
     lines.append(f"🎯 Basket v5: {BASKET_V5_STATUS}")
     if basket_active:

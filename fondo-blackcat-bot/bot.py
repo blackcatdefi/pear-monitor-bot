@@ -52,36 +52,10 @@ from modules.errors_log import (
     with_error_logging,
 )
 from modules.health_server import start_health_server, stop_health_server
-from modules.hyperlend import fetch_all_hyperlend as _legacy_fetch_all_hyperlend, fetch_reserve_rates  # noqa: E402
-
-# R-FINAL bug-2: route bot.py's fetch_all_hyperlend through the cache-aware
-# reader so /reporte /hf /posiciones never show misleading "HF=∞" when the
-# HyperEVM RPC rate-limits us. The legacy fetcher's synthetic-empty
-# placeholder is replaced with the last-known HF + age. Other modules
-# (alerts.py / flywheel.py) get their already-bound symbol patched at
-# startup via _apply_hl_runtime_patch() (called from post_init).
-from auto.hyperlend_reader import read_all_with_cache as _hl_read_with_cache  # noqa: E402
-
-
-async def fetch_all_hyperlend():  # type: ignore[no-redef]
-    return await _hl_read_with_cache(fetch_fn=_legacy_fetch_all_hyperlend)
-
-
-def _apply_hl_runtime_patch() -> None:
-    """Replace already-bound fetch_all_hyperlend symbols in downstream
-    modules with the cache-aware wrapper. Called from post_init AFTER all
-    module imports are complete so we don't fight import order.
-    """
-    import sys
-
-    for mod_name in ("modules.hyperlend", "modules.flywheel", "modules.alerts"):
-        mod = sys.modules.get(mod_name)
-        if mod is None:
-            continue
-        try:
-            setattr(mod, "fetch_all_hyperlend", fetch_all_hyperlend)
-        except Exception:  # noqa: BLE001
-            pass
+# R-BOT-DEFINITIVE-KILLCLEAN (2026-06-15): HyperLend reader ELIMINADO. El fondo
+# no usa HyperLend (protocolo Aave-fork muerto). El estado de riesgo vivo es el
+# Portfolio Margin nativo (compute_pm_state) — ningún code path llama ya a un
+# endpoint de HyperLend / UETH borrow APY.
 from modules.kill_scenarios import compute_kill_scenarios
 from modules.llm_providers import format_provider_status
 from modules.market import fetch_market_data
@@ -111,8 +85,6 @@ from modules.x_intel import (
     poll_and_cache_timeline,
     X_SCHEDULER_ENABLED,
 )
-from modules.flywheel import compute_flywheel
-from modules.liq_calc import compute_liq_matrix
 from modules.cryexc_intel import (
     fetch_cryexc,
     filter_new_events,
@@ -146,7 +118,6 @@ from modules.basket_killer import (
     format_kill_status,
     scheduled_check as kill_scheduled_check,
 )
-from modules.rates_monitor import scheduled_check as rates_scheduled_check
 from modules.pretrade_checklist import build_pretrade_checklist
 from modules.intel_search import format_search_results, search_intel
 from modules.exports import export_dispatch
@@ -247,7 +218,7 @@ try:
     )
 except Exception:  # noqa: BLE001
     r18_aipear_prompt = None
-from templates.formatters import format_hf, format_quick_positions, format_report_header
+from templates.formatters import format_quick_positions, format_report_header
 from templates.timeline import format_timeline
 from utils.security import authorized
 from utils.telegram import send_bot_message, send_long_message
@@ -320,13 +291,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 @with_error_logging
 async def cmd_posiciones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\u23f3 Snapshot...", reply_markup=MAIN_KEYBOARD)
-    wallets, hl, bt, market, recent_fills = await asyncio.gather(
+    wallets, bt, market, recent_fills = await asyncio.gather(
         fetch_all_wallets(),
-        fetch_all_hyperlend(),
         fetch_bounce_tech(),
         fetch_market_data(),
         fetch_all_recent_fills(hours=24),
     )
+    hl: list = []  # HyperLend deprecado — el riesgo vivo es Portfolio Margin
 
     # Detect Bounce Tech position closes
     bt_closes = bt_detect_closes(bt)
@@ -360,8 +331,19 @@ async def cmd_posiciones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 @authorized
 @with_error_logging
 async def cmd_hf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    hl = await fetch_all_hyperlend()
-    await update.message.reply_text(format_hf(hl), reply_markup=MAIN_KEYBOARD)
+    # R-BOT-DEFINITIVE-KILLCLEAN: /hf = Portfolio Margin aave-HF (riesgo real de
+    # liquidación sobre el colateral HYPE). HyperLend muerto → ya no se lee.
+    from modules.portfolio_margin import format_pm_state_telegram
+    from modules.pm_context import select_primary_pm_state
+    wallets, market = await asyncio.gather(fetch_all_wallets(), fetch_market_data())
+    pm = select_primary_pm_state(wallets, market)
+    block = format_pm_state_telegram(pm) if pm is not None else ""
+    if not block:
+        block = (
+            "⚖️ PORTFOLIO MARGIN — sin datos\n"
+            "No hay colateral/deuda PM legible en la wallet primaria en este momento."
+        )
+    await update.message.reply_text(block, reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
@@ -380,9 +362,8 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # R-BOT-FEEDS-EXPAND (2026-05-07) — TraderMap.io BTC fetched in parallel
     # alongside the other intel sources so it adds zero serial latency.
     from modules.tradermap import fetch_tradermap_btc
-    portfolio, hl, market, unlocks, x_intel, gmail_intel, bt, recent_fills, tradermap = await asyncio.gather(
+    portfolio, market, unlocks, x_intel, gmail_intel, bt, recent_fills, tradermap = await asyncio.gather(
         fetch_all_wallets(),
-        fetch_all_hyperlend(),
         fetch_market_data(),
         fetch_unlocks(),
         fetch_x_intel(hours=48, caller="reporte", app=context.application),
@@ -391,6 +372,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         fetch_all_recent_fills(hours=24),
         fetch_tradermap_btc(),
     )
+    hl: list = []  # HyperLend deprecado — riesgo vivo = Portfolio Margin (panel PM)
 
     if _telethon_ok:
         intel_legacy, intel_unread = await asyncio.gather(
@@ -801,72 +783,11 @@ async def cmd_providers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
-@authorized
-@with_error_logging
-async def cmd_flywheel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("\u23f3 Calculating flywheel pair trade...", reply_markup=MAIN_KEYBOARD)
-    text = await compute_flywheel()
-    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
-
-
-@authorized
-@with_error_logging
-async def cmd_debug_flywheel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if os.getenv("DEBUG_MODE", "").strip().lower() != "true":
-        await update.message.reply_text(
-            "\u26a0\ufe0f /debug_flywheel is disabled. Set "
-            "DEBUG_MODE=true in Railway vars to enable.",
-            reply_markup=MAIN_KEYBOARD,
-        )
-        return
-
-    await update.message.reply_text(
-        "\u23f3 Dumping HyperLend reserves...", reply_markup=MAIN_KEYBOARD
-    )
-    payload = await fetch_reserve_rates(force=True)
-    if payload.get("status") != "ok":
-        err = payload.get("error") or "unknown"
-        await send_long_message(
-            update, f"\u274c RPC read failed: {err}",
-            reply_markup=MAIN_KEYBOARD,
-        )
-        return
-
-    rates_map = payload.get("rates") or {}
-    ts = payload.get("fetched_at_iso") or "—"
-    lines: list[str] = []
-    lines.append("\U0001f50d DEBUG /flywheel \u2014 HyperLend reserves raw dump")
-    lines.append(f"Fetched: {ts}  (cache bypass)")
-    lines.append(f"Reserves: {len(rates_map)}")
-    lines.append("\u2500" * 40)
-    items = list(rates_map.values())
-    items.sort(key=lambda v: (bool(v.get("deprecated")), float(v.get("apy_borrow") or 0.0)))
-    for v in items:
-        sym = v.get("symbol") or "?"
-        chain_sym = v.get("chain_symbol") or sym
-        addr = v.get("asset") or ""
-        addr_short = (addr[:10] + "\u2026" + addr[-4:]) if addr else ""
-        apr_b = float(v.get("apr_borrow") or 0.0) * 100
-        apy_b = float(v.get("apy_borrow") or 0.0) * 100
-        apr_s = float(v.get("apr_supply") or 0.0) * 100
-        apy_s = float(v.get("apy_supply") or 0.0) * 100
-        dep = "\U0001f6ab DEP" if v.get("deprecated") else "\u2705 active"
-        chain_tag = f" chain='{chain_sym}'" if chain_sym != sym else ""
-        lines.append(
-            f"{dep}  {sym:<10}{chain_tag}\n"
-            f"    addr: {addr_short}\n"
-            f"    borrow: {apr_b:6.2f}% APR / {apy_b:6.2f}% APY\n"
-            f"    supply: {apr_s:6.2f}% APR / {apy_s:6.2f}% APY"
-        )
-    await send_long_message(update, "\n".join(lines), reply_markup=MAIN_KEYBOARD)
-
-
-@authorized
-@with_error_logging
-async def cmd_liqcalc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("\u23f3 Calculating liquidation matrix...", reply_markup=MAIN_KEYBOARD)
-    text = await compute_liq_matrix()
-    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+# R-BOT-DEFINITIVE-KILLCLEAN (2026-06-15): cmd_flywheel, cmd_debug_flywheel y
+# cmd_liqcalc ELIMINADOS. Eran el flywheel HyperLend pair-trade (LONG HYPE
+# colateral / SHORT UETH deuda) que YA NO EXISTE — el fondo migró 100% a
+# Portfolio Margin nativo. El riesgo de liquidación vivo (aave-HF, liq price,
+# utilización del colateral HYPE) se ve en /reporte (panel PM) y /hf.
 
 
 @authorized
@@ -2694,14 +2615,9 @@ async def _kill_triggers_job(application: Application) -> None:
         log.exception("kill triggers job failed")
 
 
-async def _rates_monitor_job(application: Application) -> None:
-    """R17: every 30 min — UETH APY + funding + HF thresholds."""
-    if os.getenv("RATES_MONITOR_ENABLED", "true").strip().lower() == "false":
-        return
-    try:
-        await rates_scheduled_check(application.bot)
-    except Exception:  # noqa: BLE001
-        log.exception("rates monitor job failed")
+# R-BOT-DEFINITIVE-KILLCLEAN (2026-06-15): _rates_monitor_job ELIMINADO.
+# Monitoreaba UETH borrow APY + HF de HyperLend (fuente muerta). El riesgo de
+# HF vivo (aave-HF del PM) lo cubre el canal real-risk de modules.alerts_margin.
 
 
 async def _weekly_summary_job(application: Application) -> None:
@@ -3233,7 +3149,7 @@ async def post_init(application: Application) -> None:
             max_instances=1,
             coalesce=True,
         )
-        # Kill triggers (BTC>82k 4h, DCA zone, HF<1.10, basket DD<-2k, UETH>10%) — 5 min
+        # Kill triggers (BTC>82k 4h, DCA zone, PM aave-HF<1.10, basket DD<-2k) — 5 min
         scheduler.add_job(
             _kill_triggers_job,
             "interval",
@@ -3243,16 +3159,9 @@ async def post_init(application: Application) -> None:
             max_instances=1,
             coalesce=True,
         )
-        # Rates monitor (UETH APY + funding + HF) — every 30 min
-        scheduler.add_job(
-            _rates_monitor_job,
-            "interval",
-            minutes=30,
-            args=[application],
-            id="rates_monitor",
-            max_instances=1,
-            coalesce=True,
-        )
+        # R-BOT-DEFINITIVE-KILLCLEAN (2026-06-15): job "rates_monitor" (UETH
+        # borrow APY + HyperLend HF) ELIMINADO — fuente muerta. El riesgo de HF
+        # vivo (aave-HF del PM) lo cubre el canal real-risk en alerts_margin.
         # Weekly summary — Sunday 18:00 UTC
         scheduler.add_job(
             _weekly_summary_job,
@@ -3661,14 +3570,8 @@ async def post_init(application: Application) -> None:
     except Exception:
         log.exception("Intel memory cleanup failed")
 
-    # R-FINAL bug-2: monkey-patch downstream modules so flywheel.py /
-    # alerts.py also get the cache-aware HyperLend reader. Done here (not
-    # at import time) to avoid import-ordering issues.
-    try:
-        _apply_hl_runtime_patch()
-        log.info("R-FINAL: hyperlend cache-aware reader patched into downstream modules")
-    except Exception:  # noqa: BLE001
-        log.exception("R-FINAL hyperlend runtime patch failed (non-fatal)")
+    # R-BOT-DEFINITIVE-KILLCLEAN (2026-06-15): _apply_hl_runtime_patch ELIMINADO
+    # — ya no hay reader de HyperLend que parchear (módulo borrado).
 
     # R21 + R-FINAL bug-3: boot announcement — confirm to BCD that the bot
     # is online, clock is validated, calendar is fresh, and list pending
@@ -3710,9 +3613,9 @@ HANDLER_MAP = {
     "costos_x": cmd_costos_x,
     "intel_sources": cmd_intel_sources,
     "providers": cmd_providers,
-    "flywheel": cmd_flywheel,
-    "debug_flywheel": cmd_debug_flywheel,
-    "liqcalc": cmd_liqcalc,
+    # R-BOT-DEFINITIVE-KILLCLEAN (2026-06-15): "flywheel", "debug_flywheel" y
+    # "liqcalc" ELIMINADOS (flywheel HyperLend pair-trade muerto → /reporte + /hf
+    # cubren el riesgo PM vivo).
     "kill": cmd_kill,
     # R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): "ciclo" / "ciclo_update" ELIMINADOS.
     "dca": cmd_dca,

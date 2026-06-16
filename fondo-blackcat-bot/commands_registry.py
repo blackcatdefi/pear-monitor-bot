@@ -25,10 +25,9 @@ class BotCommand:
 COMMANDS: List[BotCommand] = [
     # ─── CORE ───
     BotCommand("reporte", "All-in-one: timeline + positions + analysis", "core", "cmd_reporte"),
-    BotCommand("posiciones", "Quick snapshot (wallets + HF + Bounce Tech)", "core", "cmd_posiciones"),
-    BotCommand("dashboard", "Live dashboard: capital + flywheels + basket + market (R-DASHBOARD-COMMAND)", "core", "cmd_dashboard"),
+    BotCommand("posiciones", "Quick snapshot (wallets + PM + Bounce Tech)", "core", "cmd_posiciones"),
+    BotCommand("dashboard", "Live dashboard: capital + basket + market (R-DASHBOARD-COMMAND)", "core", "cmd_dashboard"),
     BotCommand("status", "R17 quick status (no LLM, <3s)", "core", "cmd_status"),
-    BotCommand("flywheel", "Estado core Portfolio Margin (flywheel HyperLend CERRADO)", "core", "cmd_flywheel"),
     BotCommand("tesis", "Current macro thesis state", "core", "cmd_tesis"),
     BotCommand("calendar", "Upcoming catalysts (macro + unlocks + TGEs)", "core", "cmd_calendar"),
     BotCommand("brief", "Full morning brief (R18)", "core", "cmd_brief"),
@@ -37,10 +36,9 @@ COMMANDS: List[BotCommand] = [
     BotCommand("help", "Alias for /start", "core", "cmd_start"),
 
     # ─── TRADING ───
-    BotCommand("liqcalc", "Liq matrix HYPE × debt", "trading", "cmd_liqcalc"),
-    BotCommand("hf", "HyperLend Health Factor", "trading", "cmd_hf"),
+    BotCommand("hf", "Portfolio Margin aave-HF + liq price (colateral HYPE)", "trading", "cmd_hf"),
     BotCommand("kill", "Kill scenarios per position", "trading", "cmd_kill"),
-    BotCommand("kill_status", "Status of the 5 kill triggers (R17)", "trading", "cmd_kill_status"),
+    BotCommand("kill_status", "Status of the 4 kill triggers (BTC×2 / PM aave-HF / basket DD)", "trading", "cmd_kill_status"),
     # R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): /ciclo y /ciclo_update ELIMINADOS.
     BotCommand("dca", "Tiered DCA plan BTC/ETH/HYPE + current zone", "trading", "cmd_dca"),
     BotCommand("pnl", "Realized PnL 7D / 30D / YTD", "trading", "cmd_pnl"),
@@ -140,7 +138,6 @@ COMMANDS: List[BotCommand] = [
     BotCommand("debug_x", "X/Twitter connectivity diagnostic", "debug", "cmd_debug_x"),
     BotCommand("x_status", "X API status (R15+ live + counters + cache)", "debug", "cmd_x_status"),
     BotCommand("costos_x", "X API cost audit", "debug", "cmd_costos_x"),
-    BotCommand("debug_flywheel", "Dump raw HyperLend reserves (DEBUG_MODE=true)", "debug", "cmd_debug_flywheel"),
     BotCommand("version", "Commit SHA + uptime + provider status", "debug", "cmd_version"),
     BotCommand("errors", "Last 20 captured errors", "debug", "cmd_errors"),
     BotCommand("metrics", "Bot health dashboard (24h)", "debug", "cmd_metrics"),

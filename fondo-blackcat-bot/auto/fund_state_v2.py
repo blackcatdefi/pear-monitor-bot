@@ -112,16 +112,13 @@ def _registered_wallets() -> dict[str, str]:
     Fallback to empty dict if config cannot be imported (tests).
     """
     try:
-        from config import FUND_WALLETS, HYPERLEND_WALLET  # type: ignore
+        from config import FUND_WALLETS  # type: ignore
 
         out: dict[str, str] = {}
         for addr, label in (FUND_WALLETS or {}).items():
             if not addr:
                 continue
             out[addr.lower()] = label
-        if HYPERLEND_WALLET:
-            hw = HYPERLEND_WALLET.lower()
-            out.setdefault(hw, "HyperLend Principal")
         return out
     except Exception:  # noqa: BLE001
         return {}

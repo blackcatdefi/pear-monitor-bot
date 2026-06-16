@@ -141,22 +141,16 @@ async def _fetch_fund_snapshot() -> dict[str, Any]:
     except Exception:
         log.exception("morning_brief: fetch_all_wallets failed")
 
-    # HF flywheel — fetch_all_hyperlend returns list[dict]
+    # PM aave-HF — live Portfolio Margin (HyperLend deprecado, ya no se lee).
     try:
-        from modules.hyperlend import fetch_all_hyperlend
-        hl = await fetch_all_hyperlend()
-        if isinstance(hl, list):
-            hfs = []
-            for e in hl:
-                if not isinstance(e, dict):
-                    continue
-                hf = e.get("hf") or e.get("health_factor")
-                if isinstance(hf, (int, float)) and hf > 0:
-                    hfs.append(float(hf))
-            if hfs:
-                out["flywheel_hf"] = max(hfs)
+        from modules.portfolio import fetch_all_wallets
+        from modules.pm_context import select_primary_pm_state
+        wallets = await fetch_all_wallets()
+        pm = select_primary_pm_state(wallets, None)
+        if pm is not None and pm.has_data and pm.debt_usd > 1.0 and pm.aave_hf > 0:
+            out["flywheel_hf"] = float(pm.aave_hf)
     except Exception:
-        log.exception("morning_brief: fetch_all_hyperlend failed")
+        log.exception("morning_brief: PM aave-HF sample failed")
 
     return out
 

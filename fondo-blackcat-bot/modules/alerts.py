@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -19,14 +18,11 @@ from typing import Any
 from config import (
     BTC_WARN,
     DATA_DIR,
-    HF_CRITICAL,
-    HF_WARN,
     HYPE_CRITICAL,
     HYPE_WARN,
     TELEGRAM_CHAT_ID,
 )
 from fund_state import BCD_DCA_PLAN
-from modules.hyperlend import fetch_all_hyperlend, fetch_reserve_rates
 from modules.portfolio import fetch_all_wallets, get_spot_price
 from utils.telegram import send_bot_message
 
@@ -70,84 +66,12 @@ def _clear(state: dict[str, Any], key: str) -> None:
 async def run_alert_cycle(bot) -> None:  # noqa: C901
     state = _load_state()
 
-    # 1. HyperLend HF (all wallets) — R-SILENT: gated by auto.hf_alert_gate
-    # Threshold defaults: 1.10 / 1.05 / 1.02 (warn / critical / preliq).
-    # Dedup 2h, delta 0.05; preliq fires every 5min until recovery.
-    try:
-        from auto import hf_alert_gate as hfg  # noqa: WPS433
-    except Exception:  # noqa: BLE001
-        hfg = None  # type: ignore[assignment]
-    try:
-        from auto import silent_mode as _silent  # noqa: WPS433
-    except Exception:  # noqa: BLE001
-        _silent = None  # type: ignore[assignment]
-
-    hl_list = await fetch_all_hyperlend()
-    for hl in hl_list:
-        if hl.get("status") != "ok":
-            continue
-        hld = hl["data"]
-        hf = hld.get("health_factor")
-        label = hld.get("label", "")
-        wallet_addr = hld.get("wallet", "")
-        short_addr = wallet_addr[:6] + "\u2026" + wallet_addr[-4:] if wallet_addr else ""
-        ident = f"{label} ({short_addr})" if label else short_addr
-
-        if hf is None or math.isinf(hf) or math.isnan(hf):
-            continue
-        hf_r = round(hf, 4)
-
-        if hfg is None:
-            # Gate import failed: legacy passthrough (warn under HF_WARN, critical under HF_CRITICAL)
-            wallet_key = wallet_addr[-8:] if wallet_addr else "unknown"
-            if hf_r < HF_CRITICAL:
-                await _emit(
-                    bot, f"hf_critical_{wallet_key}", state,
-                    f"\U0001f6a8 HYPERLEND HF CRITICAL: {hf_r:.4f} \u2014 {ident} \u2014 immediate action required!"
-                )
-            else:
-                _clear(state, f"hf_critical_{wallet_key}")
-            continue
-
-        decision = hfg.decide(wallet_addr, hf_r)
-        if not decision.should_emit:
-            # If recovered above threshold, clear the dedup state so next drop
-            # is a fresh first-cross alert.
-            if decision.severity is None:
-                hfg.clear_wallet(wallet_addr)
-            continue
-
-        # Silent-mode hardening: only critical/preliq escape silent mode.
-        if _silent is not None and _silent.is_silent():
-            if decision.severity not in {"critical", "preliq"}:
-                log.info(
-                    "alerts.HF: suppressed (silent_mode ON, severity=%s) %s hf=%.4f",
-                    decision.severity, ident, hf_r,
-                )
-                continue
-
-        if decision.severity == "preliq":
-            msg = (
-                f"\U0001f6a8\U0001f6a8 HYPERLEND PRE-LIQUIDATION: HF {hf_r:.4f} \u2014 {ident} \u2014 "
-                f"immediate action, urgent repay. (Repeats every {hfg.PRELIQ_REPEAT_MIN}min until recovery)"
-            )
-        elif decision.severity == "critical":
-            msg = (
-                f"\U0001f6a8 HYPERLEND HF CRITICAL: {hf_r:.4f} \u2014 {ident} \u2014 "
-                f"below {hfg.CRITICAL:.2f}, evaluate repay/collateral"
-            )
-        else:  # warn
-            msg = (
-                f"\u26a0\ufe0f HYPERLEND HF: {hf_r:.4f} \u2014 {ident} \u2014 "
-                f"below {hfg.THRESHOLD:.2f} (warn zone)"
-            )
-        try:
-            if TELEGRAM_CHAT_ID:
-                await send_bot_message(bot, TELEGRAM_CHAT_ID, msg)
-            log.warning("ALERT hf_%s: %s", decision.severity, msg)
-            hfg.record_emit(wallet_addr, hf_r, decision.severity)
-        except Exception:  # noqa: BLE001
-            log.exception("alerts.HF send failed for %s", ident)
+    # 1. (Removido R-BOT-DEFINITIVE-KILLCLEAN 2026-06-15) HyperLend HF watchdog.
+    # El fondo NO usa HyperLend (protocolo Aave-fork muerto). El único riesgo de
+    # liquidación vivo es el aave-HF del Portfolio Margin nativo sobre el
+    # colateral HYPE, y ese canal ya lo cubre modules.alerts_margin (REAL-RISK:
+    # aave-HF 1.30/1.20/1.10 + liq distance por pata, alimentado SOLO por
+    # compute_pm_state). Leer HyperLend acá era una fuente muerta duplicada.
 
     # 2. HYPE price
     hype_px = await get_spot_price("HYPE")
@@ -160,7 +84,7 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
 
         if hype_px < HYPE_WARN:
             await _emit(bot, "hype_warn", state,
-                        f"\U0001f6a8 HYPE @ ${hype_px:.2f} \u2014 direct impact on HyperLend collateral")
+                        f"\U0001f6a8 HYPE @ ${hype_px:.2f} \u2014 direct impact on Portfolio Margin HYPE collateral")
         else:
             _clear(state, "hype_warn")
             _clear(state, "hype_critical")
@@ -177,42 +101,12 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
     # 4. (Removido R-NOPRELIQ 2026-05-15) Trade del Ciclo DCA alerts —
     # Blofin trade vehicle eliminado del fondo, sin alertas asociadas.
 
-    # 5b. UETH borrow APY watchdog (Round 13)
-    # El flywheel es insostenible si UETH borrow APY > 6%. A 10% empieza a
-    # devorar profit: alerta crítica. Lectura on-chain via getReserveData().
-    try:
-        rates = await fetch_reserve_rates()
-        if rates.get("status") == "ok":
-            entry = (rates.get("rates") or {}).get("UETH")
-            if not entry:
-                for k, v in (rates.get("rates") or {}).items():
-                    if k.lower() == "ueth":
-                        entry = v
-                        break
-            if entry:
-                apy = float(entry.get("apy_borrow") or 0.0)
-                if apy >= 0.10:
-                    await _emit(
-                        bot, "ueth_borrow_critical", state,
-                        f"\U0001f6a8 [FLYWHEEL] UETH borrow APY = {apy*100:.2f}% — "
-                        "evaluate rotation to stable or immediate partial repay "
-                        "(critical threshold 10%)."
-                    )
-                else:
-                    _clear(state, "ueth_borrow_critical")
-
-                if apy >= 0.06:
-                    await _emit(
-                        bot, "ueth_borrow_warn", state,
-                        f"\u26a0\ufe0f [FLYWHEEL] UETH borrow APY = {apy*100:.2f}% — "
-                        "above thesis 6% threshold. Pair trade cost "
-                        "becomes unsustainable if sustained."
-                    )
-                else:
-                    _clear(state, "ueth_borrow_warn")
-                    _clear(state, "ueth_borrow_critical")
-    except Exception:  # noqa: BLE001
-        log.exception("UETH borrow APY check failed (non-fatal)")
+    # 5b. (Removido R-BOT-DEFINITIVE-KILLCLEAN 2026-06-15) UETH borrow APY
+    # watchdog. El flywheel HyperLend pair-trade (LONG HYPE colateral / SHORT
+    # UETH deuda) ESTÁ MUERTO: ninguna posición viva mapea a él. Esta alerta
+    # disparaba "[FLYWHEEL] UETH borrow APY = X%" con sugerencias de rotación a
+    # stable / repay parcial que CONTRADICEN el mandato actual (prohibido
+    # repagar deuda). Eliminada junto con la fuente fetch_reserve_rates.
 
     # 6. (Removido R-NOPRELIQ 2026-05-15) Per-leg basket pre-liquidation alerts.
     # BCD pone SL/TP 100% nativo en HL por pata, no necesita pre-liq alerts en basket.
@@ -334,24 +228,10 @@ async def _run_dca_zone_alerts(bot, state: dict[str, Any]) -> None:
                     state[alerted_key] = datetime.now(timezone.utc).isoformat()
                 state[zone_key] = True
 
-                # Asset-specific companion alert: ETH entered debt_flip_range
-                if asset == "ETH":
-                    flip = plan.get("debt_flip_range") or []
-                    if len(flip) == 2:
-                        flow, fhigh = float(flip[0]), float(flip[1])
-                        if flow <= px <= fhigh:
-                            flip_key = "dca_ETH_debt_flip_alerted_at"
-                            if not _dca_alerted_within_window(state, flip_key):
-                                msg = (
-                                    f"\U0001f501 [FLYWHEEL] ETH @ ${px:,.2f} entered "
-                                    f"debt_flip_range (${flow:,.0f}-${fhigh:,.0f}). "
-                                    f"Consider rotating UETH debt to stable "
-                                    f"(USDT0/USDC) before the rebound."
-                                )
-                                log.warning("ETH DEBT FLIP: %s", msg)
-                                if TELEGRAM_CHAT_ID:
-                                    await send_bot_message(bot, TELEGRAM_CHAT_ID, msg)
-                                state[flip_key] = datetime.now(timezone.utc).isoformat()
+                # (Removido R-BOT-DEFINITIVE-KILLCLEAN 2026-06-15) Companion
+                # alert that suggested flipping the dead pair-trade debt to a
+                # stable on an ETH dip. That flywheel leg no longer exists; the
+                # fund has no such debt to rotate.
             else:
                 # Fuera de la zona: si ya pasó la ventana de rearm, limpiar
                 # alerted_at para que la próxima entrada pueda re-emitir.

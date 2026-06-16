@@ -641,18 +641,18 @@ async def proactive_refresh() -> bool:
 
 async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
     """Inner uncached path — does the actual fetch + aggregate work."""
-    # R-DASH-FIX Bug 3: use cache-aware reader so collateral/debt symbols
-    # survive per-reserve RPC failures (last-known cache falls back to
-    # cached "kHYPE" / "UETH" instead of returning None).
-    from auto.hyperlend_reader import read_all_with_cache as _hl_read
+    # R-BOT-DEFINITIVE-KILLCLEAN (2026-06-15): HyperLend reader ELIMINADO. El
+    # fondo no usa HyperLend (protocolo muerto) — no se lee ningún endpoint de
+    # HyperLend. El colateral/deuda vivo es el Portfolio Margin nativo sobre el
+    # HYPE spot, derivado abajo de los wallets de HyperLiquid. ``hl`` queda vacío.
     from modules.market import fetch_market_data
     from modules.portfolio import fetch_all_wallets
 
-    hl, market, wallets = await asyncio.gather(
-        _safe(_hl_read(), "hyperlend"),
+    market, wallets = await asyncio.gather(
         _safe(fetch_market_data(), "market"),
         _safe(fetch_all_wallets(), "wallets"),
     )
+    hl: list = []
 
     # ─── Market block ──────────────────────────────────────────────────────
     prices: dict[str, Any] = {}

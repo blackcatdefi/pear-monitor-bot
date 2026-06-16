@@ -1,8 +1,7 @@
 """Round 18 — Predictive (trend-based) risk alerts.
 
-Records snapshots of critical metrics (HF flywheel, HYPE price, UETH APY)
-to a small SQLite table, then computes a linear slope over the last N
-samples. If the slope is downward and the current value crosses the
+Records snapshots of critical metrics (PM aave-HF, HYPE price) to a small
+SQLite table, then computes a linear slope over the last N samples. If the slope is downward and the current value crosses the
 critical threshold within HORIZON_HOURS, fire an edge-triggered alert.
 
 Edge-triggered = if the metric has already alerted in the same direction
@@ -140,9 +139,13 @@ def _record_alert(metric: str, direction: str, slope: float, projected: float, h
         )
 
 
+# R-BOT-DEFINITIVE-KILLCLEAN (2026-06-15): the ``ueth_apy`` trend metric
+# (UETH borrow APY of the dead HyperLend flywheel) was removed — the concept
+# maps to no live position. ``pm_hf`` now samples the LIVE Portfolio Margin
+# aave-HF (compute_pm_state), never HyperLend.
 METRIC_CONFIGS: dict[str, dict[str, Any]] = {
-    "hf_flywheel": {
-        "label": "HF flywheel",
+    "pm_hf": {
+        "label": "PM aave-HF",
         "critical": 1.10,
         "watch_below": True,  # alert when descending toward critical
         "fmt": "{:.3f}",
@@ -153,31 +156,24 @@ METRIC_CONFIGS: dict[str, dict[str, Any]] = {
         "watch_below": True,
         "fmt": "${:.2f}",
     },
-    "ueth_apy": {
-        "label": "UETH borrow APY",
-        "critical": 10.0,
-        "watch_below": False,  # alert when rising toward critical
-        "fmt": "{:.2f}%",
-    },
 }
 
 
-async def _sample_hf_flywheel() -> float | None:
+async def _sample_pm_hf() -> float | None:
+    """Live Portfolio Margin aave-HF (single source: compute_pm_state).
+
+    Returns None when there is no debt (no liquidation risk) or PM data is
+    unavailable — so the trend engine never projects on a fabricated value.
+    """
     try:
-        from modules.hyperlend import fetch_all_hyperlend
-        hl = await fetch_all_hyperlend()
-        if isinstance(hl, list):
-            hfs = []
-            for e in hl:
-                if not isinstance(e, dict):
-                    continue
-                hf = e.get("hf") or e.get("health_factor")
-                if isinstance(hf, (int, float)) and 0 < hf < 1000:
-                    hfs.append(float(hf))
-            if hfs:
-                return max(hfs)
+        from modules.portfolio import fetch_all_wallets
+        from modules.pm_context import select_primary_pm_state
+        wallets = await fetch_all_wallets()
+        pm = select_primary_pm_state(wallets, None)
+        if pm is not None and pm.has_data and pm.debt_usd > 1.0 and pm.aave_hf > 0:
+            return float(pm.aave_hf)
     except Exception:
-        log.exception("predictive_alerts: HF sample failed")
+        log.exception("predictive_alerts: PM aave-HF sample failed")
     return None
 
 
@@ -190,22 +186,9 @@ async def _sample_hype_price() -> float | None:
         return None
 
 
-async def _sample_ueth_apy() -> float | None:
-    try:
-        from modules.hyperlend import get_borrow_apy
-        apy = await get_borrow_apy("UETH")
-        if apy is None:
-            return None
-        return float(apy) * 100.0  # convert to %
-    except Exception:
-        log.exception("predictive_alerts: UETH APY sample failed")
-        return None
-
-
 SAMPLERS = {
-    "hf_flywheel": _sample_hf_flywheel,
+    "pm_hf": _sample_pm_hf,
     "hype_price": _sample_hype_price,
-    "ueth_apy": _sample_ueth_apy,
 }
 
 

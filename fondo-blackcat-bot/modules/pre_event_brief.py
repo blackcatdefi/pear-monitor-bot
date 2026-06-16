@@ -97,22 +97,15 @@ async def _fund_snapshot_block() -> str:
         log.exception("pre_event_brief: portfolio snapshot failed")
 
     try:
-        from modules.hyperlend import fetch_all_hyperlend
-        hl = await fetch_all_hyperlend()
-        if isinstance(hl, list):
-            hfs: list[float] = []
-            for e in hl:
-                if not isinstance(e, dict):
-                    continue
-                hf = e.get("hf") or e.get("health_factor")
-                if isinstance(hf, (int, float)) and 0 < hf < 1000:
-                    hfs.append(float(hf))
-            if hfs:
-                lines.append(
-                    f"  HF flywheel: min={min(hfs):.3f} · max={max(hfs):.3f}"
-                )
+        # PM aave-HF (live Portfolio Margin; HyperLend deprecado, ya no se lee).
+        from modules.portfolio import fetch_all_wallets
+        from modules.pm_context import select_primary_pm_state
+        wallets = await fetch_all_wallets()
+        pm = select_primary_pm_state(wallets, None)
+        if pm is not None and pm.has_data and pm.debt_usd > 1.0 and pm.aave_hf > 0:
+            lines.append(f"  PM aave-HF: {pm.aave_hf:.3f}")
     except Exception:
-        log.exception("pre_event_brief: HF snapshot failed")
+        log.exception("pre_event_brief: PM aave-HF snapshot failed")
 
     try:
         # R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): Trade Ciclo (Blofin) ELIMINADO.

@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import logging
-import math
 from typing import Any
 
 from auto.fund_constants import FUND_DEFAULT_LEVERAGE
-from modules.hyperlend import fetch_all_hyperlend
 from modules.portfolio import get_spot_price
 
 log = logging.getLogger(__name__)
@@ -47,28 +45,47 @@ async def compute_kill_scenarios() -> str:
     lines.append("   Reabrir si: escalada confirmada + oil >$85 + gold >$3500")
     lines.append("")
 
-    # 3. HyperLend Flywheel
-    hf_text = "?"
-    hl_list = await fetch_all_hyperlend()
-    for hl in hl_list:
-        if hl.get("status") == "ok":
-            hf = hl["data"].get("health_factor")
-            if hf is not None:
-                hf_text = f"{hf:.3f}" if not math.isinf(hf) else "\u221e"
-                break
+    # 3. Portfolio Margin nativo (colateral HYPE / deuda USDC-USDH)
+    # R-BOT-DEFINITIVE-KILLCLEAN (2026-06-15): el flywheel HyperLend pair-trade
+    # (LONG HYPE colateral / SHORT UETH deuda) está MUERTO. El único riesgo de
+    # liquidación vivo es el Portfolio Margin nativo: aave-HF, liq price y
+    # utilización sobre el colateral HYPE. Fuente ÚNICA: compute_pm_state (la
+    # MISMA del panel y del canal real-risk). NO se lee HyperLend.
+    hf_text = "n/d"
+    liq_text = ""
+    has_pm_debt = False
+    try:
+        from modules.portfolio import fetch_all_wallets
+        from modules.pm_context import select_primary_pm_state
+        wallets = await fetch_all_wallets()
+        pm = select_primary_pm_state(wallets, None)
+        if pm is not None and pm.has_data and pm.debt_usd > 1.0 and pm.aave_hf > 0:
+            has_pm_debt = True
+            hf_text = f"{pm.aave_hf:.3f}"
+            if pm.liq_price > 0:
+                liq_text = f"   Liq price HYPE (maint): ${pm.liq_price:,.2f}"
+    except Exception:  # noqa: BLE001
+        log.exception("kill_scenarios: PM state unavailable")
 
-    lines.append("3\ufe0f\u20e3 HYPERLEND FLYWHEEL (LONG HYPE / SHORT ETH)")
-    lines.append(f"   HF actual: {hf_text}")
+    lines.append("3\ufe0f\u20e3 PORTFOLIO MARGIN (colateral HYPE / deuda USDC-USDH)")
+    if has_pm_debt:
+        lines.append(f"   aave-HF actual: {hf_text}")
+        if liq_text:
+            lines.append(liq_text)
+    else:
+        lines.append("   Sin deuda USDC/USDH abierta — no hay riesgo de liquidaci\u00f3n PM")
     if hype_px:
         lines.append(f"   HYPE: ${hype_px:.2f}")
     if eth_px:
         lines.append(f"   ETH: ${eth_px:.2f}")
-    lines.append("   Kill scenario: HYPE crash + ETH pump simult\u00e1neo")
+    lines.append("   Kill scenario: HYPE crash con deuda USDC abierta")
     lines.append("   Triggers concretos:")
-    lines.append("   \u2022 HYPE < $30 (colateral colapsa)")
-    lines.append("   \u2022 ETH > $4000 mientras HYPE cae (deuda sube)")
-    lines.append("   \u2022 HF < 1.10 sin capacidad de repay")
-    lines.append("   Acci\u00f3n si kill: repay deuda UETH parcial, no cerrar todo")
+    lines.append("   \u2022 HYPE cae hacia el liq price (colateral cubre menos la deuda)")
+    lines.append("   \u2022 aave-HF < 1.10 (zona acci\u00f3n)")
+    lines.append(
+        "   Acci\u00f3n si kill: cerrar patas GANADORAS del basket a USDC y "
+        "repagar \u2014 NUNCA vender HYPE (playbook del fondo)"
+    )
     lines.append("")
 
     # 4. Core DCA (renumerado tras eliminar Trade del Ciclo en R-NOPRELIQ + REMOVE BLOFIN 2026-05-15)
