@@ -608,10 +608,14 @@ function bootstrap({
     console.log('[extensions] BCD_TELEGRAM_CHAT_ID not set — heartbeat disabled');
   }
 
-  // 5. Weekly summary scheduler
+  // 5. Weekly summary scheduler — pass hlApi so the summary aggregates from
+  // real Hyperliquid fills (closedPnl), the single source of truth (FIX 1).
   let weeklyTimer = null;
+  const _hlApi = monitor && monitor.hlApi ? monitor.hlApi : null;
   if (primaryChatId) {
-    weeklyTimer = weeklySummary.startSchedule(wrappedNotify, primaryChatId);
+    weeklyTimer = weeklySummary.startSchedule(wrappedNotify, primaryChatId, {
+      hlApi: _hlApi,
+    });
   }
 
   // 6. Telegram commands (/history /pnl /status /export /summary)
@@ -619,7 +623,7 @@ function bootstrap({
   // (e.g. bot in an unexpected state), bootstrap() must not crash, otherwise
   // commandsStart.attach() never runs and /start stays silent.
   if (commands.isEnabled() && bot) {
-    try { commands.attachCommands(bot); }
+    try { commands.attachCommands(bot, { hlApi: _hlApi }); }
     catch (e) {
       console.error('[extensions] commands.attachCommands failed:', e && e.message ? e.message : e);
     }

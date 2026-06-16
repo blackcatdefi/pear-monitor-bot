@@ -19,6 +19,10 @@ const {
 // gate without any structural rewrite of monitor.js.
 const { recordOpenEvent, isTWAPActive } = require('./twapDetector');
 const { shouldFireFundsAvailable } = require('./fundsAvailableGate');
+const {
+  computeDeployable,
+  formatDeployableLines,
+} = require('./deployableCapital');
 const { withTimestamp } = require('./timestampHelper');
 // R-NOSPAM (2 may 2026) — persistent per-wallet borrow-alert dedup gate.
 // Suppresses identical/near-identical alerts within 30 min, <5% available
@@ -277,8 +281,30 @@ class PositionMonitor {
     //
     // ws.hadFunds is still maintained so the original edge-trigger remains
     // a candidate gate — the new gate stacks ON TOP, never bypasses it.
+    // FIX 2 — deployable capital is the SPOT stable pool (single source of
+    // truth, taken once), NOT the perp-only `totalWithdrawable` that
+    // under-reported $535/$212 in prod. Fetch spot balances and fold them
+    // through deployableCapital, which never sums denominations and flags
+    // over-max-borrow. Trigger the alert on the TOTAL deployable figure.
     const agg = this.hlApi.aggregateBalances(allStates);
-    const available = agg.totalWithdrawable;
+    let spotBalances = null;
+    try {
+      const spotState = await this.hlApi.getSpotState(addr);
+      spotBalances = this.hlApi.getSpotBalances(spotState);
+    } catch (_) {
+      spotBalances = null; // fetch error — computeDeployable renders honestly
+    }
+    const deployable = computeDeployable({
+      spotBalances,
+      perp: {
+        accountValue: agg.totalAccountValue,
+        marginUsed: agg.totalMarginUsed,
+        withdrawable: agg.totalWithdrawable,
+      },
+    });
+    const available = deployable.error
+      ? 0
+      : Number(deployable.totalDeployable) || 0;
 
     if (available >= this.minAvailableBalance && ws.hadFunds === false) {
       if (!silent) {
@@ -288,10 +314,9 @@ class PositionMonitor {
             `💰 *Funds available to trade!*`,
             ``,
             `📍 Wallet: ${label}`,
-            `💵 Available: $${available.toFixed(2)}`,
-            `📊 Account value: $${agg.totalAccountValue.toFixed(2)}`,
-            `📈 Margin used: $${agg.totalMarginUsed.toFixed(2)}`,
-          ].join('\n');
+          ]
+            .concat(formatDeployableLines(deployable))
+            .join('\n');
           await this.notify(chatId, withTimestamp(baseMsg, 'bottom'));
         } else {
           // Helpful for forensic log review when investigating why an alert

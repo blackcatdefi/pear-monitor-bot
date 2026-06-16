@@ -45,6 +45,7 @@ function attachCommands(bot, opts = {}) {
     console.log('[commands] disabled');
     return;
   }
+  const hlApi = opts.hlApi || null;
   const exportEnabled =
     (process.env.EXPORT_ENABLED || 'true').toLowerCase() !== 'false';
 
@@ -210,11 +211,11 @@ function attachCommands(bot, opts = {}) {
   bot.onText(/^\/summary$/, async (msg) => {
     const chatId = msg.chat.id;
     await bot.sendMessage(chatId, 'Forcing weekly summary...');
-    const text = weeklySummary.buildSummaryMessage();
+    const text = await weeklySummary.buildSummaryMessage({ hlApi });
     if (!text) {
       await bot.sendMessage(
         chatId,
-        'No closes this week. Come back Sunday 18:00 UTC.'
+        'No fills this week. Come back Sunday 18:00 UTC.'
       );
       return;
     }

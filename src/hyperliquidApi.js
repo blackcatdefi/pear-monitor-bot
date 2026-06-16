@@ -92,6 +92,78 @@ class HyperliquidApi {
     }
   }
 
+  // Time-windowed fills. `userFills` caps at 2000 and is recency-ordered, which
+  // silently truncates a heavy tournament week. `userFillsByTime` is bounded by
+  // [startMs, endMs] and ordered ASC; HL still returns at most 2000 per call, so
+  // we page by advancing startTime past the last fill until a short page (or the
+  // window end) is reached. Returns null on hard fetch failure so callers can
+  // render "fetch error" instead of fabricating a zero (FIX 3).
+  async getUserFillsByTime(walletAddress, startMs, endMs, { maxPages = 30 } = {}) {
+    const out = [];
+    let cursor = Math.max(0, Math.floor(startMs));
+    const end = Math.floor(endMs);
+    try {
+      for (let page = 0; page < maxPages; page++) {
+        const body = {
+          type: 'userFillsByTime',
+          user: walletAddress,
+          startTime: cursor,
+          endTime: end,
+        };
+        const batch = await this.post(body);
+        if (!Array.isArray(batch) || batch.length === 0) break;
+        out.push(...batch);
+        if (batch.length < 2000) break; // last page
+        // Advance the cursor past the last fill's time to fetch the next page.
+        const lastTime = batch[batch.length - 1].time;
+        if (!Number.isFinite(lastTime) || lastTime + 1 <= cursor) break;
+        cursor = lastTime + 1;
+        await this.sleep(120); // rate-limit courtesy
+      }
+      // De-dup on (oid, tid, time, coin) — page boundaries can repeat the edge fill.
+      const seen = new Set();
+      const deduped = [];
+      for (const f of out) {
+        const k = `${f.oid ?? ''}:${f.tid ?? ''}:${f.time ?? ''}:${f.coin ?? ''}:${f.sz ?? ''}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        deduped.push(f);
+      }
+      return deduped;
+    } catch (error) {
+      console.error(
+        `Failed to get fills-by-time for ${walletAddress}:`,
+        error && error.message ? error.message : error
+      );
+      return null; // hard failure — never fabricate
+    }
+  }
+
+  // Spot account state (separate sub-account from perps). Holds per-coin
+  // stablecoin balances used as basket collateral. Returns null on failure.
+  async getSpotState(walletAddress) {
+    try {
+      return await this.post({ type: 'spotClearinghouseState', user: walletAddress });
+    } catch (error) {
+      if (!error.message?.includes('429')) {
+        console.error(`Failed to get spot state for ${walletAddress}:`, error.message);
+      }
+      return null;
+    }
+  }
+
+  // Normalize spot balances to [{coin, total, hold, entryNtl}]. Returns null if
+  // the state is missing so callers can distinguish "fetch failed" from "empty".
+  getSpotBalances(spotState) {
+    if (!spotState || !Array.isArray(spotState.balances)) return null;
+    return spotState.balances.map((b) => ({
+      coin: b.coin,
+      total: parseFloat(b.total || 0),
+      hold: parseFloat(b.hold || 0),
+      entryNtl: parseFloat(b.entryNtl || 0),
+    }));
+  }
+
   // Get open orders including trigger orders (TP/SL) for a specific dex
   async getFrontendOpenOrders(walletAddress, dex) {
     try {

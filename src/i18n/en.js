@@ -45,11 +45,19 @@ module.exports = {
     WEEKLY_WEEK: 'Week',
     WEEKLY_PNL_NET: 'Net PnL',
     WEEKLY_TRADES: 'Trades',
+    WEEKLY_FILLS: 'Fills',
+    WEEKLY_REALIZED_CLOSES: 'Realized closes',
     WEEKLY_WIN_RATE: 'Win rate',
     WEEKLY_VOLUME: 'Volume',
     WEEKLY_FEES: 'Fees',
     WEEKLY_BEST: 'Best',
     WEEKLY_WORST: 'Worst',
+    WEEKLY_FETCH_ERROR:
+      'Could not fetch fills from Hyperliquid this week — figures unavailable (no data fabricated).',
+    WEEKLY_CALC_ERROR:
+      'Calculation error: fills and volume present but zero realized PnL — withholding a misleading flat-week summary.',
+    WEEKLY_PARTIAL:
+      'Partial: some wallets failed to fetch — figures may understate the week.',
     WEEKLY_FOLLOW_CTA: 'Want to copy this style? Use the code for 10% off on Pear.',
     HEARTBEAT_OK: 'Pear Alerts Bot online',
     UPTIME: 'Uptime',

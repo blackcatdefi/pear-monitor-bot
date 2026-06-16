@@ -4,6 +4,10 @@ const {
   getBorrowWallets, addBorrowWallet, removeBorrowWallet,
   shortenAddress,
 } = require('./store');
+const {
+  computeDeployable,
+  formatDeployableLines,
+} = require('./deployableCapital');
 
 function createBot(token, hlApi, monitor, hlendApi = null) {
   // R-PUBLIC-START-FIX-V2: polling: false — index.js calls deleteWebhook()
@@ -454,12 +458,31 @@ function createBot(token, hlApi, monitor, hlendApi = null) {
       }
 
       const agg = hlApi.aggregateBalances(allStates);
-      let text = [
-        `📍 *${wallet.label}*`, ``,
-        `💵 Available: $${agg.totalWithdrawable.toFixed(2)}`,
-        `📊 Account value: $${agg.totalAccountValue.toFixed(2)}`,
-        `📈 Margin used: $${agg.totalMarginUsed.toFixed(2)}`,
-      ];
+
+      // FIX 2 — deployable = spot single-pool withdrawable (taken once),
+      // not the perp-only withdrawable. Fold spot through deployableCapital.
+      let spotBalances = null;
+      try {
+        const spotState = await hlApi.getSpotState(wallet.address);
+        spotBalances = hlApi.getSpotBalances(spotState);
+      } catch (_) {
+        spotBalances = null;
+      }
+      const deployable = computeDeployable({
+        spotBalances,
+        perp: {
+          accountValue: agg.totalAccountValue,
+          marginUsed: agg.totalMarginUsed,
+          withdrawable: agg.totalWithdrawable,
+        },
+      });
+
+      let text = [`📍 *${wallet.label}*`, ``]
+        .concat(formatDeployableLines(deployable))
+        .concat([
+          `📊 Account value: $${agg.totalAccountValue.toFixed(2)}`,
+          `📈 Margin used: $${agg.totalMarginUsed.toFixed(2)}`,
+        ]);
 
       if (agg.perDex.length > 1) {
         text.push('', '*Breakdown:*');
