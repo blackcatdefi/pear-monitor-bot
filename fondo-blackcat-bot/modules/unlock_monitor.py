@@ -917,6 +917,22 @@ def should_fire(new_level: str, last_level: str) -> bool:
     return _LEVEL_RANK.get(new_level, 0) > _LEVEL_RANK.get(last_level, 0)
 
 
+def should_push_actionable(new_level: str, last_level: str) -> bool:
+    """R-NOISE-CUT (2026-06-16): Telegram PUSH gate — fire ONLY on a genuine
+    cross INTO the terminal actionable state (UNLOCK = the re-screen GO
+    trigger). Every intermediate level (WATCH "ablandándose", APPROACHING
+    "acercándose", NONE) is silent: ``compute_snapshot``/the job still advance
+    and persist the level so transitions keep tracking and ``/unlockcheck``
+    reflects them on demand, but nothing is pushed. Reuses the ``should_fire``
+    edge so UNLOCK pushes once on the cross, not every cycle while it holds.
+
+    The bot never fabricates the state: this only gates an UNLOCK that
+    ``aggregate_level`` already produced from a real >=names_required AND
+    >=min_sectors AND persisted condition cross. Insufficient data degrades
+    names out of the count → no UNLOCK → no push."""
+    return new_level == UNLOCK and should_fire(new_level, last_level)
+
+
 def _reset_for_tests() -> None:
     try:
         c = _conn()
@@ -1320,6 +1336,48 @@ def aipear_block(s: UnlockSnapshot) -> str:
             f"{a.ticker},{a.sector},{_fmt_z(a.z)},{_fmt_hurst(a.hurst)},{fund},{conf}"
         )
     lines.append("```")
+    return "\n".join(lines)
+
+
+# R-NOISE-CUT: this monitor is the SHORT-entry pre-filter — the 5-gate screen
+# (overbought z+ ABOVE floor, Hurst<0.5 mean-reverting, funding>=0, squeeze
+# CLEAR) selects names to SHORT against the HYPE long. So a terminal UNLOCK is
+# always "READY TO SHORT". Surfaced as a constant for clarity/testability.
+ACTIONABLE_SIDE = "SHORT"
+
+
+def format_actionable_alert(s: UnlockSnapshot, prev_level: str) -> str:
+    """R-NOISE-CUT (2026-06-16): the CONCISE actionable PUSH (terminal UNLOCK
+    only). Leads with the side in plain terms, then one/two lines on the
+    condition that crossed, then a single caveat. Drops the verbose
+    confidence/data-quality block from the prior ``format_alert`` — the full
+    per-name table stays available on demand via /unlockcheck.
+
+    Only ever rendered for ``s.level == UNLOCK``; for any other level it falls
+    back to the legacy verbose renderer (defensive — the job never calls it on
+    a non-UNLOCK level)."""
+    if s.level != UNLOCK:
+        return format_alert(s, prev_level)
+    k = s.constants
+    trig = [a for a in s.alts if a.counts]
+    sectors = sorted({a.sector for a in trig if a.sector not in ("", "—")})
+    names = ", ".join(a.ticker for a in trig) or "n/d"
+    lines = [
+        f"🔴 READY TO {ACTIONABLE_SIDE} — R-UNLOCK gatillo  ·  {s.ts_utc}",
+        "",
+        f"{len(trig)} nombres cruzaron los 5 sub-gates a la vez en "
+        f"{len(sectors)} sectores"
+        + (f" ({', '.join(sectors)})" if sectors else "")
+        + f", persistido {s.unlock_streak}/{int(k['unlock_persist_readings'])}.",
+        f"Candidatos a SHORT: {names}.",
+        "",
+        "Corré /unlockcheck y confirmá 5/5 con AiPear antes de ejecutar — "
+        "el bot nunca selecciona tokens.",
+    ]
+    # At most ONE short line, only if a REAL 4h data gap affects the signal.
+    gap = next((c for c in (s.confidence or []) if "incompletos" in c.lower()), None)
+    if gap:
+        lines.append(f"⚠️ {gap}")
     return "\n".join(lines)
 
 

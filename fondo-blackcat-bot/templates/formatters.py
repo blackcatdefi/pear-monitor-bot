@@ -1140,7 +1140,16 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                     ltv_map=_ltv_qp,
                     perp_cross_mm=_cmm_qp,
                 )
-                _pm_block = format_pm_state_telegram(_pm)
+                # R-NOISE-CUT: surface the ex-MARGIN-STRESS perp cross
+                # utilization as an INFORMATIONAL panel line (never a push).
+                try:
+                    from modules.alerts_margin import perp_cross_utilization
+                    _putil_qp, _pn_qp = perp_cross_utilization(_primary)
+                except Exception:  # noqa: BLE001
+                    _putil_qp, _pn_qp = None, 0
+                _pm_block = format_pm_state_telegram(
+                    _pm, perp_cross_util_pct=_putil_qp, perp_cross_count=_pn_qp
+                )
                 if _pm_block:
                     lines.append("")
                     lines.append(_pm_block)

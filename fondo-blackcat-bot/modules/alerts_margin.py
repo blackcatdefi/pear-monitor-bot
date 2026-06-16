@@ -138,6 +138,55 @@ def count_cross_positions(positions: list[dict[str, Any]] | None) -> int:
     return n
 
 
+def perp_cross_utilization(
+    wallet_data: dict[str, Any] | None,
+) -> tuple[float | None, int]:
+    """(util_pct, n_cross) for the /reporte PM panel info line.
+
+    R-NOISE-CUT (2026-06-16): the perp-cross-margin-used vs cross-equity ratio
+    is NOT a risk metric — under unified Portfolio Margin the HYPE collateral
+    governs liquidation via the aave-HF. Its only real information is that at/
+    over 100% the perp cross sub-account cannot OPEN new positions. That single
+    fact now lives in the PM panel as an informational line, never as a push.
+
+    Returns ``(None, n_cross)`` when the ratio is not applicable: zero cross
+    perp legs (structurally N/A), missing/stale cross fields (NEVER fall back to
+    the blended marginSummary), or non-positive cross equity. NEVER raises.
+    """
+    d = wallet_data or {}
+    positions = d.get("positions") or []
+    n_cross = count_cross_positions(positions)
+    if n_cross == 0:
+        return None, 0
+    if "cross_margin_used" not in d:
+        return None, n_cross  # stale/absent cross data — never blend
+    try:
+        eq = float(d.get("cross_account_value") or 0.0)
+        used = float(d.get("cross_margin_used") or 0.0)
+    except (TypeError, ValueError):
+        return None, n_cross
+    if eq <= 0.0:
+        return None, n_cross
+    return used / eq * 100.0, n_cross
+
+
+def format_perp_cross_util_line(util_pct: float) -> str:
+    """One INFORMATIONAL panel line for perp cross utilization (never a push).
+
+    Honest copy: at/over 100% only BLOCKS opening new perp legs; it is NOT
+    liquidation proximity (that is the aave-HF / liq price shown above)."""
+    state = (
+        "al/sobre 100% bloquea ABRIR nuevas patas perp"
+        if util_pct >= 100.0
+        else "head-room para abrir nuevas patas perp"
+    )
+    return (
+        f"├─ Perp cross utilization: {util_pct:.1f}% — {state} "
+        "(informativo; el riesgo de liquidación lo mide el aave-HF/liq price, "
+        "no esta métrica)."
+    )
+
+
 def format_margin_stress_alert(ident: str, ratio_pct: float, used: float, eq: float) -> str:
     """R-MARGIN-STRESS-HOTFIX mandated copy — CROSS metric, no liquidation
     language. Only used when cross perp positions actually exist."""
@@ -375,17 +424,24 @@ def _liq_dist_message(coin: str, dist_pct: float, band: int) -> str:
 
 
 async def run_margin_alerts(bot, wallets: list[dict[str, Any]] | None) -> int:
-    """Evaluate both channels and send what fires. Returns alerts sent.
+    """REAL-RISK perp/PM pager. Returns alerts sent.
 
-    Channel 1 input (R-MARGIN-STRESS-HOTFIX): each ok wallet's CROSS margin
-    used vs CROSS equity (HL ``crossMarginSummary``) — NEVER the blended
-    ``marginSummary``, which counts isolated margin in both used and equity
-    (iso-only account → 100% by construction, permanent false alarm).
-    No-cross guard: zero cross perp legs → MARGIN STRESS is structurally not
-    applicable and never fires; at most ONE informational line on transition
-    into iso-only (24h cooldown, persisted).
-    Channel 2 input: the primary PMState (compute_pm_state — single source)
-    + every open position's live liq distance. NEVER raises.
+    R-NOISE-CUT (2026-06-16): the MARGIN STRESS channel (perp cross margin used
+    vs cross equity) is REMOVED from paging entirely. Under wallet 0xc7ae's
+    unified Portfolio Margin almost all capital is HYPE spot collateral
+    cross-margining everything, so the perp cross sub-account holds thin equity
+    and the ratio sits at ~100% as its NORMAL resting state — not a stress
+    event. It carried no actionable risk information (it is NOT liquidation
+    proximity), so it fired every few hours with nothing to act on. Its only
+    real datum (perp cross at/over 100% blocks opening NEW positions) now lives
+    in the /reporte PM panel as a single INFORMATIONAL line — never a push.
+
+    What remains here is the REAL-RISK channel and ONLY that:
+      * PM aave-HF crossing DOWN 1.30/1.20/1.10 (fed by compute_pm_state — the
+        same source as the panel), and
+      * any single open position's live liq distance crossing below 12% / 8%.
+    Real perp/PM liquidation risk is governed by the HYPE collateral via the
+    aave-HF; that is what this channel pages. NEVER raises.
     """
     sent = 0
     try:
@@ -396,61 +452,7 @@ async def run_margin_alerts(bot, wallets: list[dict[str, Any]] | None) -> int:
     if not TELEGRAM_CHAT_ID:
         return 0
 
-    # ── Channel 1: perp CROSS margin used vs CROSS equity ──
-    for w in wallets or []:
-        if not isinstance(w, dict) or w.get("status") != "ok":
-            continue
-        d = w.get("data") or {}
-        addr = (d.get("wallet") or "").lower()
-        label = d.get("label") or ""
-        key = addr[-8:] if addr else (label or "unknown")
-        short = (addr[:6] + "…" + addr[-4:]) if addr else ""
-        ident = f"{label} ({short})" if label else short
-        positions = d.get("positions") or []
-        n_cross = count_cross_positions(positions)
-        if n_cross == 0:
-            # No-cross guard: with zero cross legs the stress metric is
-            # structurally meaningless — NEVER fire MARGIN STRESS. If there
-            # ARE isolated legs, emit at most one informational line on the
-            # transition into iso-only (24h cooldown, SQLite persisted).
-            has_iso = any(
-                isinstance(p, dict)
-                and str(p.get("leverage_type") or "").lower() == "isolated"
-                for p in positions
-            )
-            if evaluate_iso_only_transition(key, has_iso):
-                try:
-                    await send_bot_message(
-                        bot, TELEGRAM_CHAT_ID, format_iso_only_info(ident)
-                    )
-                    sent += 1
-                except Exception:  # noqa: BLE001
-                    log.exception("iso-only info send failed")
-            continue
-        # Cross legs exist → re-arm the iso-only latch silently.
-        evaluate_iso_only_transition(key, False)
-        try:
-            cross_eq = float(d.get("cross_account_value") or 0.0)
-            cross_used = float(d.get("cross_margin_used") or 0.0)
-        except (TypeError, ValueError):
-            continue
-        if cross_eq <= 0 or "cross_margin_used" not in d:
-            # Cross data unavailable (stale cache / API gap) → SKIP. The
-            # blended marginSummary is never used as a fallback for this alert.
-            continue
-        ratio_pct = cross_used / cross_eq * 100.0
-        should, _band = evaluate_margin_used(key, ratio_pct)
-        if should:
-            try:
-                await send_bot_message(
-                    bot, TELEGRAM_CHAT_ID,
-                    format_margin_stress_alert(ident, ratio_pct, cross_used, cross_eq),
-                )
-                sent += 1
-            except Exception:  # noqa: BLE001
-                log.exception("margin-stress alert send failed")
-
-    # ── Channel 2: real risk (aave-HF + per-position liq distance) ──
+    # ── Channel: real risk (aave-HF + per-position liq distance) ──
     try:
         from modules.pm_context import select_primary_pm_state
         pm = select_primary_pm_state(wallets, None)

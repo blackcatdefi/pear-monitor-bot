@@ -522,8 +522,21 @@ def _display_band(ratio: float) -> tuple[str, str]:
     return "🟢", "CALM"
 
 
-def format_pm_state_telegram(pm: PMState) -> str:
-    """Telegram block for the Portfolio Margin state. NEVER raises."""
+def format_pm_state_telegram(
+    pm: PMState,
+    *,
+    perp_cross_util_pct: float | None = None,
+    perp_cross_count: int = 0,
+) -> str:
+    """Telegram block for the Portfolio Margin state. NEVER raises.
+
+    R-NOISE-CUT (2026-06-16): ``perp_cross_util_pct``/``perp_cross_count`` carry
+    the perp-cross-margin utilization that used to be a recurring MARGIN STRESS
+    push. It is now surfaced here as a single INFORMATIONAL line (only when
+    cross perp legs exist and the ratio is available) — at/over 100% it blocks
+    opening NEW perp legs, but it is NOT liquidation proximity. Both default to
+    no-op so existing callers render unchanged.
+    """
     if pm is None or not pm.has_data or pm.collateral_usd <= 0:
         return ""
     # R-PM-RATIO-RELABEL: the HEADLINE is the aave-HF (distance-to-liquidation),
@@ -602,6 +615,16 @@ def format_pm_state_telegram(pm: PMState) -> str:
         # Clarify that over-max-borrow only blocks NEW draws — liquidation is the
         # maintenance-LTV price, not the 100%-utilization point.
         lines.append(explainer_line(pm.liq_price))
+    # R-NOISE-CUT (2026-06-16): perp cross utilization, INFORMATIONAL only (the
+    # ex-MARGIN-STRESS datum). Rendered only when cross perp legs exist and the
+    # ratio is available; at/over 100% it blocks opening NEW perp legs and is
+    # NOT a liquidation signal (the aave-HF above governs liquidation risk).
+    if perp_cross_count and perp_cross_count > 0 and perp_cross_util_pct is not None:
+        try:
+            from modules.alerts_margin import format_perp_cross_util_line
+            lines.append(format_perp_cross_util_line(float(perp_cross_util_pct)))
+        except Exception:  # noqa: BLE001 — panel must never break on this line
+            pass
     # R-PM-MARGIN-MODE-FIX: the hedge framing still shows TOTAL short notional
     # (cross + isolated) as the macro hedge of the leveraged HYPE long, but it
     # annotates which portion shares the cross PM pool vs which is walled off.

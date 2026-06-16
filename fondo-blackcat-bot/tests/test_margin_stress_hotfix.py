@@ -1,17 +1,19 @@
-"""R-MARGIN-STRESS-HOTFIX — cross-only metric + no-cross guard tests.
+"""R-NOISE-CUT (2026-06-16) — MARGIN STRESS removed from paging entirely.
 
-Live evidence killed (2026-06-10 03:08-10:38 UTC): 15 identical MARGIN STRESS
-alerts every 30 min on an iso-only account (LONG BTC + LONG SOL). Root cause:
-the blended ``marginSummary`` counts isolated margin in BOTH used and equity,
-so used/equity == 100% by construction with zero cross positions — plus the
-false "Buffer to liquidation <0.0%" copy.
+Supersedes R-MARGIN-STRESS-HOTFIX. The perp-cross-margin-used vs cross-equity
+ratio is NOT a risk metric: under the fund's unified Portfolio Margin the perp
+cross sub-account rests at ~100% utilization by construction (thin perp equity;
+HYPE spot collateral cross-margins everything). It fired every few hours with
+no actionable content, so ``run_margin_alerts`` no longer pushes it at all. The
+one real datum (≥100% blocks opening NEW perp legs) now lives in the /reporte
+PM panel as an INFORMATIONAL line (``format_perp_cross_util_line``).
 
-Mandated acceptance tests:
-  (a) replay current production state (2 isolated, 0 cross) → ZERO MARGIN
-      STRESS alerts (at most one informational iso-only line on transition);
-  (b) synthetic cross account at 95% → exactly ONE alert with the new copy;
-  (c) repeated polls in the same band → silence;
-  (d) band transition → one new alert.
+Invariants under test:
+  (a) replay production state (2 isolated, 0 cross) → ZERO pushes;
+  (b) synthetic cross account at 95% / 105% → ZERO MARGIN STRESS pushes;
+  (c) repeated polls / band transitions → still ZERO pushes;
+  (d) the panel info line renders the utilization with honest non-liq copy;
+  (e) the REAL-RISK channel (aave-HF + per-position liq) is UNAFFECTED.
 """
 from __future__ import annotations
 
@@ -144,62 +146,126 @@ def test_iso_only_info_fires_once_with_24h_cooldown(am):
     assert am.evaluate_iso_only_transition("w1", True, now=t0 + 91_000) is True
 
 
-# ── (b) synthetic cross account at 95% → exactly ONE alert, new copy ────────
+# ── (b) cross account at 95% / 105% → ZERO MARGIN STRESS pushes ─────────────
 
-def test_cross_account_95_fires_exactly_once_with_new_copy(am, harness):
+def test_cross_account_95_never_pushes_margin_stress(am, harness):
     sent = harness
     wallets = [_cross_wallet(95.0)]
     asyncio.run(am.run_margin_alerts(None, wallets))
-    stress = [m for m in sent if "MARGIN STRESS" in m]
-    assert len(stress) == 1
-    msg = stress[0]
-    assert "Perp cross margin used vs cross equity = 95.0%" in msg
-    assert "Above 100% blocks NEW positions" in msg
-    assert "tracked per position and in the PM panel" in msg
-    assert "Buffer to liquidation" not in msg
-    assert "buffer to liquidation" not in msg.lower()
+    assert not any("MARGIN STRESS" in m for m in sent), (
+        "MARGIN STRESS must never push — it moved to the PM panel as info"
+    )
 
 
-# ── (c) repeated polls in the same band → silence ───────────────────────────
-
-def test_repeated_polls_same_band_silent(am, harness):
+def test_cross_account_over_100_never_pushes(am, harness):
     sent = harness
-    wallets = [_cross_wallet(95.0)]
-    for _ in range(6):
-        asyncio.run(am.run_margin_alerts(None, wallets))
-    stress = [m for m in sent if "MARGIN STRESS" in m]
-    assert len(stress) == 1, f"same band must not re-fire: {len(stress)}"
+    asyncio.run(am.run_margin_alerts(None, [_cross_wallet(105.0)]))
+    assert not any("MARGIN STRESS" in m for m in sent)
 
 
-# ── (d) band transition → one new alert ─────────────────────────────────────
+# ── (c) repeated polls / band transitions → still ZERO pushes ───────────────
 
-def test_band_transition_fires_one_new_alert(am, harness):
+def test_repeated_polls_and_transitions_silent(am, harness):
     sent = harness
     asyncio.run(am.run_margin_alerts(None, [_cross_wallet(95.0)]))
-    asyncio.run(am.run_margin_alerts(None, [_cross_wallet(95.5)]))  # same band
-    asyncio.run(am.run_margin_alerts(None, [_cross_wallet(105.0)]))  # 90-100 → 100-110
-    stress = [m for m in sent if "MARGIN STRESS" in m]
-    assert len(stress) == 2
-    assert "105.0%" in stress[1]
+    asyncio.run(am.run_margin_alerts(None, [_cross_wallet(95.5)]))   # same band
+    asyncio.run(am.run_margin_alerts(None, [_cross_wallet(105.0)]))  # band jump
+    for _ in range(6):
+        asyncio.run(am.run_margin_alerts(None, [_cross_wallet(105.0)]))
+    assert not any("MARGIN STRESS" in m for m in sent)
+
+
+# ── (d) panel info line renders the ex-stress datum (never a push) ──────────
+
+def test_panel_util_helper_and_line(am):
+    # cross legs present + cross fields available → util computed.
+    w = _cross_wallet(95.0)["data"]
+    util, n = am.perp_cross_utilization(w)
+    assert n == 1 and util == pytest.approx(95.0)
+    line = am.format_perp_cross_util_line(util)
+    assert "Perp cross utilization: 95.0%" in line
+    assert "head-room" in line
+    assert "liquidación" in line.lower()  # honest: NOT a liq signal
+    # at/over 100% → blocks-new-positions copy, still non-liq framing.
+    over = am.format_perp_cross_util_line(101.2)
+    assert "bloquea ABRIR nuevas patas perp" in over
+    assert "MARGIN STRESS" not in over and "🚨" not in over
+
+
+def test_panel_util_none_when_not_applicable(am):
+    # zero cross legs → N/A.
+    assert am.perp_cross_utilization(_prod_iso_only_wallet()["data"]) == (None, 0)
+    # cross legs but cross fields stale/missing → N/A, never blend.
+    w = _cross_wallet(95.0)["data"]
+    del w["cross_margin_used"]
+    util, n = am.perp_cross_utilization(w)
+    assert util is None and n == 1
+
+
+def test_pm_panel_renders_util_info_line(am):
+    """The /reporte PM panel renders the info line, with no push wording."""
+    from modules.portfolio_margin import PMState, format_pm_state_telegram
+    pm = PMState(
+        collateral_usd=80_000.0, debt_usd=0.0, capacity_usd=40_000.0,
+        available_usd=40_000.0, ratio=0.0, status="CALM",
+        shorts_notional=0.0, naked_long=False, hype_qty=1000.0, hype_px=80.0,
+    )
+    block = format_pm_state_telegram(
+        pm, perp_cross_util_pct=100.3, perp_cross_count=1
+    )
+    assert "Perp cross utilization: 100.3%" in block
+    assert "bloquea ABRIR nuevas patas perp" in block
+    assert "MARGIN STRESS" not in block
+    # default (no util passed) → no line, panel unchanged.
+    assert "Perp cross utilization" not in format_pm_state_telegram(pm)
 
 
 # ── guard hardening ─────────────────────────────────────────────────────────
 
 def test_blended_metric_never_used(am, harness):
-    """Cross legs exist but cross fields are MISSING (stale cache) → the
-    alert must SKIP, never fall back to the blended marginSummary."""
+    """Cross legs exist but cross fields are MISSING (stale cache) → never push
+    and never fall back to the blended marginSummary for the panel util."""
     sent = harness
     w = _cross_wallet(95.0)
     del w["data"]["cross_margin_used"]
     w["data"]["total_margin_used"] = w["data"]["account_value"]  # blended 100%
     asyncio.run(am.run_margin_alerts(None, [w]))
     assert not any("MARGIN STRESS" in m for m in sent)
+    assert am.perp_cross_utilization(w["data"])[0] is None
 
 
 def test_cross_below_90_silent(am, harness):
     sent = harness
     asyncio.run(am.run_margin_alerts(None, [_cross_wallet(45.0)]))
     assert sent == []
+
+
+# ── (e) REAL-RISK channel intact — per-position liq distance still pushes ────
+
+def test_real_risk_liq_distance_still_pushes(am, harness):
+    """Removing MARGIN STRESS must NOT weaken the real-risk channel: a leg 5%
+    from its liq price must still page, with no MARGIN STRESS noise."""
+    sent = harness
+    w = {
+        "status": "ok",
+        "data": {
+            "wallet": "0x" + "a" * 40,
+            "label": "Trading",
+            "cross_account_value": 20_000.0,
+            "cross_margin_used": 1_000.0,
+            "positions": [
+                {
+                    "coin": "ETH", "size": -2.0,
+                    "notional_usd": 6_000.0, "positionValue": 6_000.0,
+                    "liq_px": 3_150.0,  # mark=3000 → dist 5.0% (<8%)
+                    "leverage_type": "cross",
+                },
+            ],
+        },
+    }
+    asyncio.run(am.run_margin_alerts(None, [w]))
+    assert any("DISTANCIA A LIQ" in m for m in sent), "real-risk leg must page"
+    assert not any("MARGIN STRESS" in m for m in sent)
 
 
 def test_count_cross_positions(am):

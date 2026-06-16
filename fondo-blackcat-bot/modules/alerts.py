@@ -114,39 +114,36 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
     # quedan como red de seguridad de fondo.
     wallets = await fetch_all_wallets()
 
-    # 6b. R-BOT-DEFINITIVE WI-3 (2026-06-10) — margin alerting redesigned.
-    # The legacy edge-triggered MARGIN STRESS watchdog (1 fire per breach but
-    # re-armed by state churn → 6 identical alerts/night, wrong "buffer to
-    # liquidation" copy) is replaced by modules.alerts_margin:
-    #   * R-MARGIN-STRESS-HOTFIX (2026-06-10): metric = CROSS margin used vs
-    #     CROSS equity (HL crossMarginSummary), NEVER the blended marginSummary
-    #     (iso-only account → 100% by construction = permanent false alarm).
-    #     Zero cross legs → structurally N/A, never fires; at most one
-    #     iso-only info line on transition (24h cooldown, persisted).
-    #     Band transitions (<90/90-100/100-110/>110) + >5pp worsening, 6h
-    #     cooldown per band, SQLite persisted, copy states >100% only blocks
-    #     NEW positions (never liquidation language).
-    #   * REAL-risk channel — PM aave-HF crossings 1.30/1.20/1.10 + any single
-    #     position liq distance <12% / <8% (fed by compute_pm_state + live
-    #     position data only).
+    # 6b. R-NOISE-CUT (2026-06-16) — margin alerting is now REAL-RISK ONLY.
+    # The MARGIN STRESS channel (perp cross margin used vs cross equity) is
+    # REMOVED from paging: under the fund's unified Portfolio Margin the perp
+    # cross sub-account rests at ~100% utilization by construction (thin perp
+    # equity; HYPE spot collateral cross-margins everything), so it carried no
+    # actionable risk and fired every few hours with nothing to act on. Its one
+    # real datum (≥100% blocks opening NEW perp legs) moved to the /reporte PM
+    # panel as an informational line — never a push.
+    #
+    # ``run_margin_alerts`` now contains ONLY the real-risk channel — PM aave-HF
+    # crossings 1.30/1.20/1.10 + any single position liq distance <12% / <8%,
+    # fed by compute_pm_state + live position data. It runs UNCONDITIONALLY
+    # (safety): it is no longer gated by the MARGIN_STRESS_ALERT_ENABLED flag,
+    # which only ever governed the now-removed noise channel.
     try:
-        from modules.cron_state import margin_stress_enabled
-        if margin_stress_enabled():
-            import time as _time
-            from modules.alerts_margin import run_margin_alerts
-            _t0 = _time.monotonic()
-            _sent = await run_margin_alerts(bot, wallets)
-            # R-RISK-VALIDATOR-HOTFIX: liveness proof for the REAL-risk
-            # channel (PM aave-HF bands 1.30/1.20/1.10 + per-position liq
-            # distance <12%/<8%) — one INFO line per successful execution
-            # so health is verifiable in Railway logs.
-            log.info(
-                "real_risk_channel OK — duration=%.2fs alerts_sent=%d",
-                _time.monotonic() - _t0,
-                int(_sent or 0),
-            )
+        import time as _time
+        from modules.alerts_margin import run_margin_alerts
+        _t0 = _time.monotonic()
+        _sent = await run_margin_alerts(bot, wallets)
+        # R-RISK-VALIDATOR-HOTFIX: liveness proof for the REAL-risk channel
+        # (PM aave-HF bands 1.30/1.20/1.10 + per-position liq distance
+        # <12%/<8%) — one INFO line per successful execution so health is
+        # verifiable in Railway logs.
+        log.info(
+            "real_risk_channel OK — duration=%.2fs alerts_sent=%d",
+            _time.monotonic() - _t0,
+            int(_sent or 0),
+        )
     except Exception:  # noqa: BLE001
-        log.exception("margin alerts (WI-3) failed (non-fatal)")
+        log.exception("real-risk margin alerts failed (non-fatal)")
 
     # 6b-bis. R-BOT-DEFINITIVE WI-5/WI-6 — SL reachability + trailing rule.
     try:

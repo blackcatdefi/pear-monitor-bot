@@ -462,6 +462,68 @@ def test_gate_line_shows_no_reason_when_excluded():
     assert "NO" in line and "data" in line.lower()
 
 
+# ─── 7b. R-NOISE-CUT — push only on the terminal actionable (UNLOCK) state ───
+
+def test_should_push_actionable_only_on_unlock_cross():
+    # Intermediate softening states NEVER push, regardless of escalation.
+    assert u.should_push_actionable(u.WATCH, u.NONE) is False
+    assert u.should_push_actionable(u.APPROACHING, u.WATCH) is False
+    assert u.should_push_actionable(u.APPROACHING, u.NONE) is False
+    assert u.should_push_actionable(u.NONE, u.NONE) is False
+    # Genuine cross INTO UNLOCK from any lower level → push once.
+    assert u.should_push_actionable(u.UNLOCK, u.APPROACHING) is True
+    assert u.should_push_actionable(u.UNLOCK, u.WATCH) is True
+    assert u.should_push_actionable(u.UNLOCK, u.NONE) is True
+    # Already UNLOCK (held) → no re-push every cycle.
+    assert u.should_push_actionable(u.UNLOCK, u.UNLOCK) is False
+    # Retreat out of UNLOCK → silent (advances state, no push).
+    assert u.should_push_actionable(u.APPROACHING, u.UNLOCK) is False
+
+
+def test_actionable_alert_leads_with_side_and_is_concise():
+    txt = u.format_actionable_alert(_snapshot(u.UNLOCK, _counting(4)),
+                                    prev_level=u.APPROACHING)
+    # Leads with the side in plain terms.
+    assert txt.splitlines()[0].startswith("🔴 READY TO SHORT")
+    # The condition that crossed is stated.
+    assert "4 nombres cruzaron los 5 sub-gates" in txt
+    assert "persistido 2/2" in txt
+    # Single concise caveat; bot never selects tokens.
+    assert "/unlockcheck" in txt and "AiPear" in txt
+    assert "el bot nunca selecciona tokens" in txt
+    # Verbose blocks from the legacy renderer are DROPPED.
+    assert "AIPEAR_CONFIRM" not in txt          # machine block not pushed
+    assert "Nota de confianza" not in txt       # verbose confidence dropped
+    assert "PRE-FILTRO ONLY" not in txt
+    assert "ablandándose" not in txt and "Acercándose" not in txt
+
+
+def test_actionable_alert_surfaces_one_real_data_gap_line():
+    snap = _snapshot(u.UNLOCK, _counting(4))
+    snap.confidence = list(snap.confidence) + [
+        "Datos 4h incompletos: 7/11 watchlist con velas (resto EXCLUIDO)."
+    ]
+    txt = u.format_actionable_alert(snap, prev_level=u.APPROACHING)
+    gap_lines = [ln for ln in txt.splitlines() if ln.startswith("⚠️")]
+    assert len(gap_lines) == 1 and "incompletos" in gap_lines[0]
+
+
+def test_actionable_alert_no_gap_line_when_data_complete():
+    txt = u.format_actionable_alert(_snapshot(u.UNLOCK, _counting(4)),
+                                    prev_level=u.APPROACHING)
+    assert not any(ln.startswith("⚠️") for ln in txt.splitlines())
+
+
+def test_unlock_job_uses_actionable_push_gate():
+    """The scheduler job must gate on should_push_actionable + the concise
+    formatter — never the legacy any-escalation push."""
+    src = _bot_src()
+    assert "should_push_actionable" in src
+    assert "format_actionable_alert" in src
+    # The old any-escalation push must be gone from the job.
+    assert "fire = _ul.should_fire(new_level, prev)" not in src
+
+
 # ─── 8. REGRESSION GUARD — R-UNLOCK-PRECISION must not break prior rounds ────
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 

@@ -2295,7 +2295,16 @@ async def cmd_pm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             ltv_map=_ltv,
             perp_cross_mm=_cmm,
         )
-        block = format_pm_state_telegram(pm) or "⚠️ Sin datos de Portfolio Margin."
+        # R-NOISE-CUT: ex-MARGIN-STRESS perp cross utilization → INFORMATIONAL
+        # panel line only (never a push).
+        try:
+            from modules.alerts_margin import perp_cross_utilization
+            _putil, _pn = perp_cross_utilization(primary)
+        except Exception:  # noqa: BLE001
+            _putil, _pn = None, 0
+        block = format_pm_state_telegram(
+            pm, perp_cross_util_pct=_putil, perp_cross_count=_pn
+        ) or "⚠️ Sin datos de Portfolio Margin."
         await send_long_message(update, block, reply_markup=MAIN_KEYBOARD)
     except Exception as exc:  # noqa: BLE001
         log.exception("/pm failed")
@@ -2499,16 +2508,20 @@ async def cmd_haltclear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def _unlock_monitor_job(application: Application) -> None:
-    """R-UNLOCK — basket-unlock watchdog (edge-triggered, R-SILENT aware).
+    """R-UNLOCK — basket-unlock watchdog (actionable-only, R-SILENT aware).
 
-    Every ~30 min: recompute the A/B/C state and fire ONE alert when the level
-    ESCALATES (NONE→WATCH→APPROACHING→UNLOCK). Never spams the same level; a
-    retreat resets the stored level silently so the next genuine flip can fire.
+    Every ~30 min: recompute the A/B/C state. R-NOISE-CUT (2026-06-16): PUSH a
+    Telegram alert ONLY on a genuine cross into the terminal actionable state
+    (UNLOCK = the re-screen GO trigger). Every intermediate level — WATCH
+    ("ablandándose"), APPROACHING ("acercándose"), NONE — is SILENT: the level
+    is still recomputed and persisted (so transitions keep tracking and
+    /unlockcheck reflects them on demand) but nothing is pushed. No more
+    in-between softening chatter. A retreat resets the stored level silently so
+    the next genuine UNLOCK cross can fire again.
 
-    R-SILENT: while silent mode is on, only levels >= the configured
-    break-silence threshold (default UNLOCK) are emitted; softer transitions
-    advance the stored state silently. Fully wrapped — never crashes the
-    scheduler.
+    The pushed message is CONCISE and leads with the side (READY TO SHORT) +
+    the condition that crossed + one caveat (format_actionable_alert). Fully
+    wrapped — never crashes the scheduler.
     """
     if os.getenv("UNLOCK_MONITOR_ENABLED", "true").strip().lower() == "false":
         return
@@ -2521,10 +2534,13 @@ async def _unlock_monitor_job(application: Application) -> None:
         prev = _ul.load_state().get("level", _ul.NONE)
         snap = await _ul.compute_snapshot()
         new_level = snap.level
-        fire = _ul.should_fire(new_level, prev)
+        # R-NOISE-CUT: push ONLY on the terminal actionable cross (UNLOCK).
+        # Intermediate softening states advance state below but never push.
+        fire = _ul.should_push_actionable(new_level, prev)
 
         if fire:
-            # R-SILENT gate: soft levels stay silent while silent mode is on.
+            # R-SILENT gate kept for parity; UNLOCK is at/above the default
+            # break-silence threshold so it pages even under silent mode.
             silent = False
             try:
                 from auto.silent_mode import is_silent
@@ -2535,13 +2551,18 @@ async def _unlock_monitor_job(application: Application) -> None:
             min_break = _ul.alert_breaks_silence_level()
             allowed = (not silent) or (rank.get(new_level, 0) >= rank.get(min_break, 3))
             if allowed:
-                msg = _ul.format_alert(snap, prev)
+                msg = _ul.format_actionable_alert(snap, prev)
                 await send_bot_message(application.bot, chat_id, msg)
-                log.info("R-UNLOCK alert fired: %s → %s (triggered=%d)",
+                log.info("R-UNLOCK actionable alert fired: %s → %s (triggered=%d)",
                          prev, new_level, snap.n_counts)
             else:
                 log.info("R-UNLOCK %s suppressed by silent mode (min_break=%s)",
                          new_level, min_break)
+        else:
+            # Log-only: make the silent intermediate state observable in Railway
+            # logs without paging the operator.
+            log.info("R-UNLOCK level=%s (prev=%s) — no push (non-actionable)",
+                     new_level, prev)
 
         # Persist the level transition (escalation OR silent retreat) without
         # disturbing the rolling series already saved by compute_snapshot().
