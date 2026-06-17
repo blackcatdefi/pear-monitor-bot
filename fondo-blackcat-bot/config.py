@@ -175,6 +175,68 @@ def _load_vault_deposits() -> list[dict]:
 
 BLACKCAT_VAULT_DEPOSITS: list[dict] = _load_vault_deposits()
 
+# ─── R-PEAR-ASSET-INTEGRATION (2026-06-17) — PEAR como 2º activo del fondo ───
+# El fondo mantiene PEAR como segundo activo direccional, en forma de stPEAR
+# (staked PEAR) en Pear Protocol sobre Arbitrum. NO es un negocio paralelo: es
+# un activo del fondo y DEBE contarse en la equity total. Antes se mostraba un
+# valor estático stale ($1.2K vía PEAR_STAKED_USD) que subcontaba casi todo el
+# activo. Ahora se LEE on-chain: balance stPEAR (balanceOf en el Pear Staker) ×
+# precio PEAR vivo. stPEAR es 1:1 mint/redeem con PEAR (token no transferible),
+# así que el balance stPEAR == PEAR subyacente (el exit-fee solo aplica al
+# redimir, no afecta la valuación del activo en libros).
+#
+# Arbitrum RPC (keyless, read-only). Se puede sobreescribir por env si el
+# default es rate-limiteado. NUNCA se firma nada: solo eth_call balanceOf.
+ARBITRUM_RPC = os.getenv("ARBITRUM_RPC", "https://arb1.arbitrum.io/rpc").strip()
+# Pear Staker contract (Arbitrum). Mintea stPEAR 1:1; balanceOf(wallet) =
+# stPEAR staked del fondo. Fuente: docs.pearprotocol.io smart-contracts.
+PEAR_STAKER_CONTRACT = os.getenv(
+    "PEAR_STAKER_CONTRACT",
+    "0xcE3be5204017BB1bD279937f92dF09Fd7F539B92",
+).strip()
+# PEAR ERC-20 token (Arbitrum) — usado para resolver el precio on-chain/API.
+PEAR_TOKEN_ARBITRUM = os.getenv(
+    "PEAR_TOKEN_ARBITRUM",
+    "0x3212dc0F8c834e4DE893532d27CC9B6001684DB0",
+).strip()
+# Wallets del fondo que mantienen stPEAR. Default = wallet primaria (0xc7ae) +
+# todas las FUND_WALLETS. Override CSV vía PEAR_STAKING_WALLETS.
+def _load_pear_staking_wallets() -> list[str]:
+    raw = os.getenv("PEAR_STAKING_WALLETS", "").strip()
+    if raw:
+        out = [
+            w.strip().lower()
+            for w in raw.split(",")
+            if w.strip().startswith("0x") and len(w.strip()) == 42
+        ]
+        if out:
+            return out
+    # Default: primaria + fund wallets (dedup, preserva orden).
+    seen: dict[str, None] = {}
+    if PM_PRIMARY_WALLET and PM_PRIMARY_WALLET.startswith("0x"):
+        seen[PM_PRIMARY_WALLET] = None
+    for addr in (FUND_WALLETS or {}):
+        seen[addr] = None
+    return list(seen.keys())
+
+PEAR_STAKING_WALLETS: list[str] = _load_pear_staking_wallets()
+# stPEAR→PEAR ratio (1:1 mint/redeem). Override solo si Pear cambia el modelo.
+STPEAR_TO_PEAR_RATIO = float(os.getenv("STPEAR_TO_PEAR_RATIO", "1.0") or 1.0)
+# Fuente de precio PEAR: DefiLlama coins (primaria) + CoinGecko (fallback).
+# Ambas keyless. Si AMBAS fallan → el activo PEAR se muestra "n/d" (nunca se
+# fabrica ni se cae al valor estático viejo).
+PEAR_PRICE_DEFILLAMA = os.getenv(
+    "PEAR_PRICE_DEFILLAMA",
+    f"https://coins.llama.fi/prices/current/arbitrum:{PEAR_TOKEN_ARBITRUM}",
+).strip()
+PEAR_PRICE_COINGECKO = os.getenv(
+    "PEAR_PRICE_COINGECKO",
+    "https://api.coingecko.com/api/v3/simple/price?ids=pear-protocol&vs_currencies=usd",
+).strip()
+PEAR_PRICE_COINGECKO_ID = os.getenv("PEAR_PRICE_COINGECKO_ID", "pear-protocol").strip()
+# TTL cache del reader stPEAR (segundos).
+PEAR_STAKING_TTL_SEC = float(os.getenv("PEAR_STAKING_TTL_SEC", "90") or 90)
+
 # ─── Thresholds & alerts ────────────────────────────────────────────────────
 # HyperLend real liquidation happens at HF < 1.00.
 # Fund operative rules: monitor at 1.15, act at 1.10. Zone 1.10-1.20 is normal

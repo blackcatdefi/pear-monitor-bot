@@ -109,8 +109,8 @@ def test_telegram_render_leads_with_total_equity():
     assert "$36" in first_line  # $36.6K compact format
     # NET sub-line still present
     assert "NET (post-leverage)" in tg
-    # Pear staked appears
-    assert "Pear Protocol staked" in tg
+    # PEAR (2nd asset) appears as a first-class line
+    assert "PEAR (2º activo)" in tg
 
 
 # ─── Bug #2: HF render never emits literal 'nan' on UNKNOWN ────────────────
@@ -282,9 +282,9 @@ def test_telegram_and_html_render_consume_same_net_capital():
     # Both renderers use the same headline label.
     assert "TOTAL EQUITY" in tg
     assert "TOTAL EQUITY" in html
-    # Both expose Pear Protocol staked when non-zero.
-    assert "Pear Protocol staked" in tg
-    assert "Pear Protocol staked" in html
+    # Both expose PEAR (2nd asset) when non-zero.
+    assert "PEAR (2º activo)" in tg
+    assert "PEAR (2º activo)" in html
     # Both expose stables sibling line.
     assert "Spot stables" in tg or "stables" in tg.lower()
     assert "stables" in html.lower()
@@ -302,8 +302,8 @@ def test_html_render_omits_pear_card_when_zero():
         fmt_compact_usd=lambda v: f"${float(v) / 1000:.1f}K",
         signed=lambda v: ("pos" if v >= 0 else "neg", f"${v:+.2f}"),
     )
-    # Stables still rendered (cash equiv); Pear staked absent.
-    assert "Pear Protocol staked" not in html
+    # Stables still rendered (cash equiv); PEAR line absent.
+    assert "PEAR (2º activo)" not in html
 
 
 def test_pear_staked_total_from_env_var(monkeypatch):

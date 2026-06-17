@@ -887,10 +887,18 @@ def format_report_header(
                     spot_borrow_total += float(_spot_native_borrow(_sb) or 0.0)
                 except Exception:  # noqa: BLE001
                     pass
+        # R-PEAR-ASSET-INTEGRATION (2026-06-17): PEAR (2nd asset) LIVE on-chain
+        # — stPEAR balanceOf × live price. n/d on failure (never the retired
+        # static PEAR_STAKED_USD). Keyless + cached; never raises.
+        pear_fields = {
+            "pear_staked_total": 0.0, "pear_staked_balance": 0.0,
+            "pear_staked_price": 0.0, "pear_staked_known": False,
+        }
         try:
-            pear_total = float(os.getenv("PEAR_STAKED_USD", "0") or 0)
-        except (TypeError, ValueError):
-            pear_total = 0.0
+            from modules.pear_staking import pear_staked_capital_fields
+            pear_fields = pear_staked_capital_fields()
+        except Exception:  # noqa: BLE001
+            pass
         # R-VAULTDEP: fund capital deposited INTO HL vaults (keyless read,
         # 0.0 on failure — never inflates, never crashes).
         try:
@@ -906,8 +914,8 @@ def format_report_header(
             "spot_stables_total": spot_stables,
             "spot_borrow_total": spot_borrow_total,  # R-PM-LIQ: net the PM debt
             "upnl_perp_total": 0.0,  # already in perp accountValue
-            "pear_staked_total": pear_total,
             "vault_deposits_total": vault_dep_total,
+            **pear_fields,
         })
         # NetCapital dataclass — total_equity_usd is the Rabby-parity headline.
         try:
@@ -1063,13 +1071,19 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                 pass
 
         from auto.capital_calc import compute_net_capital, format_net_capital_telegram
-        # R-DASHBOARD-RABBY-PARITY (2026-05-06): Pear Protocol staked is
-        # surfaced via env var PEAR_STAKED_USD (or future on-chain reader)
-        # and folded into the TOTAL EQUITY headline alongside HL/perp/spot.
+        # R-PEAR-ASSET-INTEGRATION (2026-06-17): PEAR (2nd fund asset) LIVE
+        # on-chain — stPEAR balanceOf on Arbitrum × live PEAR price (1:1). The
+        # static PEAR_STAKED_USD is RETIRED. n/d on failure (never fabricated /
+        # stale). Folded into TOTAL EQUITY as a first-class component.
+        _pear_fields = {
+            "pear_staked_total": 0.0, "pear_staked_balance": 0.0,
+            "pear_staked_price": 0.0, "pear_staked_known": False,
+        }
         try:
-            _pear_total = float(os.getenv("PEAR_STAKED_USD", "0") or 0)
-        except (TypeError, ValueError):
-            _pear_total = 0.0
+            from modules.pear_staking import pear_staked_capital_fields
+            _pear_fields = pear_staked_capital_fields()
+        except Exception:  # noqa: BLE001
+            pass
         # R-VAULTDEP: fund capital deposited INTO HL vaults — keyless live
         # read, folded into TOTAL EQUITY as its own line (never against perp
         # margin / wallet USDC). Detail block (label + PnL vs cost basis +
@@ -1097,10 +1111,23 @@ def format_quick_positions(wallets: list[dict[str, Any]],
             "spot_stables_total": _spot_stables_total,
             "spot_borrow_total": _spot_borrow_total,  # R-PM-LIQ: net PM debt
             "upnl_perp_total": _upnl_total,
-            "pear_staked_total": _pear_total,
             "vault_deposits_total": _vault_dep_total,
+            **_pear_fields,
         })
         lines.append(format_net_capital_telegram(_net))
+        # R-PEAR-ASSET-INTEGRATION (2026-06-17): real HYPE acquisition metrics
+        # (PPC contable + net acquisition) replacing the junk entryNtl "cost
+        # basis". Shows n/d when fills can't reliably reconstruct the balance
+        # (migrated/bridged HYPE or truncated fill page) — never a wrong number.
+        try:
+            from modules.hype_acquisition import (
+                compute_hype_acquisition,
+                format_hype_acquisition_line,
+            )
+            _acq = compute_hype_acquisition()
+            lines.append(format_hype_acquisition_line(_acq))
+        except Exception:  # noqa: BLE001
+            pass
         # R-PMCORE (2026-06-01): Portfolio Margin state of the primary account
         # (HYPE collateral / debt / borrow capacity / margin ratio + naked-long
         # guard). The HYPE spot value is the bulk of TOTAL EQUITY now, so the
@@ -1392,6 +1419,16 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                 cost_basis_display = f"${total_amount:,.2f}"
             else:
                 cost_basis_display = _fmt_usd(total_entry)
+            # R-PEAR-ASSET-INTEGRATION (2026-06-17): the HYPE core's entryNtl
+            # is 0/junk after the PM migration, so its "(cost basis $X)" read as
+            # a bogus per-unit figure ($8.46/$11.67). Replace it with a pointer
+            # to the real PPC/net acquisition line (computed from fills above);
+            # never present the entryNtl proxy as HYPE's acquisition price.
+            _basis_txt = (
+                "adq.: ver línea 💠 HYPE adquisición arriba"
+                if coin == "HYPE"
+                else f"cost basis {cost_basis_display}"
+            )
 
             # Unified Account note: when a wallet listed has an active perp,
             # its USDC shown here is already inside Account Value. The
@@ -1421,13 +1458,13 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                 wallet_label = entries[0].get("_wallet_label", "")
                 lines.append(
                     f"  • {coin}: {total_amount:.4f} · {_fmt_usd(total_usd_now)} now "
-                    f"(cost basis {cost_basis_display}) [{wallet_label}]"
+                    f"({_basis_txt}) [{wallet_label}]"
                     f"{usdc_note}"
                 )
             else:
                 lines.append(
                     f"  • {coin}: {total_amount:.4f} total · {_fmt_usd(total_usd_now)} now "
-                    f"(cost basis {cost_basis_display})"
+                    f"({_basis_txt})"
                     f"{usdc_note}"
                 )
                 for e in entries:

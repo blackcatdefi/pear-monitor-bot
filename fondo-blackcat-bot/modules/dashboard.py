@@ -507,14 +507,34 @@ def _render_html(state: dict[str, Any]) -> str:
     # Surface external DeFi positions that don't show up in HL / perp / spot
     # endpoints. Today only Pear Protocol staked is exposed (env-driven);
     # an on-chain reader will replace the env var in a future round.
+    # R-PEAR-ASSET-INTEGRATION (2026-06-17): PEAR is the fund's 2nd asset —
+    # live stPEAR balance × price (or n/d on read failure). First-class card.
     pear_staked_total = float(state.get("pear_staked_total") or 0.0)
+    pear_known = bool(state.get("pear_staked_known", True))
+    pear_balance = float(state.get("pear_staked_balance") or 0.0)
+    pear_price = float(state.get("pear_staked_price") or 0.0)
     pear_card_html = ""
-    if pear_staked_total > 0.01:
+    if not pear_known:
         pear_card_html = (
             "<div class='card'>"
-            "<h2>External DeFi</h2>"
-            f"<p><strong>Pear Protocol staked</strong> · "
+            "<h2>PEAR (2º activo)</h2>"
+            "<p><strong>stPEAR</strong> · <strong>n/d</strong></p>"
+            "<p class='dim'>Lectura on-chain/precio falló — excluido del equity "
+            "(nunca se fabrica un valor).</p>"
+            "</div>"
+        )
+    elif pear_staked_total > 0.01:
+        _detail = (
+            f"{pear_balance:,.0f} stPEAR × ${pear_price:.5f}"
+            if pear_balance > 0 and pear_price > 0
+            else "staked"
+        )
+        pear_card_html = (
+            "<div class='card'>"
+            "<h2>PEAR (2º activo)</h2>"
+            f"<p><strong>stPEAR</strong> · "
             f"<strong>{_esc(_fmt_compact_usd(pear_staked_total))}</strong></p>"
+            f"<p class='dim'>{_esc(_detail)} · live on-chain (Arbitrum)</p>"
             "<p class='dim'>Folded into TOTAL EQUITY (Rabby parity).</p>"
             "</div>"
         )
@@ -1002,6 +1022,11 @@ async def _build_state() -> dict[str, Any]:
         # surfaced via env var (or future on-chain reader) and folded into
         # the TOTAL EQUITY headline by ``auto.capital_calc.compute_net_capital``.
         "pear_staked_total": getattr(snap, "pear_staked_total", 0.0),
+        # R-PEAR-ASSET-INTEGRATION (2026-06-17): live stPEAR balance + price
+        # detail + known flag (n/d when the on-chain/price read failed).
+        "pear_staked_balance": getattr(snap, "pear_staked_balance", 0.0),
+        "pear_staked_price": getattr(snap, "pear_staked_price", 0.0),
+        "pear_staked_known": getattr(snap, "pear_staked_known", True),
         # R-VAULTDEP (2026-05-30): fund capital deposited INTO HL vaults,
         # folded into TOTAL EQUITY by compute_net_capital. Read live via
         # the keyless userVaultEquities endpoint in the snapshot builder.

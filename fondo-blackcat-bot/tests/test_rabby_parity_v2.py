@@ -157,8 +157,8 @@ def test_no_phantom_stables_line_when_perp_active():
     net = compute_net_capital(_rabby_v2_dict())
     tg = format_net_capital_telegram(net)
     assert "Spot stables" not in tg
-    # Pear staked line still surfaces since it's > $0.01.
-    assert "Pear Protocol staked" in tg
+    # PEAR (2nd asset) line still surfaces since it's > $0.01.
+    assert "PEAR (2º activo)" in tg
 
 
 # ─── Scenario coverage: idle wallet still keeps its stables line ───────────

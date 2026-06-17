@@ -132,6 +132,22 @@ class NetCapital:
     # from ``total_equity_usd``. Distinct from ``hl_debt_usd`` (deprecated
     # HyperLend flywheel) — this is the live native lending borrow.
     spot_borrow_usd: float = 0.0
+    # R-PEAR-ASSET-INTEGRATION (2026-06-17): PEAR is the fund's SECOND asset,
+    # held as stPEAR on Pear Protocol (Arbitrum) and read LIVE on-chain
+    # (balance × live PEAR price). These carry the underlying detail so every
+    # surface can print "PEAR (2º activo): {bal} stPEAR × ${px} = ${val}".
+    pear_staked_balance: float = 0.0  # stPEAR units (== PEAR at 1:1)
+    pear_staked_price: float = 0.0  # live PEAR/USD
+    # ``pear_staked_known`` is False when the on-chain balance OR the price
+    # feed failed: PEAR then contributes 0 to equity and renders "n/d" — NEVER
+    # a stale/fabricated value. Defaults True for backward-compat with callers
+    # that pre-date the live reader (their static value is treated as known).
+    pear_staked_known: bool = True
+    # R-PEAR-ASSET-INTEGRATION: set True when the negative-equity guard fired
+    # (a six-figure-collateralised PM account cannot have negative net worth —
+    # so a negative raw total means the parity/price feed lagged). When True
+    # the headline uses the oracle computation and flags the feed as stale.
+    parity_stale: bool = False
 
     @property
     def spot_non_usdc_usd(self) -> float:
@@ -151,14 +167,25 @@ class NetCapital:
         (Pear staked) AND fund capital deposited INTO HL vaults
         (vault_deposits) on top of the post-leverage NET. This is the
         number BCD wants to see at the top of the dashboard.
+
+        R-PEAR-ASSET-INTEGRATION (2026-06-17): when ``parity_stale`` is set
+        (the negative-equity guard fired — see ``compute_net_capital``), the
+        raw Rabby formula produced a nonsense negative because the collateral
+        price feed or the borrow feed lagged. A PM account collateralised in
+        six figures of HYPE cannot have negative net worth (the borrow is
+        always sub-collateralised, else liquidated). In that case prefer the
+        oracle-based computation: keep the live-valued collateral + assets and
+        drop the suspect borrow over-subtraction, clamped at 0.
         """
-        return (
+        oracle_equity = (
             self.net_total_usd
             + self.spot_stables_usd
             + self.pear_staked_usd
             + self.vault_deposits_usd
-            - self.spot_borrow_usd
         )
+        if self.parity_stale:
+            return max(oracle_equity, 0.0)
+        return oracle_equity - self.spot_borrow_usd
 
 
 def _coerce_floats(d: dict[str, Any]) -> dict[str, float]:
@@ -181,6 +208,9 @@ def _coerce_floats(d: dict[str, Any]) -> dict[str, float]:
         "vault_deposits_total",
         # R-WALLET-FIX: TRUE borrowed liability (PM USDC borrow).
         "spot_borrow_total",
+        # R-PEAR-ASSET-INTEGRATION: live stPEAR balance + price detail.
+        "pear_staked_balance",
+        "pear_staked_price",
     ):
         try:
             out[key] = float(d.get(key) or 0.0)
@@ -215,6 +245,12 @@ def compute_net_capital(snap: Any) -> NetCapital:
         pear_staked = f["pear_staked_total"]
         vault_deposits = f["vault_deposits_total"]
         spot_borrow = f["spot_borrow_total"]
+        pear_balance = f["pear_staked_balance"]
+        pear_price = f["pear_staked_price"]
+        # Default True for backward-compat: a non-zero static value supplied by
+        # a legacy caller is treated as known. The live reader passes the flag
+        # explicitly (False on fetch failure → n/d).
+        pear_known = bool(snap.get("pear_staked_known", True))
     else:
         def _get(name: str) -> float:
             try:
@@ -237,6 +273,19 @@ def compute_net_capital(snap: Any) -> NetCapital:
         vault_deposits = _get("vault_deposits_total")
         # R-WALLET-FIX: TRUE borrowed liability (PM USDC borrow). Defaults 0.
         spot_borrow = _get("spot_borrow_total")
+        # R-PEAR-ASSET-INTEGRATION: live stPEAR balance + price detail.
+        pear_balance = _get("pear_staked_balance")
+        pear_price = _get("pear_staked_price")
+        try:
+            pear_known = bool(getattr(snap, "pear_staked_known", True))
+        except Exception:  # noqa: BLE001
+            pear_known = True
+
+    # R-PEAR-ASSET-INTEGRATION: when the live PEAR read failed, PEAR is
+    # unknown → it must contribute 0 to equity and render "n/d" (never a
+    # stale/fabricated number). Be defensive even if a caller passed a value.
+    if not pear_known:
+        pear_staked = 0.0
 
     hl_net = hl_coll - hl_debt
     # NET = post-leverage capital exposure. UPnL is NOT added separately
@@ -255,6 +304,33 @@ def compute_net_capital(snap: Any) -> NetCapital:
     # borrowed dollars deployed into perp are already in ``perp`` — so the
     # liability must be netted out once here to land on Rabby/DeBank net worth.
     total_equity = net + stables + pear_staked + vault_deposits - spot_borrow
+
+    # R-PEAR-ASSET-INTEGRATION (2026-06-17): kill the "-$800 / Rabby parity"
+    # artifact. A PM account collateralised in six figures of HYPE cannot have
+    # negative net worth — the USDC borrow is always sub-collateralised (else
+    # liquidated). So a NEGATIVE total while the live collateral base is
+    # clearly positive means the price feed (HYPE oracle → spot ~0) or the
+    # borrow feed lagged. Flag the parity feed stale; the total_equity_usd
+    # property then prefers the oracle computation (borrow excluded, clamped).
+    collateral_base = hl_coll + spot + perp  # gross, pre-borrow
+    # Fire when the raw total is negative AND the PM borrow cannot be
+    # reconciled against the live collateral: either the six-figure collateral
+    # dwarfs the (small) negative — the classic "-$800" lag — OR the borrow
+    # exceeds all visible collateral, which is impossible in a live PM account
+    # and means the collateral price feed collapsed (HYPE oracle → spot ~0).
+    parity_stale = (
+        total_equity < 0.0
+        and spot_borrow > 0.0
+        and (collateral_base > abs(total_equity) or spot_borrow > collateral_base)
+    )
+    if parity_stale:
+        log.warning(
+            "capital_calc: PARITY-STALE guard fired — raw total=%.2f negative "
+            "while collateral_base=%.2f, borrow=%.2f. Using oracle computation.",
+            total_equity,
+            collateral_base,
+            spot_borrow,
+        )
     log.info(
         "capital_calc: hl_coll=%.2f hl_debt=%.2f hl_net=%.2f perp=%.2f "
         "spot_non_stable=%.2f spot_stables=%.2f pear_staked=%.2f "
@@ -288,6 +364,10 @@ def compute_net_capital(snap: Any) -> NetCapital:
         pear_staked_usd=pear_staked,
         vault_deposits_usd=vault_deposits,
         spot_borrow_usd=spot_borrow,
+        pear_staked_balance=pear_balance,
+        pear_staked_price=pear_price,
+        pear_staked_known=pear_known,
+        parity_stale=parity_stale,
     )
 
 
@@ -338,8 +418,13 @@ def format_net_capital_telegram(net: NetCapital) -> str:
     """
     lines: list[str] = []
     # ── Top line: total equity (Rabby parity) ─────────────────────────────
+    _parity_tag = (
+        "  ⚠️ parity feed STALE — usando cómputo oracle"
+        if getattr(net, "parity_stale", False)
+        else "  (Rabby parity)"
+    )
     lines.append(
-        f"💰 TOTAL EQUITY: {_fmt_usd(net.total_equity_usd)}  (Rabby parity)"
+        f"💰 TOTAL EQUITY: {_fmt_usd(net.total_equity_usd)}{_parity_tag}"
     )
     lines.append(
         f"├─ NET (post-leverage): {_fmt_usd(net.net_total_usd)}"
@@ -352,16 +437,35 @@ def format_net_capital_telegram(net: NetCapital) -> str:
     # Optional sibling sub-lines (only rendered when > $0.01). The LAST
     # present sibling gets the └─ connector. R-VAULTDEP adds the HL vault
     # deposits line here so it's visibly folded into TOTAL EQUITY.
-    _siblings: list[tuple[str, float]] = []
+    # R-PEAR-ASSET-INTEGRATION: PEAR is the fund's 2nd asset, surfaced as a
+    # first-class line with its live balance × price (or "n/d" on read fail).
+    _siblings: list[str] = []
     if net.spot_stables_usd > 0.01:
-        _siblings.append(("Spot stables (cash equiv)", net.spot_stables_usd))
-    if net.pear_staked_usd > 0.01:
-        _siblings.append(("Pear Protocol staked", net.pear_staked_usd))
+        _siblings.append(
+            f"Spot stables (cash equiv): {_fmt_usd(net.spot_stables_usd)}"
+        )
+    if getattr(net, "pear_staked_known", True):
+        if net.pear_staked_usd > 0.01:
+            _bal = getattr(net, "pear_staked_balance", 0.0) or 0.0
+            _px = getattr(net, "pear_staked_price", 0.0) or 0.0
+            if _bal > 0 and _px > 0:
+                _siblings.append(
+                    f"PEAR (2º activo): {_bal:,.0f} stPEAR × ${_px:.5f} "
+                    f"= {_fmt_usd(net.pear_staked_usd)}"
+                )
+            else:
+                _siblings.append(
+                    f"PEAR (2º activo): {_fmt_usd(net.pear_staked_usd)}"
+                )
+    else:
+        _siblings.append(
+            "PEAR (2º activo): n/d (lectura on-chain/precio falló — excluido del equity)"
+        )
     if net.vault_deposits_usd > 0.01:
-        _siblings.append(("Vault Deposits (HL)", net.vault_deposits_usd))
-    for _i, (_lbl, _val) in enumerate(_siblings):
+        _siblings.append(f"Vault Deposits (HL): {_fmt_usd(net.vault_deposits_usd)}")
+    for _i, _entry in enumerate(_siblings):
         _tee = "└─" if _i == len(_siblings) - 1 else "├─"
-        lines.append(f"{_tee} {_lbl}: {_fmt_usd(_val)}")
+        lines.append(f"{_tee} {_entry}")
     # R-WALLET-FIX (2026-06-06): show the PM borrow as an explicit liability
     # netted out of TOTAL EQUITY, so the headline can never silently overstate.
     if net.spot_borrow_usd > 0.01:
@@ -417,10 +521,26 @@ def render_net_capital_html(
             f"<p>&nbsp;&nbsp;Spot stables (cash equiv): "
             f"{fmt_compact_usd(net.spot_stables_usd)}</p>"
         )
-    if net.pear_staked_usd > 0.01:
+    # R-PEAR-ASSET-INTEGRATION: PEAR 2nd asset — live balance × price or n/d.
+    if getattr(net, "pear_staked_known", True):
+        if net.pear_staked_usd > 0.01:
+            _bal = getattr(net, "pear_staked_balance", 0.0) or 0.0
+            _px = getattr(net, "pear_staked_price", 0.0) or 0.0
+            if _bal > 0 and _px > 0:
+                extra_lines.append(
+                    f"<p>&nbsp;&nbsp;PEAR (2º activo): "
+                    f"{_bal:,.0f} stPEAR × ${_px:.5f} = "
+                    f"{fmt_compact_usd(net.pear_staked_usd)}</p>"
+                )
+            else:
+                extra_lines.append(
+                    f"<p>&nbsp;&nbsp;PEAR (2º activo): "
+                    f"{fmt_compact_usd(net.pear_staked_usd)}</p>"
+                )
+    else:
         extra_lines.append(
-            f"<p>&nbsp;&nbsp;Pear Protocol staked: "
-            f"{fmt_compact_usd(net.pear_staked_usd)}</p>"
+            "<p>&nbsp;&nbsp;PEAR (2º activo): "
+            "<span class='dim'>n/d (lectura on-chain/precio falló)</span></p>"
         )
     # R-VAULTDEP: fund capital inside HL vaults (separate from wallets).
     if net.vault_deposits_usd > 0.01:
@@ -440,7 +560,7 @@ def render_net_capital_html(
         # ── Headline: TOTAL EQUITY (Rabby parity) ──────────────────────
         f"<p>💰 <strong>TOTAL EQUITY: "
         f"{fmt_compact_usd(net.total_equity_usd)}</strong>"
-        f" <span class='dim'>(Rabby parity)</span></p>"
+        f" <span class='dim'>{'⚠️ parity feed stale — oracle' if getattr(net, 'parity_stale', False) else '(Rabby parity)'}</span></p>"
         # ── Sub: NET (post-leverage exposure) ──────────────────────────
         f"<p>&nbsp;&nbsp;NET (post-leverage): "
         f"{fmt_compact_usd(net.net_total_usd)}</p>"

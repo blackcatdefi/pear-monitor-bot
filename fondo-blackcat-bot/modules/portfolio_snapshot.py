@@ -234,12 +234,18 @@ class PortfolioSnapshot:
     # reads like Rabby/DeBank (net of leverage) instead of overstating by the
     # full borrow. Defaults to 0.0 to keep older construction sites compatible.
     spot_borrow_total: float = 0.0
-    # R-DASHBOARD-RABBY-PARITY (2026-05-06): external DeFi positions
-    # surfaced through the env-var ``PEAR_STAKED_USD`` (BCD-controlled
-    # static value while we don't yet have an on-chain Pear Protocol
-    # reader). Folded into the dashboard's TOTAL EQUITY headline by
-    # ``auto.capital_calc.compute_net_capital``. Defaults to 0.0.
+    # R-PEAR-ASSET-INTEGRATION (2026-06-17): PEAR is the fund's SECOND asset,
+    # held as stPEAR on Pear Protocol (Arbitrum). Read LIVE on-chain via
+    # ``modules.pear_staking`` (balanceOf × live PEAR price, 1:1). The old
+    # static env-var ``PEAR_STAKED_USD`` is RETIRED — it massively under-counted
+    # the position ($1.2K vs ~$2.5K live). Folded into TOTAL EQUITY by
+    # ``auto.capital_calc.compute_net_capital``. ``pear_staked_total`` is 0.0
+    # when the live read failed AND ``pear_staked_known`` is then False so the
+    # report shows "n/d" instead of a fabricated/stale number.
     pear_staked_total: float = 0.0
+    pear_staked_balance: float = 0.0  # stPEAR units (== PEAR at 1:1)
+    pear_staked_price: float = 0.0  # live PEAR/USD
+    pear_staked_known: bool = True
     # R-VAULTDEP (2026-05-30): fund capital deposited INTO HL vaults
     # (e.g. "Systemic Strategies HyperGrowth"). Lives under the vault
     # address, not in any fund wallet, so the per-wallet aggregation omits
@@ -927,16 +933,23 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
     spot_borrow_total = sum(ws.spot_borrow_usd for ws in wallet_snaps)
     upnl_perp_total = sum(ws.upnl_perp for ws in wallet_snaps)
 
-    # R-DASHBOARD-RABBY-PARITY (2026-05-06): Pear Protocol staked balance
-    # is BCD-controlled via env var PEAR_STAKED_USD. It does not show up
-    # in any HL/perp/spot endpoint, so without this surface the dashboard
-    # under-counts fund equity by ~$1.2K vs. Rabby. The env var is
-    # intentionally static for now — when the on-chain Pear Protocol
-    # reader lands it will replace this in-place.
+    # R-PEAR-ASSET-INTEGRATION (2026-06-17): PEAR (2nd fund asset) read LIVE
+    # on-chain — stPEAR balanceOf on Arbitrum × live PEAR price (1:1). The
+    # synchronous reader is keyless + cached + null-safe (n/d on failure, never
+    # fabricates or falls back to the retired static value). Run off-loop.
+    pear_fields: dict[str, Any] = {
+        "pear_staked_total": 0.0,
+        "pear_staked_balance": 0.0,
+        "pear_staked_price": 0.0,
+        "pear_staked_known": False,
+    }
     try:
-        pear_staked_total = float(os.getenv("PEAR_STAKED_USD", "0") or 0)
-    except (TypeError, ValueError):
-        pear_staked_total = 0.0
+        from modules.pear_staking import pear_staked_capital_fields
+
+        pear_fields = await asyncio.to_thread(pear_staked_capital_fields)
+    except Exception as _e:  # noqa: BLE001
+        log.warning("portfolio_snapshot: pear staking read failed: %s", _e)
+    pear_staked_total = float(pear_fields.get("pear_staked_total") or 0.0)
 
     # R-VAULTDEP (2026-05-30): fund capital deposited INTO HL vaults. Read
     # via the keyless userVaultEquities endpoint. The reader is synchronous
@@ -1051,6 +1064,9 @@ async def _build_portfolio_snapshot_inner() -> PortfolioSnapshot:
         fetch_attempts=1,
         last_error=None,
         pear_staked_total=pear_staked_total,
+        pear_staked_balance=float(pear_fields.get("pear_staked_balance") or 0.0),
+        pear_staked_price=float(pear_fields.get("pear_staked_price") or 0.0),
+        pear_staked_known=bool(pear_fields.get("pear_staked_known", False)),
         vault_deposits_total=vault_deposits_total,
         vault_deposits_detail=vault_deposits_detail,
         pm_state=pm_state,
