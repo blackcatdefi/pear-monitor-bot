@@ -92,22 +92,16 @@ USER_TIMELINE_ENDPOINT_KEY = "users/tweets"
 # per-user timeline endpoint AS A SUPPLEMENT to the canonical list. Lets
 # BCD add a handle to the bot without going through the X UI; respects
 # the same DAILY_CALL_CAP + FETCH_COOLDOWN_HOURS gates and is capped to
-# X_EXTRA_HANDLES_MAX entries (default 5) so a typo can't blow the cap.
+# X_EXTRA_HANDLES_MAX entries so a typo can't blow the cap.
 # When the list call has already consumed the cap, extras are skipped.
 #
-# R-XFEEDS-EXPAND28 (2026-06-19) — BCD additive merge of 28 curated handles.
-# The list endpoint stays primary; these are the per-user supplement set so a
-# handle is monitored even if it is not (yet) a member of the X list. The
-# default is the deduped, lowercased union of the prior default
-# ("intheassembly") and BCD's 28 requested handles — nothing was removed.
-# `X_EXTRA_HANDLES` env still overrides this default when set in Railway.
-_DEFAULT_EXTRA_HANDLES = (
-    "intheassembly,docxbt,atin0x,warrenpies,cobie,nolimitgains,cactusdat,"
-    "trader_xo,reisnertobias,andrey_10gwei,snowinjon,kookcapitalllc,"
-    "sendorafulton,d_gilz,loraclexyz,fiege_max,degenape99,joshua_j_lim,"
-    "og_branxi,abcampbell,javiercrespodm,_jamisky,hectorchamizo,raydalio,"
-    "ascetic0x,frankcappelleri,kevinxu,pear_protocol"
-)
+# R-XLIST-CANONICAL (2026-06-19) — the X List is now the SINGLE SOURCE OF TRUTH
+# (185 members, mirrored by x_accounts.txt). 100% coverage comes from the bulk
+# list pull; the per-user supplement is therefore CLEARED by default
+# (_DEFAULT_EXTRA_HANDLES = ""). `X_EXTRA_HANDLES` remains a DORMANT manual
+# override: empty in Railway → the bot adds nothing and never pulls any account
+# outside the canonical list. BCD adds/removes accounts in the X List himself.
+_DEFAULT_EXTRA_HANDLES = ""
 X_EXTRA_HANDLES_RAW = os.getenv("X_EXTRA_HANDLES", _DEFAULT_EXTRA_HANDLES)
 # Raised 5 → 40 so the full curated set is admitted (was a typo-guard cap when
 # only 1 default handle existed). Cost is still bounded by DAILY_CALL_CAP +
@@ -142,6 +136,56 @@ def _parse_extra_handles(raw: str) -> list[str]:
 
 
 X_EXTRA_HANDLES = _parse_extra_handles(X_EXTRA_HANDLES_RAW)
+
+
+# ─── Canonical monitored set (R-XLIST-CANONICAL, 2026-06-19) ────────────────
+# x_accounts.txt (bot root) mirrors the X List "Fondo Black Cat Intel".
+# BCD maintains both manually — the bot NEVER auto-adds/infers/backfills.
+# At runtime this set is used ONLY to compute which canonical handles produced
+# NO tweets in the window (surfaced as payload["extras_inactive"] so an
+# invalid/suspended/renamed/quiet handle is reported, never silently dropped).
+# It is NEVER used to fetch accounts — the bulk list pull is the only source.
+_CANONICAL_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "x_accounts.txt"
+)
+
+
+def _load_canonical_handles(path: str = _CANONICAL_FILE) -> list[str]:
+    """Parse x_accounts.txt → ordered, deduped handle list (case preserved).
+
+    Accepts comma- and/or newline-separated handles; ignores blank lines and
+    ``#`` comments; strips a leading ``@``. Returns [] if the file is missing.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = f.read()
+    except OSError:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        for tok in line.split(","):
+            h = tok.strip().lstrip("@")
+            if not h:
+                continue
+            k = h.lower()
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append(h)
+    return out
+
+
+CANONICAL_HANDLES = _load_canonical_handles()
+
+# R-XLIST-CANONICAL: the bulk list pull must page enough to cover the full
+# window for all 185 members. Each page = 100 tweets; the loop breaks as soon
+# as a tweet older than the cutoff is seen, so the cap is only hit on very
+# high-volume windows. 12 pages × 100 = 1,200 tweets ceiling (~$0.30/fetch).
+LIST_MAX_PAGES = int(os.getenv("X_LIST_MAX_PAGES", "12"))
 
 
 # ─── Prompt-injection defense (R-XFEEDS-EXPAND28, 2026-06-19) ───────────────
@@ -311,7 +355,7 @@ def _daily_cap_exceeded() -> tuple[bool, int]:
 
 async def fetch_timeline_via_list(
     hours: int = 48,
-    max_tweets: int = 200,
+    max_tweets: int = 1200,
     caller: str = "",
     bypass_cooldown: bool = False,
 ) -> tuple[list[dict] | None, str | None]:
@@ -321,11 +365,17 @@ async def fetch_timeline_via_list(
         - Enforces FETCH_COOLDOWN_HOURS at code level (not just scheduler).
           Any caller inside the window gets (None, cooldown_diag) — they
           should fall back to cache.
-        - Enforces DAILY_CALL_CAP (rolling 24h window).
-        - Caps pagination at MAX_PAGES_PER_FETCH.
+        - Caps pagination at LIST_MAX_PAGES (covers the full window for the
+          185-member list; the loop breaks early on the time cutoff).
         - Records every call (success/fail) to SQLite for cost projection.
         - Fires a Telegram-bound cost alert when 7d projection > $5/mo.
     `bypass_cooldown=True` is only for /debug_x test-in-vivo (max_tweets=5).
+
+    R-XLIST-CANONICAL (2026-06-19): the bulk list read is the SINGLE SOURCE OF
+    TRUTH and is NO LONGER gated by DAILY_CALL_CAP — coverage of all 185
+    members must never be suppressed by the per-day call budget. The cooldown
+    (cache fallback) + kill switch still bound cost. The daily cap continues to
+    gate ONLY the optional per-user supplement (fetch_extra_handles_supplement).
 
     Returns (tweets, error_diagnostic).
       On success: (list[tweet_dicts], None)
@@ -354,11 +404,13 @@ async def fetch_timeline_via_list(
             log.info("[X_API_COST] cooldown active — caller=%s next_allowed=%s", caller, na)
             return None, _DIAG_INTERNAL_COOLDOWN.format(cool=FETCH_COOLDOWN_HOURS, next_allowed=na)
 
-    # ── Gate 2: daily cap (UTC calendar day) ─────────────────────────────
-    cap_hit, used = _daily_cap_exceeded()
-    if cap_hit:
-        log.warning("[X_API_COST] daily cap hit — %d/%d today (caller=%s)", used, DAILY_CALL_CAP, caller)
-        return None, _DIAG_INTERNAL_DAILY_CAP.format(used=used, cap=DAILY_CALL_CAP)
+    # ── Gate 2 REMOVED (R-XLIST-CANONICAL) ───────────────────────────────
+    # The bulk list pull is the single source of truth and is intentionally
+    # NOT gated by DAILY_CALL_CAP — suppressing it would blind the report to
+    # the 185-member set. Cost stays bounded by the cooldown (cache fallback)
+    # + kill switch above. We still log today's count for observability.
+    _, used = _daily_cap_exceeded()
+    log.info("[X_API_COST] list bulk pull (uncapped) — calls_today=%d caller=%s", used, caller)
 
     url = f"https://api.x.com/2/lists/{X_LIST_ID}/tweets"
     params: dict[str, Any] = {
@@ -377,7 +429,10 @@ async def fetch_timeline_via_list(
     tweets_returned_by_api = 0  # raw count from X before time-filter (for cost)
     last_status = 0
 
-    page_limit = max(1, min(MAX_PAGES_PER_FETCH, 10))
+    # R-XLIST-CANONICAL: page enough to cover the full window for 185 members.
+    # The loop still breaks the moment a tweet older than `cutoff` is seen, so
+    # in practice only as many pages as the window needs are consumed.
+    page_limit = max(1, min(LIST_MAX_PAGES, 25))
 
     async with httpx.AsyncClient(timeout=30) as c:
         for page in range(page_limit):
@@ -779,6 +834,31 @@ async def fetch_x_intel(
         except Exception:  # noqa: BLE001
             log.exception("fetch_extra_handles_supplement failed (non-fatal)")
 
+    # R-XLIST-CANONICAL (2026-06-19): surface every canonical handle that
+    # produced NO tweet in the window (invalid / suspended / renamed / private /
+    # simply quiet). Such handles are NEVER silently dropped — they are kept in
+    # x_accounts.txt and reported here so BCD can spot typos. We merge in any
+    # supplement-inactive handles (the supplement is empty by default).
+    seen_usernames = {
+        str(t.get("username", "")).lower() for t in tweets if isinstance(t, dict)
+    }
+    inactive_handles: list[str] = [
+        h for h in CANONICAL_HANDLES if h.lower() not in seen_usernames
+    ]
+    _seen_inactive = {h.lower() for h in inactive_handles}
+    for h in extras_inactive or []:
+        if h.lower() not in _seen_inactive:
+            inactive_handles.append(h)
+            _seen_inactive.add(h.lower())
+    active_in_window = len(CANONICAL_HANDLES) - len(
+        [h for h in CANONICAL_HANDLES if h.lower() not in seen_usernames]
+    )
+    if CANONICAL_HANDLES:
+        log.info(
+            "[X_CANONICAL] %d/%d canonical handles active in %dh window; %d inactive (no data)",
+            active_in_window, len(CANONICAL_HANDLES), hours, len(inactive_handles),
+        )
+
     if not tweets:
         return {
             "status": "ok",
@@ -795,7 +875,11 @@ async def fetch_x_intel(
             "extra_handles": list(X_EXTRA_HANDLES),
             "extras_added": extras_added,
             "extras_diag": extras_diag,
-            "extras_inactive": extras_inactive,
+            # R-XLIST-CANONICAL: full canonical set is inactive when 0 tweets.
+            "extras_inactive": inactive_handles,
+            "canonical_total": len(CANONICAL_HANDLES),
+            "canonical_active": 0,
+            "canonical_inactive": len(inactive_handles),
         }
 
     # Sort by engagement (likes + retweets + replies)
@@ -831,7 +915,12 @@ async def fetch_x_intel(
         "extra_handles": list(X_EXTRA_HANDLES),
         "extras_added": extras_added,
         "extras_diag": extras_diag,
-        "extras_inactive": extras_inactive,
+        # R-XLIST-CANONICAL: canonical handles with no data in window (kept,
+        # never dropped) + active/inactive tallies across the 185-member set.
+        "extras_inactive": inactive_handles,
+        "canonical_total": len(CANONICAL_HANDLES),
+        "canonical_active": active_in_window,
+        "canonical_inactive": len(inactive_handles),
     }
 
     # Round 15: persist to SQLite so the cache survives Railway redeploys.
@@ -870,6 +959,13 @@ async def debug_x_status() -> str:
     lines.append(
         f"  X_API_BEARER_TOKEN: {'✅ set (' + X_API_BEARER_TOKEN[:8] + '...)' if X_API_BEARER_TOKEN else '❌ NOT SET'}"
     )
+    # R-XLIST-CANONICAL: confirm the single-source-of-truth set + dormant supp.
+    lines.append(f"  Canonical handles (x_accounts.txt): {len(CANONICAL_HANDLES)}")
+    lines.append(
+        f"  X_EXTRA_HANDLES supplement: {len(X_EXTRA_HANDLES)} "
+        f"({'DORMANT/empty ✅' if not X_EXTRA_HANDLES else 'ACTIVE ⚠️ ' + ','.join(X_EXTRA_HANDLES[:5])})"
+    )
+    lines.append(f"  List bulk pull: UNGATED by daily cap (pages≤{LIST_MAX_PAGES})")
     lines.append("")
 
     # API stats (Round 12 — realistic cost model, SQLite-persisted)
