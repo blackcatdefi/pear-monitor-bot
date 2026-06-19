@@ -87,13 +87,14 @@ async def test_fetch_extra_handles_skips_when_disabled():
         orig = _xi.X_EXTRA_HANDLES_ENABLED
         _xi.X_EXTRA_HANDLES_ENABLED = False
         try:
-            tweets, diag = await fetch_extra_handles_supplement(
+            tweets, diag, inactive = await fetch_extra_handles_supplement(
                 handles=["intheassembly"], hours=48
             )
         finally:
             _xi.X_EXTRA_HANDLES_ENABLED = orig
     assert tweets == []
     assert diag is None
+    assert inactive == []
 
 
 @pytest.mark.asyncio
@@ -108,7 +109,7 @@ async def test_fetch_extra_handles_skips_when_no_bearer():
     _xi.X_LIVE_ENABLED = True
     _xi.X_EXTRA_HANDLES_ENABLED = True
     try:
-        tweets, diag = await fetch_extra_handles_supplement(
+        tweets, diag, inactive = await fetch_extra_handles_supplement(
             handles=["intheassembly"], hours=48
         )
     finally:
@@ -117,3 +118,4 @@ async def test_fetch_extra_handles_skips_when_no_bearer():
         _xi.X_EXTRA_HANDLES_ENABLED = orig_enabled
     assert tweets == []
     assert diag == _DIAG_NO_BEARER
+    assert inactive == ["intheassembly"]
