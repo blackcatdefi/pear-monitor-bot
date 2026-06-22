@@ -2418,6 +2418,48 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 @authorized
 @with_error_logging
+async def cmd_telemetry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-TELEMETRY — per-token telemetry block for AiPear basket sizing.
+
+    Usage: /telemetry TICKER1 TICKER2 …  (space- or comma-separated, 1-8). For
+    each token pulls, straight from the Hyperliquid info API (same shared
+    rate-limited + cached client R-SCREEN uses): (1) funding live + 7d avg
+    (hourly % and APR, PAYS/RECEIVES for a short), (2) OI notional vs 24h volume
+    + ratio, (3) distance above the 7-day low, (4) top-of-book resting notional
+    within ±0.5%/±1.0% of mid (bid+ask), and (5) squeeze state + fails-first
+    gate + z + Hurst from the SAME R-SCREEN 5-gate engine. Accuracy over
+    completeness — any single feed that fails prints n/d for THAT metric only,
+    never fabricated nor 0-filled. Pure read; the bot never selects or sizes.
+    """
+    from modules import telemetry as _tel
+
+    tickers, parse_notes = _tel.parse_tickers(context.args)
+    if not tickers:
+        await update.message.reply_text(
+            "Uso: /telemetry TICKER1 TICKER2 …  (1-8, espacio o coma; ej. "
+            "/telemetry BTC HYPE WLD)"
+            + (f"\n{'; '.join(parse_notes)}" if parse_notes else ""),
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    await update.message.reply_text(
+        f"⏳ Telemetría HL para {', '.join(tickers)} (funding/OI/depth/squeeze)…",
+        reply_markup=MAIN_KEYBOARD,
+    )
+    try:
+        tokens = await _tel.build_telemetry(tickers)
+        text = _tel.format_telemetry(tokens, parse_notes)
+        await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("/telemetry failed")
+        await update.message.reply_text(
+            f"❌ Error en /telemetry: {str(exc)[:200]}",
+            reply_markup=MAIN_KEYBOARD,
+        )
+
+
+@authorized
+@with_error_logging
 async def cmd_signals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """R-SIGNAL — per-name short signals (orthogonal to the >=4 R-UNLOCK ladder).
 
@@ -3729,6 +3771,8 @@ HANDLER_MAP = {
     "unlockcheck": cmd_unlockcheck,
     # R-SCREEN — per-token query (same 5-gate engine on one ticker)
     "check": cmd_check,
+    # R-TELEMETRY — per-token HL telemetry block (AiPear basket sizing)
+    "telemetry": cmd_telemetry,
     # R-SIGNAL — per-name short signals (orthogonal to the >=4 unlock ladder)
     "signals": cmd_signals,
     # R-AUDIT2-P1.3 — INTEGRITY-HALT view + BCD dismissal

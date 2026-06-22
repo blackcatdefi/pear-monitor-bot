@@ -126,6 +126,7 @@ COMMANDS: List[BotCommand] = [
     # ─── R-UNLOCK / R-SCREEN — universal SHORT/LONG screener ───
     BotCommand("unlockcheck", "R-SCREEN: screener universal SHORT/LONG sobre TODO el universo (HL+Variational), rankeado más→menos shorteable + flag long; 5/5+AiPear es tu decisión", "trading", "cmd_unlockcheck"),
     BotCommand("check", "R-SCREEN por token: corre los 5 gates en 1 ticker <TICKER> (ej. /check WLD) → veredicto short + lectura long", "trading", "cmd_check"),
+    BotCommand("telemetry", "R-TELEMETRY: bloque por token <T1 T2…> (1-8) — funding live+7d, OI/vol, dist 7d-low, depth ±0.5/1%, squeeze+fails-first+z/Hurst (HL info API; n/d si falla un feed)", "trading", "cmd_telemetry"),
 
     # ─── R-SIGNAL — per-name short signals (orthogonal to the >=4 ladder) ───
     BotCommand("signals", "R-SIGNAL: nombres que pasan el filtro short de 5 gates AHORA (confirmá c/u 5/5 AiPear) — ortogonal al ladder >=4", "trading", "cmd_signals"),
