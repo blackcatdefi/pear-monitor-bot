@@ -2369,7 +2369,18 @@ async def cmd_unlockcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     try:
         # Pure read: do NOT advance the persistence counters on a manual check.
         res = await _scr.compute_screen(advance_state=False)
-        text = _scr.format_screen(res)
+        # R-SCREEN-TELEMETRY: attach the compact telemetry block under each 5/5
+        # GO candidate (best-effort — never breaks the screener render).
+        tel_blocks: dict = {}
+        tel_note = None
+        try:
+            from modules import telemetry as _tel
+            tel_blocks, tel_note, _ = await _tel.render_go_telemetry(res)
+        except Exception:  # noqa: BLE001
+            log.exception("/unlockcheck telemetry failed (non-fatal)")
+            tel_blocks, tel_note = {}, None
+        text = _scr.format_screen(res, telemetry_blocks=tel_blocks,
+                                  telemetry_note=tel_note)
         await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
     except Exception as exc:  # noqa: BLE001
         log.exception("/unlockcheck failed")

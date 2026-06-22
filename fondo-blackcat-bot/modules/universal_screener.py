@@ -690,9 +690,18 @@ def _ranked_block(r: ScreenRow, rank: int, k: dict[str, float]) -> str:
     return "\n".join([ln for ln in lines if ln])
 
 
-def format_screen(res: ScreenResult, top_n: Optional[int] = None) -> str:
+def format_screen(res: ScreenResult, top_n: Optional[int] = None,
+                  telemetry_blocks: Optional[dict[str, str]] = None,
+                  telemetry_note: Optional[str] = None) -> str:
     """Render /unlockcheck — universal short/long screener, sectioned + compressed
-    tail so send_long_message can paginate it under Telegram's limit."""
+    tail so send_long_message can paginate it under Telegram's limit.
+
+    ``telemetry_blocks`` (R-SCREEN-TELEMETRY): pre-rendered compact telemetry
+    keyed by ticker, attached DIRECTLY under each 5/5 GO candidate line. When the
+    dict is provided (even empty) the feature is active: a GO with a block gets
+    it inline, and a 0-GO run prints an explicit "sin telemetría" line. ``None``
+    (default) keeps the legacy output byte-identical (no regression). Strings are
+    pre-rendered by the caller so this module never imports telemetry."""
     k = res.constants
     n = top_n if top_n is not None else top_n_default()
     cutoff = hurst_count_cutoff(k)
@@ -717,8 +726,18 @@ def format_screen(res: ScreenResult, top_n: Optional[int] = None) -> str:
     ]
     if not res.ranked:
         lines.append("  (ninguno con datos suficientes)")
+    if telemetry_blocks is not None and telemetry_note:
+        lines.append(f"  ({telemetry_note})")
     for i, r in enumerate(res.ranked[:n], start=1):
         lines.append(_ranked_block(r, i, k))
+        # R-SCREEN-TELEMETRY: attach the compact telemetry block under each GO
+        # candidate (5/5) — never under context/NO-GO names.
+        if telemetry_blocks is not None and r.is_go_candidate:
+            tb = telemetry_blocks.get(r.ticker)
+            if tb:
+                lines.append(tb)
+    if telemetry_blocks is not None and n_go == 0:
+        lines.append("  📟 telemetría: sin candidatos GO (nada que adjuntar)")
 
     # Compressed tail — ticker + pass-count + one-line reason, no full breakdown.
     tail = res.ranked[n:]

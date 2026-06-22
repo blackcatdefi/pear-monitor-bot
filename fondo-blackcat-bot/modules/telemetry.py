@@ -368,6 +368,146 @@ async def build_telemetry(tickers: list[str]) -> list[TokenTelemetry]:
     return await asyncio.gather(*[build_one(t, ctx_map) for t in tickers])
 
 
+# ─── Screener-attached telemetry (R-SCREEN-TELEMETRY) ─────────────────────────
+# The standalone /telemetry path (above) re-runs the FULL 5-gate engine per
+# ticker via ``fetch_gate``→``check_single`` (which itself rebuilds the universe
+# + re-fetches candles). When telemetry is attached to the internal screener
+# output, that gate work is ALREADY DONE: every GO candidate is a
+# ``universal_screener.ScreenRow`` carrying a fully-evaluated ``AltGate`` (z,
+# Hurst, squeeze, funding). So we read squeeze/fails-first/z/Hurst straight off
+# ``row.gate`` and fire ONLY the incremental per-token calls
+# (fundingHistory 7d, candleSnapshot 4h low, l2Book depth) — sharing one
+# ``metaAndAssetCtxs`` map and a per-run cache so no token is ever fetched twice.
+
+async def _cached(cache: Optional[dict], key: Any, factory):
+    """Await ``factory()`` once per ``key`` within a run, caching the result so a
+    repeated ticker (e.g. across /reporte sections) never re-fetches. ``cache``
+    None → no caching (always fetch)."""
+    if cache is None:
+        return await factory()
+    if key in cache:
+        return cache[key]
+    val = await factory()
+    cache[key] = val
+    return val
+
+
+async def build_one_from_row(row: Any, ctx_map: dict[str, dict[str, Any]],
+                             cache: Optional[dict] = None) -> TokenTelemetry:
+    """Assemble telemetry for ONE pre-screened ``ScreenRow`` WITHOUT re-running
+    the gate engine: squeeze/fails-first/z/Hurst are read from the row's already
+    computed ``AltGate``; only fundingHistory/candle-low/depth fire (deduped via
+    ``cache``). Every metric is independently guarded → granular n/d, nothing
+    faked. The ticker is re-run through the SAME injection guard even though it
+    came from the internal screener (defence in depth)."""
+    raw_ticker = str(getattr(row, "ticker", "") or "")
+    ticker = _sanitize_untrusted(raw_ticker).upper().strip().lstrip("$").strip()
+    t = TokenTelemetry(ticker=ticker or (raw_ticker[:12] or "?"))
+    if not ticker or not _VALID_TICKER.match(ticker):
+        t.notes.append("ticker inválido — telemetría omitida")
+        return t
+
+    ctx = ctx_map.get(ticker)
+    t.on_hl = ctx is not None
+
+    # 1. Funding (live from ctx; 7d avg incremental, cached)
+    if ctx is not None:
+        t.funding_live = _f(ctx.get("funding"))
+    avg, n = await _cached(cache, ("fund7d", ticker),
+                           lambda: fetch_funding_avg_7d(ticker))
+    t.funding_avg7d, t.funding_samples = avg, n
+
+    # 2. OI notional + 24h vol + ratio (from shared ctx)
+    mark = _f(ctx.get("markPx")) if ctx is not None else None
+    t.mark = mark
+    if ctx is not None:
+        oi_base = _f(ctx.get("openInterest"))
+        if oi_base is not None and mark is not None:
+            t.oi_usd = oi_base * mark
+        t.vol24h_usd = _f(ctx.get("dayNtlVlm"))
+        if t.oi_usd is not None and t.vol24h_usd not in (None, 0):
+            t.oi_vol_ratio = t.oi_usd / t.vol24h_usd
+
+    # 3. Distance from 7d low (incremental, cached)
+    low = await _cached(cache, ("low7d", ticker), lambda: fetch_low_7d(ticker))
+    t.low7d = low
+    if mark is not None and low is not None and low > 0:
+        t.dist_low_pct = (mark - low) / low * 100.0
+
+    # 4. Top-of-book depth (incremental, cached)
+    depth = await _cached(cache, ("depth", ticker), lambda: fetch_depth(ticker))
+    t.bid_05, t.ask_05 = depth["bid_05"], depth["ask_05"]
+    t.bid_10, t.ask_10 = depth["bid_10"], depth["ask_10"]
+
+    # 5. Squeeze + fails-first + z + Hurst — READ from the precomputed gate
+    #    (NO check_single, NO engine re-run, NO candle re-fetch).
+    g = getattr(row, "gate", None)
+    if g is not None:
+        t.squeeze_state = "CLEAR" if not g.squeeze_flag else "/".join(g.squeeze_reasons or ["squeeze"])
+        t.fails_first = _fails_first(g)
+        t.z = g.z
+        t.hurst = g.hurst
+    vl = getattr(row, "venue_label", None)
+    if vl:
+        t.venue_label = vl
+    elif t.on_hl:
+        t.venue_label = "HL"
+    return t
+
+
+async def _safe_build_from_row(row: Any, ctx_map: dict[str, dict[str, Any]],
+                               cache: Optional[dict] = None) -> TokenTelemetry:
+    """``build_one_from_row`` wrapped so a hard failure on ONE GO can never break
+    the screener render or the report — degrades to a gate-only block."""
+    try:
+        return await build_one_from_row(row, ctx_map, cache)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("telemetry: build_one_from_row n/d for %s (%s)",
+                    getattr(row, "ticker", "?"), exc)
+        t = TokenTelemetry(ticker=str(getattr(row, "ticker", "?")))
+        g = getattr(row, "gate", None)
+        if g is not None:
+            t.squeeze_state = "CLEAR" if not g.squeeze_flag else "/".join(g.squeeze_reasons or ["squeeze"])
+            t.fails_first = _fails_first(g)
+            t.z, t.hurst = g.z, g.hurst
+        t.notes.append("telemetría parcial (fallo de feed)")
+        return t
+
+
+async def render_go_telemetry(res: Any, *, cap: int = MAX_TICKERS,
+                              ctx_map: Optional[dict] = None,
+                              cache: Optional[dict] = None,
+                              ) -> tuple[dict[str, str], Optional[str], int]:
+    """Build + render the compact telemetry block for the GO candidates of a
+    ``ScreenResult``. GO = ``row.is_go_candidate`` (5/5, non-squeeze), taken in
+    the engine's existing ranking order. Returns ``(blocks, note, n_go)`` where
+    ``blocks`` maps ticker→rendered monospace block (≤``cap`` entries), ``note``
+    is a "top N of M" line when more than ``cap`` GO exist (else None), and
+    ``n_go`` is the total GO count. NEVER raises."""
+    try:
+        ranked = list(getattr(res, "ranked", []) or [])
+        go = [r for r in ranked if getattr(r, "is_go_candidate", False)]
+        n_go = len(go)
+        if n_go == 0:
+            return {}, None, 0
+        note: Optional[str] = None
+        if n_go > cap:
+            go = go[:cap]
+            note = f"telemetría: top {cap} de {n_go} GO"
+        if ctx_map is None:
+            ctx_map = await fetch_ctx_map()
+        if cache is None:
+            cache = {}
+        tels = await asyncio.gather(
+            *[_safe_build_from_row(r, ctx_map, cache) for r in go]
+        )
+        blocks = {t.ticker: format_token_compact(t) for t in tels}
+        return blocks, note, n_go
+    except Exception:  # noqa: BLE001
+        log.exception("telemetry: render_go_telemetry failed (non-fatal)")
+        return {}, None, 0
+
+
 # ─── Rendering (dense monospace, one block per ticker) ────────────────────────
 def _pct(v: Optional[float], digits: int = 4) -> str:
     return f"{v * 100:.{digits}f}%" if v is not None else "n/d"
@@ -404,6 +544,42 @@ def _short_funding_flag(rate: Optional[float]) -> str:
     if rate < 0:
         return "PAYS (short)"
     return "FLAT"
+
+
+def _short_flag_compact(rate: Optional[float]) -> str:
+    """Compact PAYS/RECEIVES/FLAT for a SHORT (cobra/paga/flat/n-d)."""
+    if rate is None:
+        return "n/d"
+    if rate > 0:
+        return "cobra"
+    if rate < 0:
+        return "paga"
+    return "flat"
+
+
+def _low_mark(v: Optional[float]) -> str:
+    return f"{v:g}" if v is not None else "n/d"
+
+
+def format_token_compact(t: TokenTelemetry) -> str:
+    """Dense 3-line telemetry block, designed to sit DIRECTLY under a screener GO
+    candidate line. Carries the same five metrics as ``format_token`` (funding
+    now/7d, OI vs vol, distance from 7d low, depth ±0.5%/±1%, squeeze/
+    fails-first/z/Hurst) with zero prose padding. n/d everywhere a feed missed."""
+    fl = _short_flag_compact(t.funding_live)
+    f7 = _short_flag_compact(t.funding_avg7d)
+    n7 = f" n{t.funding_samples}" if t.funding_samples else ""
+    dist = f"+{t.dist_low_pct:.1f}%" if t.dist_low_pct is not None else "n/d"
+    return "\n".join([
+        f"   📟 fund {_pct(t.funding_live)}h {_ann(t.funding_live)} {fl} · "
+        f"7d {_pct(t.funding_avg7d)}h {_ann(t.funding_avg7d)} {f7}{n7}",
+        f"      OI {_usd(t.oi_usd)}/vol {_usd(t.vol24h_usd)} {_ratio(t.oi_vol_ratio)} · "
+        f"vs7dlow {dist} (low {_low_mark(t.low7d)}/mark {_low_mark(t.mark)}) · "
+        f"depth ±0.5 b{_usd(t.bid_05)}/a{_usd(t.ask_05)} ±1 b{_usd(t.bid_10)}/a{_usd(t.ask_10)}",
+        f"      sq {t.squeeze_state or 'n/d'} · fails {t.fails_first or 'n/d'} · "
+        f"z {_fmt_z(t.z)} · H {_fmt_hurst(t.hurst)}"
+        + ("" if not t.notes else " · " + "; ".join(t.notes)),
+    ])
 
 
 def format_token(t: TokenTelemetry) -> str:

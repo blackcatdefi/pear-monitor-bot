@@ -166,8 +166,17 @@ def _compact_line(idx: int, r: ScreenRow, count: int) -> str:
     )
 
 
-def format_embedded_screener(res: ScreenResult, n: int = EMBED_TOP_N) -> str:
-    """Render the COMPACT 15+15 block for /reporte. No long tail, ever."""
+def format_embedded_screener(res: ScreenResult, n: int = EMBED_TOP_N,
+                             telemetry_blocks: Optional[dict[str, str]] = None,
+                             telemetry_note: Optional[str] = None) -> str:
+    """Render the COMPACT 15+15 block for /reporte. No long tail, ever.
+
+    ``telemetry_blocks`` (R-SCREEN-TELEMETRY): pre-rendered compact telemetry
+    keyed by ticker, attached DIRECTLY under each 5/5 GO candidate in the SHORT
+    top — identical block to the one /unlockcheck attaches (same renderer, same
+    ScreenResult → same strings). ``None`` (default) keeps the legacy block
+    byte-identical. Strings are pre-rendered by the caller so this module never
+    imports telemetry."""
     shorts = short_top(res, n)
     longs = long_top(res, n)
     n_go = sum(1 for r in res.ranked if r.is_go_candidate)
@@ -179,6 +188,8 @@ def format_embedded_screener(res: ScreenResult, n: int = EMBED_TOP_N) -> str:
         "",
         SHORT_HEADER,
     ]
+    if telemetry_blocks is not None and telemetry_note:
+        lines.append(f"  ({telemetry_note})")
     if not shorts:
         lines.append("  0 candidatos con señal (≥3/5 sin squeeze) ahora.")
     else:
@@ -186,6 +197,14 @@ def format_embedded_screener(res: ScreenResult, n: int = EMBED_TOP_N) -> str:
             lines.append(f"  (solo {len(shorts)} con señal)")
         for i, r in enumerate(shorts, start=1):
             lines.append(_compact_line(i, r, r.pass_count))
+            # R-SCREEN-TELEMETRY: attach the compact telemetry block under each
+            # GO candidate (5/5) only — never context names.
+            if telemetry_blocks is not None and r.is_go_candidate:
+                tb = telemetry_blocks.get(r.ticker)
+                if tb:
+                    lines.append(tb)
+    if telemetry_blocks is not None and n_go == 0:
+        lines.append("  📟 telemetría: sin candidatos GO (nada que adjuntar)")
 
     lines += ["", LONG_HEADER, f"  {LONG_DISCLAIMER}"]
     if not longs:
@@ -200,11 +219,28 @@ def format_embedded_screener(res: ScreenResult, n: int = EMBED_TOP_N) -> str:
 
 async def build_embedded_screener_block(n: int = EMBED_TOP_N) -> Optional[str]:
     """Compute (SAME engine call as /unlockcheck: ``compute_screen``, pure read,
-    advance_state=False) + format the compact block. NEVER raises — returns
-    None on any failure so /reporte is never broken by the screener."""
+    advance_state=False) + format the compact block, with R-SCREEN-TELEMETRY
+    attached under each 5/5 GO candidate. NEVER raises — returns None on any
+    failure so /reporte is never broken by the screener; a telemetry failure
+    degrades to the block WITHOUT telemetry rather than dropping the section."""
     try:
         res = await compute_screen(advance_state=False)
-        return format_embedded_screener(res, n)
     except Exception:  # noqa: BLE001
         log.exception("embedded screener block failed (non-fatal)")
+        return None
+    # Telemetry is best-effort: render_go_telemetry never raises, but guard the
+    # import/call anyway so the screener section survives any telemetry fault.
+    tel_blocks: dict[str, str] = {}
+    tel_note: Optional[str] = None
+    try:
+        from modules import telemetry as _tel
+        tel_blocks, tel_note, _ = await _tel.render_go_telemetry(res)
+    except Exception:  # noqa: BLE001
+        log.exception("embedded screener telemetry failed (non-fatal)")
+        tel_blocks, tel_note = {}, None
+    try:
+        return format_embedded_screener(res, n, telemetry_blocks=tel_blocks,
+                                        telemetry_note=tel_note)
+    except Exception:  # noqa: BLE001
+        log.exception("embedded screener format failed (non-fatal)")
         return None
