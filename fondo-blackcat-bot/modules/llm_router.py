@@ -75,9 +75,67 @@ _PRICING = {
 }
 
 
-def _cost_for(model: str, in_tok: int, out_tok: int) -> float:
+def _cost_for(
+    model: str,
+    in_tok: int,
+    out_tok: int,
+    cache_read: int = 0,
+    cache_creation: int = 0,
+) -> float:
+    """USD cost for a single call.
+
+    R-COST2 (2026-06-26): account for Anthropic prompt caching. ``in_tok`` is
+    the SDK's ``input_tokens`` (already EXCLUDES cached tokens). Cache writes
+    bill at 1.25× the input rate, cache reads at 0.10× — so a cached system
+    prefix that hits costs ~10% of a normal send.
+    """
     p = _PRICING.get(model, {"input": 0.0, "output": 0.0})
-    return (in_tok / 1_000_000.0) * p["input"] + (out_tok / 1_000_000.0) * p["output"]
+    return (
+        (in_tok / 1_000_000.0) * p["input"]
+        + (out_tok / 1_000_000.0) * p["output"]
+        + (cache_creation / 1_000_000.0) * p["input"] * 1.25
+        + (cache_read / 1_000_000.0) * p["input"] * 0.10
+    )
+
+
+def build_cached_system(stable: str, dynamic: str = "") -> list[dict[str, Any]]:
+    """Build a content-block ``system`` with a cached stable prefix.
+
+    R-COST2 (2026-06-26): the large, run-invariant prompt (SYSTEM_PROMPT /
+    THESIS_PROMPT, ~7k tok) is placed FIRST as a single text block carrying
+    ``cache_control: ephemeral`` so Anthropic caches it (5-min TTL). The
+    volatile per-run text (live fund-state block + previous thesis) follows as
+    an UNcached block. Two qualifying calls sharing the same stable prefix
+    within the TTL bill the prefix at ~10%.
+
+    Passing the system as a list (vs the legacy plain string) is the ONLY way
+    to attach cache_control; ``_call_*`` and ``route_request`` accept either.
+    """
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": stable,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    if dynamic:
+        blocks.append({"type": "text", "text": dynamic})
+    return blocks
+
+
+def _system_to_text(system: Any) -> str:
+    """Flatten a str|list system into plain text (Gemini has no cache_control)."""
+    if isinstance(system, str):
+        return system
+    if isinstance(system, list):
+        out: list[str] = []
+        for blk in system:
+            if isinstance(blk, dict) and isinstance(blk.get("text"), str):
+                out.append(blk["text"])
+            elif isinstance(blk, str):
+                out.append(blk)
+        return "\n".join(out)
+    return str(system or "")
 
 
 # Last-provider pointer (kept in memory — just for the status line)
@@ -92,15 +150,20 @@ def _persist_usage(
     in_tok: int,
     out_tok: int,
     success: bool,
+    cache_read: int = 0,
+    cache_creation: int = 0,
 ) -> None:
     """Persist a single call to intel_memory.llm_usage — survives redeploys."""
     try:
         from modules import intel_memory
-        cost = _cost_for(model, in_tok or 0, out_tok or 0)
+        cost = _cost_for(model, in_tok or 0, out_tok or 0, cache_read or 0, cache_creation or 0)
+        # tokens_in stores TOTAL processed input (non-cached + cache read +
+        # cache write) so /providers reflects real volume even when cached.
+        total_in = (in_tok or 0) + (cache_read or 0) + (cache_creation or 0)
         intel_memory.track_llm_usage(
             task_name=task_name,
             model_used=model,
-            tokens_in=in_tok or 0,
+            tokens_in=total_in,
             tokens_out=out_tok or 0,
             cost_usd=cost,
             success=success,
@@ -109,15 +172,23 @@ def _persist_usage(
         log.warning("persist_usage failed (%s/%s): %s", task_name, model, exc)
 
 
-def _track_success(provider: str, in_tok: int, out_tok: int, task_name: str) -> None:
+def _track_success(
+    provider: str,
+    in_tok: int,
+    out_tok: int,
+    task_name: str,
+    cache_read: int = 0,
+    cache_creation: int = 0,
+) -> None:
     global _last_provider, _last_provider_ts
     _last_provider = provider
     _last_provider_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    _persist_usage(task_name, provider, in_tok, out_tok, True)
+    _persist_usage(task_name, provider, in_tok, out_tok, True, cache_read, cache_creation)
     # R-VALIDATE 2026-05-08: also feed R-PERFECT cost_tracker so /cost + cost_alert work
     try:
         from modules.cost_tracker import log_llm_call
-        log_llm_call(provider, in_tok or 0, out_tok or 0, source=task_name)
+        total_in = (in_tok or 0) + (cache_read or 0) + (cache_creation or 0)
+        log_llm_call(provider, total_in, out_tok or 0, source=task_name)
     except Exception as exc:  # noqa: BLE001
         log.debug("cost_tracker.log_llm_call failed (%s/%s): %s", task_name, provider, exc)
 
@@ -128,10 +199,25 @@ def _track_error(provider: str, task_name: str) -> None:
 
 # ─── Provider implementations ────────────────────────────────────────────────
 
+def _anthropic_cache_usage(resp: Any) -> tuple[int, int]:
+    """Extract (cache_read, cache_creation) input tokens from a response."""
+    if not hasattr(resp, "usage"):
+        return 0, 0
+    u = resp.usage
+    cr = getattr(u, "cache_read_input_tokens", 0) or 0
+    cc = getattr(u, "cache_creation_input_tokens", 0) or 0
+    return int(cr), int(cc)
+
+
 async def _call_sonnet(
-    system_prompt: str, user_message: str, max_tokens: int, task_name: str,
+    system_prompt: Any, user_message: str, max_tokens: int, task_name: str,
 ) -> Optional[str]:
-    """Claude Sonnet 4.6 — critical analysis tier."""
+    """Claude Sonnet 4.6 — critical analysis tier.
+
+    ``system_prompt`` may be a plain string (legacy) OR a list of content
+    blocks (R-COST2 prompt caching via ``build_cached_system``); both pass
+    straight to the Anthropic SDK.
+    """
     if not ANTHROPIC_API_KEY:
         log.warning("Sonnet: no ANTHROPIC_API_KEY")
         return None
@@ -149,8 +235,12 @@ async def _call_sonnet(
         text = resp.content[0].text
         in_tok = getattr(resp.usage, "input_tokens", 0) if hasattr(resp, "usage") else 0
         out_tok = getattr(resp.usage, "output_tokens", 0) if hasattr(resp, "usage") else 0
-        _track_success("claude-sonnet-4-6", in_tok, out_tok, task_name)
-        log.info("Sonnet OK (%d chars, %d+%d tok)", len(text), in_tok, out_tok)
+        cache_read, cache_creation = _anthropic_cache_usage(resp)
+        _track_success("claude-sonnet-4-6", in_tok, out_tok, task_name, cache_read, cache_creation)
+        log.info(
+            "Sonnet OK (%d chars, %d+%d tok, cache r=%d/w=%d)",
+            len(text), in_tok, out_tok, cache_read, cache_creation,
+        )
         return text
     except Exception as e:
         _track_error("claude-sonnet-4-6", task_name)
@@ -159,9 +249,9 @@ async def _call_sonnet(
 
 
 async def _call_haiku(
-    system_prompt: str, user_message: str, max_tokens: int, task_name: str,
+    system_prompt: Any, user_message: str, max_tokens: int, task_name: str,
 ) -> Optional[str]:
-    """Claude Haiku 4.5 — cheap fallback."""
+    """Claude Haiku 4.5 — cheap fallback. Accepts str|list system (see Sonnet)."""
     if not ANTHROPIC_API_KEY:
         log.warning("Haiku: no ANTHROPIC_API_KEY")
         return None
@@ -179,8 +269,12 @@ async def _call_haiku(
         text = resp.content[0].text
         in_tok = getattr(resp.usage, "input_tokens", 0) if hasattr(resp, "usage") else 0
         out_tok = getattr(resp.usage, "output_tokens", 0) if hasattr(resp, "usage") else 0
-        _track_success("claude-haiku-4-5-20251001", in_tok, out_tok, task_name)
-        log.info("Haiku OK (%d chars, %d+%d tok)", len(text), in_tok, out_tok)
+        cache_read, cache_creation = _anthropic_cache_usage(resp)
+        _track_success("claude-haiku-4-5-20251001", in_tok, out_tok, task_name, cache_read, cache_creation)
+        log.info(
+            "Haiku OK (%d chars, %d+%d tok, cache r=%d/w=%d)",
+            len(text), in_tok, out_tok, cache_read, cache_creation,
+        )
         return text
     except Exception as e:
         _track_error("claude-haiku-4-5-20251001", task_name)
@@ -189,19 +283,24 @@ async def _call_haiku(
 
 
 async def _call_gemini(
-    system_prompt: str, user_message: str, max_tokens: int, task_name: str,
+    system_prompt: Any, user_message: str, max_tokens: int, task_name: str,
 ) -> Optional[str]:
-    """Gemini 2.5 Flash — free tier for routine tasks."""
+    """Gemini 2.5 Flash — free tier for routine tasks.
+
+    Accepts str|list system; cache_control (Anthropic-only) is flattened away
+    via ``_system_to_text`` so a cached-system caller still falls back cleanly.
+    """
     if not GEMINI_API_KEY:
         log.warning("Gemini: no GEMINI_API_KEY")
         return None
 
+    system_text = _system_to_text(system_prompt)
     url = (
         "https://generativelanguage.googleapis.com/v1beta/"
         "models/gemini-2.5-flash:generateContent"
     )
     payload = {
-        "system_instruction": {"parts": [{"text": system_prompt}]},
+        "system_instruction": {"parts": [{"text": system_text}]},
         "contents": [{"role": "user", "parts": [{"text": user_message}]}],
         "generationConfig": {
             "maxOutputTokens": max_tokens,
@@ -247,11 +346,15 @@ async def _call_gemini(
 
 async def route_request(
     task_name: str,
-    system_prompt: str,
+    system_prompt: Any,
     user_message: str,
     max_tokens: int = 4000,
 ) -> tuple[str, str]:
     """Route request to the right model tier.
+
+    ``system_prompt`` may be a plain string (legacy) or a list of content
+    blocks built by ``build_cached_system`` (R-COST2 prompt caching). Anthropic
+    providers receive it verbatim; Gemini flattens it to text.
 
     Returns (response_text, model_used).
     Raises LLMError if all providers in the chain fail.

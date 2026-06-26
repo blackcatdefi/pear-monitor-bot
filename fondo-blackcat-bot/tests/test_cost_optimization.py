@@ -17,8 +17,18 @@ the second expensive Sonnet leg or the double-serialized X timeline.
 """
 from __future__ import annotations
 
-from modules.llm_router import TASK_TIER, TaskType
+import json
+
+from modules.llm_router import (
+    TASK_TIER,
+    TaskType,
+    build_cached_system,
+    _system_to_text,
+    _cost_for,
+    _anthropic_cache_usage,
+)
 from modules.x_intel import slim_x_intel_for_llm
+from modules.intel_slim import slim_intel_for_llm
 
 
 # ── Lever 1: tesis_update is no longer a CRITICAL (Sonnet) task ──────────────
@@ -111,3 +121,138 @@ def test_slim_handles_short_window_without_padding():
     out = slim_x_intel_for_llm(_fake_x_payload(7), top_n=40)
     assert out["shown_to_llm"] == 7
     assert len(out["tweets"]) == 7
+
+
+# ── R-COST2 Lever 3: intel30 payload slimming ────────────────────────────────
+
+def _fake_fred_payload() -> dict:
+    """Real fred_api.format_for_telegram shape, with raw multi-row series."""
+    return {
+        "_global_error": None,
+        "series": [
+            {"id": "VIXCLS", "name": "VIX", "fecha": "2026-06-26", "valor": 14.21, "_error": None},
+            {"id": "DGS10", "name": "10Y Treasury Yield (%)", "fecha": "2026-06-26", "valor": 4.273, "_error": None},
+            {"id": "T10Y2Y", "name": "10Y-2Y Spread (%)", "fecha": "2026-06-26", "valor": 0.52, "_error": None},
+            {"id": "DTWEXBGS", "name": "DXY (broad)", "fecha": "2026-06-26", "valor": 121.55, "_error": None},
+            {"id": "SOFR", "name": "SOFR (%)", "fecha": "2026-06-26", "valor": 4.31, "_error": None},
+            {"id": "FEDFUNDS", "name": "Fed Funds (%)", "fecha": "2026-06-26", "valor": 4.33, "_error": None},
+        ],
+    }
+
+
+def _fake_merged_intel() -> dict:
+    return {
+        "x_intel": {"status": "ok", "tweets": [], "_llm_slim": True},
+        "gmail_intel": {"status": "ok", "unread": 3},
+        "intel30": {
+            "fred": _fake_fred_payload(),
+            "unknown_src": {"raw": [1, 2, 3], "huge": "z" * 500},
+        },
+    }
+
+
+def test_slim_intel_replaces_known_source_with_digest():
+    merged = _fake_merged_intel()
+    out = slim_intel_for_llm(merged)
+    fred_slim = out["intel30"]["fred"]
+    # raw multi-row series gone, replaced by the compact telegram digest
+    assert "series" not in fred_slim
+    assert "_llm_digest" in fred_slim
+    digest = fred_slim["_llm_digest"]
+    # signal preserved: the curated macro levels still present
+    assert "VIX" in digest and "14.21" in digest
+    assert "SOFR" in digest and "Fed Funds" in digest
+
+
+def test_slim_intel_keeps_unknown_source_raw():
+    out = slim_intel_for_llm(_fake_merged_intel())
+    # no module owns "unknown_src" → kept verbatim (graceful degrade)
+    assert out["intel30"]["unknown_src"] == {"raw": [1, 2, 3], "huge": "z" * 500}
+    assert out["intel30"]["_llm_slim"] is True
+    assert "fred" in out["intel30"]["_llm_note"]
+
+
+def test_slim_intel_passes_other_keys_through():
+    merged = _fake_merged_intel()
+    out = slim_intel_for_llm(merged)
+    assert out["x_intel"] == merged["x_intel"]
+    assert out["gmail_intel"] == merged["gmail_intel"]
+
+
+def test_slim_intel_does_not_mutate_original():
+    merged = _fake_merged_intel()
+    _ = slim_intel_for_llm(merged)
+    # original intel30.fred still carries its raw series untouched
+    assert "series" in merged["intel30"]["fred"]
+    assert "_llm_digest" not in merged["intel30"]["fred"]
+
+
+def test_slim_intel_shrinks_payload():
+    merged = _fake_merged_intel()
+    out = slim_intel_for_llm(merged)
+    raw_sz = len(json.dumps(merged["intel30"]["fred"], default=str))
+    slim_sz = len(json.dumps(out["intel30"]["fred"], default=str))
+    assert slim_sz < raw_sz
+
+
+def test_slim_intel_passthrough_non_dict():
+    assert slim_intel_for_llm(None) is None
+    assert slim_intel_for_llm("x") == "x"
+
+
+def test_slim_intel_no_intel30_key_is_safe():
+    out = slim_intel_for_llm({"x_intel": {"a": 1}})
+    assert out == {"x_intel": {"a": 1}}
+
+
+# ── R-COST2 Lever 4: prompt caching (cache_control) wiring ───────────────────
+
+def test_build_cached_system_marks_stable_prefix():
+    blocks = build_cached_system("STABLE SYSTEM PROMPT", "volatile state")
+    assert isinstance(blocks, list) and len(blocks) == 2
+    assert blocks[0]["text"] == "STABLE SYSTEM PROMPT"
+    assert blocks[0]["cache_control"] == {"type": "ephemeral"}
+    # the volatile suffix is NOT cached
+    assert "cache_control" not in blocks[1]
+    assert blocks[1]["text"] == "volatile state"
+
+
+def test_build_cached_system_without_dynamic():
+    blocks = build_cached_system("ONLY STABLE")
+    assert len(blocks) == 1
+    assert blocks[0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_system_to_text_flattens_blocks_for_gemini():
+    blocks = build_cached_system("AAA", "BBB")
+    assert _system_to_text(blocks) == "AAA\nBBB"
+    # plain strings pass through unchanged (legacy callers)
+    assert _system_to_text("plain") == "plain"
+
+
+def test_cost_for_accounts_for_cache_read_and_write():
+    # 1M cached-read tokens at Sonnet input rate ($3) should bill ~10% = $0.30
+    read_cost = _cost_for("claude-sonnet-4-6", 0, 0, cache_read=1_000_000)
+    assert abs(read_cost - 0.30) < 1e-6
+    # 1M cache-write tokens bill 1.25× = $3.75
+    write_cost = _cost_for("claude-sonnet-4-6", 0, 0, cache_creation=1_000_000)
+    assert abs(write_cost - 3.75) < 1e-6
+    # plain input still bills full rate
+    base = _cost_for("claude-sonnet-4-6", 1_000_000, 0)
+    assert abs(base - 3.0) < 1e-6
+
+
+def test_anthropic_cache_usage_reads_fields():
+    class _U:
+        cache_read_input_tokens = 4142
+        cache_creation_input_tokens = 0
+
+    class _R:
+        usage = _U()
+
+    assert _anthropic_cache_usage(_R()) == (4142, 0)
+
+    class _NoUsage:
+        pass
+
+    assert _anthropic_cache_usage(_NoUsage()) == (0, 0)

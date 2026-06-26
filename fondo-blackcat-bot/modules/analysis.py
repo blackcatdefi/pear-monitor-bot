@@ -15,7 +15,7 @@ from config import (
     DATA_DIR,
     LAST_ANALYSIS_FILE,
 )
-from modules.llm_router import route_request, LLMError
+from modules.llm_router import route_request, LLMError, build_cached_system
 from templates.formatters import compile_raw_data
 from templates.system_prompt import SYSTEM_PROMPT, THESIS_PROMPT, build_fund_state_block
 # R-FINAL bug-1: prepend an on-chain authoritative state block ABOVE the
@@ -341,7 +341,9 @@ async def _update_thesis_state(
     try:
         raw, provider = await route_request(
             "tesis_update",
-            (await _full_state_block()) + SYSTEM_PROMPT + prev_context,
+            # R-COST2 (2026-06-26): stable SYSTEM_PROMPT cached prefix +
+            # volatile state/prev as the uncached suffix.
+            build_cached_system(SYSTEM_PROMPT, (await _full_state_block()) + prev_context),
             thesis_user_msg,
             max_tokens=2000,
         )
@@ -477,8 +479,23 @@ async def generate_report(
     except Exception:  # noqa: BLE001
         _funding_rates = {}
 
+    # R-COST2 (2026-06-26): slim the R-INTEL30 payload before it enters the
+    # FULL ANALYSIS Sonnet call. Each intel30 source's raw fetch_all() blob
+    # (multi-row tables / historical series) is replaced by its compact
+    # format_for_telegram digest — the SAME levels/headlines BCD already sees
+    # in the R-INTEL30 message. The user-facing report is built from the
+    # untouched raw payload in bot.py, so it stays byte-identical; only the LLM
+    # input shrinks. Mirrors x_intel.slim_x_intel_for_llm. Never breaks /reporte.
+    llm_intel: Any = telegram_intel
+    try:
+        from modules.intel_slim import slim_intel_for_llm
+        llm_intel = slim_intel_for_llm(telegram_intel)
+    except Exception:  # noqa: BLE001
+        log.exception("slim_intel_for_llm failed (non-fatal) — using full intel")
+        llm_intel = telegram_intel
+
     user_content = compile_raw_data(
-        portfolio, hyperlend, market, unlocks, telegram_intel,
+        portfolio, hyperlend, market, unlocks, llm_intel,
         funding_rates=_funding_rates,
     )
 
@@ -490,8 +507,8 @@ async def generate_report(
         import json as _json
         _CPT = 4  # chars-per-token heuristic
         parts: list[tuple[str, int]] = []
-        if isinstance(telegram_intel, dict):
-            for _k, _v in telegram_intel.items():
+        if isinstance(llm_intel, dict):
+            for _k, _v in llm_intel.items():
                 try:
                     _sz = len(_json.dumps(_v, ensure_ascii=False, default=str))
                 except Exception:  # noqa: BLE001
@@ -503,10 +520,16 @@ async def generate_report(
         parts.sort(key=lambda x: x[1], reverse=True)
         _total = len(user_content) // _CPT
         _top = ", ".join(f"{k}={v}t" for k, v in parts[:8])
+        # R-COST2: before/after on the intel30 sub-payload (the slimmed driver).
+        _i30_raw = telegram_intel.get("intel30") if isinstance(telegram_intel, dict) else None
+        _i30_slim = llm_intel.get("intel30") if isinstance(llm_intel, dict) else None
+        _raw_t = (len(_json.dumps(_i30_raw, ensure_ascii=False, default=str)) // _CPT) if _i30_raw else 0
+        _slim_t = (len(_json.dumps(_i30_slim, ensure_ascii=False, default=str)) // _CPT) if _i30_slim else 0
         log.info(
             "[COST_BREAKDOWN] /reporte user_content≈%d tok (sent to 'reporte' "
-            "Sonnet + compact subset to 'tesis_update'). Top intel: %s",
-            _total, _top,
+            "Sonnet + compact subset to 'tesis_update'). intel30 raw≈%d→slim≈%d "
+            "tok (−%d). Top intel: %s",
+            _total, _raw_t, _slim_t, max(0, _raw_t - _slim_t), _top,
         )
     except Exception:  # noqa: BLE001
         log.debug("cost breakdown instrumentation failed (non-fatal)")
@@ -519,7 +542,13 @@ async def generate_report(
     # Ciclo Blofin ELIMINADO de los inyectables.)
     # R-BOT-TERMINOLOGY-UNIFY (2026-05-07): pass market so the LMEC
     # bear-invalidation block uses live BTC for condition #1 / #4.
-    full_system = (await _full_state_block(market)) + SYSTEM_PROMPT + prev_thesis
+    # R-COST2 (2026-06-26): cache the ~7k-tok stable SYSTEM_PROMPT prefix; the
+    # live fund-state block + previous thesis follow as the uncached suffix.
+    # (Reorders SYSTEM_PROMPT ahead of the state block — instructions before
+    # live data — which is the natural grounding order; quality sanity-checked.)
+    full_system = build_cached_system(
+        SYSTEM_PROMPT, (await _full_state_block(market)) + prev_thesis
+    )
 
     try:
         report_text, provider = await route_request(
@@ -735,7 +764,11 @@ async def generate_thesis_check(
 
     state = _load_thesis()
     prev_thesis = _thesis_context(state)
-    full_prompt = (await _full_state_block(market)) + THESIS_PROMPT + prev_thesis
+    # R-COST2 (2026-06-26): cache the stable THESIS_PROMPT prefix; live state +
+    # prev thesis as the uncached suffix.
+    full_prompt = build_cached_system(
+        THESIS_PROMPT, (await _full_state_block(market)) + prev_thesis
+    )
 
     try:
         text, provider = await route_request(
