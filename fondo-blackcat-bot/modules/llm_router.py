@@ -33,17 +33,25 @@ REQUEST_TIMEOUT = 90.0
 
 class TaskType(Enum):
     CRITICAL = "critical"
+    STRUCTURED = "structured"
     ROUTINE = "routine"
 
 
 # Task → tier mapping
 TASK_TIER: dict[str, TaskType] = {
-    # Critical — Sonnet 4.6 (quality matters)
+    # Critical — Sonnet 4.6 (analysis quality matters; written from raw data)
     "reporte": TaskType.CRITICAL,
     "tesis": TaskType.CRITICAL,
-    "tesis_update": TaskType.CRITICAL,
     "kill": TaskType.CRITICAL,
     "decision_query": TaskType.CRITICAL,
+    # Structured — Haiku 4.5 first, Gemini fallback (R-COST 2026-06-26).
+    # tesis_update only RE-STRUCTURES the already-written Sonnet report into
+    # JSON component statuses; it is faithful extraction, not fresh analysis,
+    # so it does not need Sonnet. Haiku ($1/$5) keeps narrative quality at ~3x
+    # cheaper input + free Gemini fallback. Combined with stripping the raw
+    # dump from its input (analysis._update_thesis_state), this removes the
+    # second expensive Sonnet leg that doubled /reporte cost.
+    "tesis_update": TaskType.STRUCTURED,
     # Routine — Gemini free (volume matters)
     "intel_parse": TaskType.ROUTINE,
     "telegram_summary": TaskType.ROUTINE,
@@ -253,6 +261,14 @@ async def route_request(
     if task_type == TaskType.CRITICAL:
         chain = [
             ("claude-sonnet-4-6", _call_sonnet),
+            ("claude-haiku-4-5-20251001", _call_haiku),
+            ("gemini-2.5-flash", _call_gemini),
+        ]
+    elif task_type == TaskType.STRUCTURED:
+        # R-COST: Haiku-first (paid, strong, 3x cheaper than Sonnet) → Gemini
+        # (free) fallback. For mechanical JSON-extraction / restructuring of
+        # text already written by a CRITICAL model.
+        chain = [
             ("claude-haiku-4-5-20251001", _call_haiku),
             ("gemini-2.5-flash", _call_gemini),
         ]

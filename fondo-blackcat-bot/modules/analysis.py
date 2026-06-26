@@ -320,10 +320,22 @@ async def _update_thesis_state(
     state = _load_thesis()
     prev_context = _thesis_context(state)
 
+    # R-COST (2026-06-26): the thesis update only re-structures the
+    # already-written report into JSON component statuses. The full Sonnet
+    # report already digested the raw data, so re-sending the entire raw JSON
+    # dump (X timeline, intel30, raw portfolio — the bulk of the input tokens)
+    # is pure waste. Keep ONLY the compact deterministic prefix blocks
+    # (fund rules + position classification + PM state + funding verdict +
+    # catalysts) that sit ABOVE the "RAW DATA" json in compile_raw_data —
+    # those are exactly what the thesis components key off, and they are tiny.
+    _raw_marker = "RAW DATA (timestamp"
+    _cut = user_data.find(_raw_marker)
+    compact_context = user_data[:_cut].rstrip() if _cut > 0 else ""
+
     thesis_user_msg = (
         f"REPORTE GENERADO:\n{report_text}\n\n"
-        f"DATA CRUDA UTILIZADA:\n{user_data}\n\n"
-        f"{THESIS_UPDATE_PROMPT}"
+        + (f"CONTEXTO DETERMINISTA:\n{compact_context}\n\n" if compact_context else "")
+        + f"{THESIS_UPDATE_PROMPT}"
     )
 
     try:
@@ -469,6 +481,35 @@ async def generate_report(
         portfolio, hyperlend, market, unlocks, telegram_intel,
         funding_rates=_funding_rates,
     )
+
+    # R-COST (2026-06-26): per-component context-size instrumentation. Logs the
+    # approximate token weight of each intel sub-section + the total prompt so
+    # the cost breakdown of a single /reporte run is observable in Railway logs
+    # (grep "[COST_BREAKDOWN]"). ~4 chars/token heuristic. Never breaks /reporte.
+    try:
+        import json as _json
+        _CPT = 4  # chars-per-token heuristic
+        parts: list[tuple[str, int]] = []
+        if isinstance(telegram_intel, dict):
+            for _k, _v in telegram_intel.items():
+                try:
+                    _sz = len(_json.dumps(_v, ensure_ascii=False, default=str))
+                except Exception:  # noqa: BLE001
+                    _sz = len(str(_v))
+                parts.append((_k, _sz // _CPT))
+        parts.append(("portfolio", len(_json.dumps(portfolio or [], default=str)) // _CPT))
+        parts.append(("market", len(_json.dumps(market or {}, default=str)) // _CPT))
+        parts.append(("unlocks", len(_json.dumps(unlocks or {}, default=str)) // _CPT))
+        parts.sort(key=lambda x: x[1], reverse=True)
+        _total = len(user_content) // _CPT
+        _top = ", ".join(f"{k}={v}t" for k, v in parts[:8])
+        log.info(
+            "[COST_BREAKDOWN] /reporte user_content≈%d tok (sent to 'reporte' "
+            "Sonnet + compact subset to 'tesis_update'). Top intel: %s",
+            _total, _top,
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("cost breakdown instrumentation failed (non-fatal)")
 
     state = _load_thesis()
     prev_thesis = _thesis_context(state)

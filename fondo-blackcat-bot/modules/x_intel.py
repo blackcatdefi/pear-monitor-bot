@@ -250,6 +250,75 @@ def _sanitize_untrusted(text: Any, *, max_len: int = _MAX_UNTRUSTED_LEN) -> str:
     return s
 
 
+def slim_x_intel_for_llm(
+    payload: dict[str, Any] | None, *, top_n: int = 40
+) -> dict[str, Any] | None:
+    """R-COST (2026-06-26): shrink the X timeline before it enters the LLM.
+
+    The live ``fetch_x_intel`` payload carries the FULL window of tweets in
+    BOTH ``tweets`` (flat, engagement-sorted) AND ``data`` (the by-username
+    dict used only by the legacy /timeline text formatter). Feeding that whole
+    blob to the FULL ANALYSIS Sonnet call — and historically a second time to
+    the thesis update — was the single biggest input-token driver:
+
+      * tweets were serialized TWICE (flat list + by_user dict),
+      * the entire window (up to ~200 tweets) was sent, far past what the
+        narrative cites.
+
+    This returns a LLM-only copy that keeps the top ``top_n`` tweets by
+    engagement (already the sort order), drops the duplicate ``data``/by_user
+    map, and keeps only the lean per-tweet fields. Display paths
+    (``format_timeline``) still receive the full untouched payload, so the
+    user-facing timeline is unchanged. Returns ``payload`` unchanged when it is
+    not an OK dict (e.g. error/cache markers the LLM still needs to see).
+    """
+    if not isinstance(payload, dict):
+        return payload
+    if payload.get("status") != "ok":
+        return payload
+
+    tweets = payload.get("tweets")
+    if not isinstance(tweets, list):
+        return payload
+
+    capped = tweets[: max(0, int(top_n))]
+    lean: list[dict[str, Any]] = []
+    for t in capped:
+        if not isinstance(t, dict):
+            continue
+        m = t.get("metrics") or {}
+        lean.append(
+            {
+                "username": t.get("username"),
+                "name": t.get("name"),
+                "text": t.get("text"),
+                "created_at": t.get("created_at"),
+                "engagement": t.get("_engagement"),
+                "likes": m.get("like_count"),
+                "retweets": m.get("retweet_count"),
+            }
+        )
+
+    slim = {
+        "status": "ok",
+        "source": payload.get("source"),
+        "tweets": lean,
+        "accounts": payload.get("accounts"),
+        "total": payload.get("total"),
+        "shown_to_llm": len(lean),
+        "hours": payload.get("hours"),
+        "canonical_total": payload.get("canonical_total"),
+        "canonical_active": payload.get("canonical_active"),
+        "canonical_inactive": payload.get("canonical_inactive"),
+        "_llm_slim": True,
+        "_llm_note": (
+            f"X TIMELINE recortado a top-{len(lean)} por engagement de "
+            f"{payload.get('total')} tweets en ventana ({payload.get('hours')}h)."
+        ),
+    }
+    return slim
+
+
 def _track_call(endpoint: str, status: int) -> None:
     """Back-compat shim. Real tracking now lives in intel_memory SQLite."""
     # Intentionally thin — rate limit + cost tracking happen in

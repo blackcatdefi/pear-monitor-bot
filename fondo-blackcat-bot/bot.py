@@ -545,7 +545,17 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if isinstance(intel_unread, dict) and intel_unread.get("status") == "ok":
         merged_intel["unread_scan"] = intel_unread
     if isinstance(x_intel, dict):
-        merged_intel["x_intel"] = x_intel
+        # R-COST (2026-06-26): feed the LLM a slimmed X timeline (top-40 by
+        # engagement, no duplicate by_user map). The user-facing timeline above
+        # already rendered the full payload via format_timeline; the analysis
+        # narrative only cites a handful of high-signal tweets, so the full
+        # ~200-tweet double-serialized blob was the biggest input-token driver.
+        try:
+            from modules.x_intel import slim_x_intel_for_llm
+            merged_intel["x_intel"] = slim_x_intel_for_llm(x_intel, top_n=40)
+        except Exception:  # noqa: BLE001
+            log.exception("slim_x_intel_for_llm failed (non-fatal) — using full payload")
+            merged_intel["x_intel"] = x_intel
     if isinstance(gmail_intel, dict) and gmail_intel.get("status") == "ok":
         merged_intel["gmail_intel"] = gmail_intel
     if bt:
