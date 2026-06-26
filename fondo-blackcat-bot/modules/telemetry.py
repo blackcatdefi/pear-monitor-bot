@@ -54,6 +54,29 @@ MAX_TICKERS = 8
 # Strict post-sanitization ticker charset. HL perp symbols are upper-alnum
 # (e.g. BTC, HYPE, kPEPE → "KPEPE", 1000BONK). Anything else is dropped.
 _VALID_TICKER = re.compile(r"^[A-Z0-9]{1,15}$")
+# HIP-3 builder-deployed perp dex prefix (e.g. ``xyz`` in ``xyz:SP500``). HL
+# convention is a LOWER-case deployer name + UPPER-case symbol; the colon is the
+# only structural separator we accept inside a token.
+_VALID_DEPLOYER = re.compile(r"^[a-z0-9]{1,15}$")
+# Natural-language connectors a human types between tickers ("SP500, NVDA, and
+# HOOD"). These must NEVER be parsed as a ticker or consume one of the 8 slots.
+_CONNECTORS = {"AND", "Y", "&", "PLUS", "+"}
+# Preferred HIP-3 deployer when a BARE symbol resolves to several dexes. ``xyz``
+# is the reference equities/RWA venue the fund uses (and the one the user types
+# explicitly). Ties beyond this fall back to the most-liquid listing.
+_PREFERRED_DEPLOYER = "xyz"
+
+
+def _norm_coin(coin: str) -> str:
+    """Canonical HL info-API coin string. Plain symbols are upper-cased
+    (BTC, hype→HYPE); HIP-3 ``deployer:SYMBOL`` keeps the LOWER-case deployer
+    prefix and UPPER-cases only the symbol (HL is case-sensitive here:
+    ``xyz:SP500`` works, ``XYZ:SP500`` / ``xyz:sp500`` do NOT)."""
+    coin = (coin or "").strip()
+    if ":" in coin:
+        dep, _, sym = coin.partition(":")
+        return f"{dep.strip().lower()}:{sym.strip().upper()}"
+    return coin.upper()
 
 # HL funding is charged HOURLY (see funding_tracker.funding_8h_bps).
 _HOURS_PER_YEAR = 24.0 * 365.0
@@ -68,10 +91,14 @@ def parse_tickers(raw: Any) -> tuple[list[str], list[str]]:
     Returns ``(tickers, notes)``. ``raw`` may be a list of args (Telegram
     ``context.args``) or a single string. Every candidate is:
       1. split on whitespace AND commas,
-      2. upper-cased, ``$``/whitespace-stripped,
-      3. passed through ``_sanitize_untrusted`` (prompt-injection defang),
-      4. validated against ``[A-Z0-9]{1,15}`` — invalid tokens are DROPPED
-         (never silently coerced), with a note,
+      2. natural-language connectors ("and", "y", "&", "plus") are DROPPED
+         silently — they never become a ticker nor consume a slot,
+      3. HIP-3 ``deployer:symbol`` tokens (e.g. ``xyz:SP500``) are parsed into a
+         canonical lower-deployer / upper-symbol coin string and KEPT (the colon
+         is NOT treated as invalid); plain tickers behave exactly as before,
+      4. each part passed through ``_sanitize_untrusted`` (prompt-injection
+         defang) and validated against its strict charset — invalid tokens are
+         DROPPED (never silently coerced), with a note,
       5. de-duplicated preserving order,
       6. capped at ``MAX_TICKERS`` (overflow noted, never truncated silently).
     """
@@ -86,27 +113,67 @@ def parse_tickers(raw: Any) -> tuple[list[str], list[str]]:
     out: list[str] = []
     seen: set[str] = set()
     dropped: list[str] = []
+    connectors: list[str] = []
 
     for chunk in re.split(r"[\s,]+", joined):
         if not chunk:
             continue
-        # Sanitize FIRST (defang injection), then normalize shape.
-        cleaned = _sanitize_untrusted(chunk).upper().strip().lstrip("$").strip()
-        if not cleaned or not _VALID_TICKER.match(cleaned):
+        # Connector check on the RAW chunk (upper) BEFORE charset validation so a
+        # bare "&"/"+" is labelled a connector, not "formato inválido".
+        if chunk.strip().upper() in _CONNECTORS:
+            connectors.append(chunk.strip()[:8])
+            continue
+        canon = _parse_one_token(chunk)
+        if canon is None:
             # Keep a short, already-sanitized echo so the note can't be a vector.
-            dropped.append(cleaned[:12] or "?")
+            safe = _sanitize_untrusted(chunk).upper().strip()[:12]
+            dropped.append(safe or "?")
             continue
-        if cleaned in seen:
+        if canon in seen:
             continue
-        seen.add(cleaned)
-        out.append(cleaned)
+        seen.add(canon)
+        out.append(canon)
 
+    if connectors:
+        notes.append(f"conectores ignorados: {', '.join(connectors[:8])}")
     if dropped:
         notes.append(f"ignorados (formato inválido): {', '.join(dropped[:8])}")
     if len(out) > MAX_TICKERS:
         notes.append(f"máx {MAX_TICKERS} por llamada — usando los primeros {MAX_TICKERS}")
         out = out[:MAX_TICKERS]
     return out, notes
+
+
+def _parse_one_token(chunk: str) -> Optional[str]:
+    """Parse ONE whitespace/comma-free token into a canonical coin string, or
+    ``None`` if it is not a well-formed ticker.
+
+    - ``deployer:symbol`` → ``deployer.lower():SYMBOL.upper()`` (HIP-3). Each side
+      is sanitized + charset-checked independently so the colon survives intact.
+    - plain ``symbol`` → ``SYMBOL.upper()`` (unchanged legacy behaviour).
+    Tokens with more than one colon, or with an invalid deployer/symbol part, are
+    rejected (``None``).
+
+    SECURITY: the WHOLE chunk is run through ``_sanitize_untrusted`` FIRST. That
+    guard only recognises a role marker like ``system:`` when its colon is intact
+    (``system:DROP`` → ``[redacted-injection]DROP``), so splitting before
+    sanitizing would smuggle it past. A legitimate HIP-3 token (``xyz:SP500``)
+    survives sanitization byte-for-byte; a defanged injection loses its colon and
+    then fails the strict charset below → dropped."""
+    cleaned = _sanitize_untrusted(chunk).strip()
+    if ":" in cleaned:
+        dep_raw, _, sym_raw = cleaned.partition(":")
+        if ":" in sym_raw:  # >1 colon → malformed
+            return None
+        dep = dep_raw.strip().lower().lstrip("$").strip()
+        sym = sym_raw.strip().upper().lstrip("$").strip()
+        if not _VALID_DEPLOYER.match(dep) or not _VALID_TICKER.match(sym):
+            return None
+        return f"{dep}:{sym}"
+    cleaned = cleaned.upper().lstrip("$").strip()
+    if not cleaned or not _VALID_TICKER.match(cleaned):
+        return None
+    return cleaned
 
 
 # ─── Per-token telemetry container (Optional everywhere → n/d on miss) ────────
@@ -161,10 +228,162 @@ async def fetch_ctx_map() -> dict[str, dict[str, Any]]:
     return out
 
 
+# ─── HIP-3 builder-deployed dex discovery + per-dex context ───────────────────
+async def fetch_perp_dexes() -> list[str]:
+    """Names of all HIP-3 builder-deployed perp dexes (e.g. ``xyz``, ``flx`` …).
+    The leading ``null`` entry (HL core) is dropped. [] on any failure."""
+    try:
+        dexs = await _hl_post({"type": "perpDexs"})
+    except Exception as exc:  # noqa: BLE001
+        log.warning("telemetry: perpDexs n/d (%s)", exc)
+        return []
+    out: list[str] = []
+    for d in dexs or []:
+        if isinstance(d, dict):
+            nm = str(d.get("name", "")).strip().lower()
+            if nm:
+                out.append(nm)
+    return out
+
+
+async def fetch_dex_ctx(dex: str) -> dict[str, dict[str, Any]]:
+    """{EXACT_NAME: ctx} for ONE HIP-3 deployer via ``metaAndAssetCtxs`` with the
+    ``dex`` argument. Keys are the exact HL coin strings (e.g. ``xyz:SP500``) —
+    NOT upper-cased — because HL is case-sensitive for HIP-3 coins. {} on any
+    failure; callers degrade per-metric to n/d."""
+    dex = (dex or "").strip().lower()
+    if not dex:
+        return {}
+    try:
+        data = await _hl_post({"type": "metaAndAssetCtxs", "dex": dex})
+        meta, ctxs = data[0], data[1]
+        universe = meta.get("universe", [])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("telemetry: HIP-3 metaAndAssetCtxs n/d for dex=%s (%s)", dex, exc)
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for asset, ctx in zip(universe, ctxs):
+        if not isinstance(asset, dict) or not isinstance(ctx, dict):
+            continue
+        name = str(asset.get("name", "")).strip()  # exact case, e.g. 'xyz:SP500'
+        if name:
+            out[name] = ctx
+    return out
+
+
+# ─── Venue resolution (HIP-3 deployer → HL core → VAR) ────────────────────────
+@dataclass
+class Resolution:
+    """How ONE requested coin maps to a venue + how telemetry should query it.
+
+    ``query_coin`` is the exact string handed to the HL info API and used to look
+    up the merged ctx map. ``kind`` ∈ {hl_core, hip3, hip3_missing, unknown}:
+    ``unknown`` means "not on HL core nor any HIP-3 dex" → let the R-SCREEN gate
+    engine decide VAR-vs-nothing. ``run_gate`` is False for HIP-3 (the 5-gate
+    engine only covers HL-core + VAR), so squeeze/z/Hurst show n/d with a note."""
+    query_coin: str
+    kind: str
+    venue_label: Optional[str] = None
+    deployer: Optional[str] = None
+    run_gate: bool = True
+    note: Optional[str] = None
+
+
+def _pick_hip3(symbol: str, index: dict[str, list[tuple[str, dict]]]
+               ) -> Optional[tuple[str, list[str]]]:
+    """Resolve a BARE symbol (no deployer) to a single HIP-3 coin. Prefers the
+    reference deployer ``xyz``; otherwise the most-liquid listing (max 24h vol).
+    Returns ``(canonical_coin, all_listings)`` or ``None`` if unlisted."""
+    cands = index.get(symbol.upper())
+    if not cands:
+        return None
+    listings = [name for name, _ in cands]
+    for name, _ctx in cands:
+        if name.split(":", 1)[0] == _PREFERRED_DEPLOYER:
+            return name, listings
+    best = max(cands, key=lambda nc: _f(nc[1].get("dayNtlVlm")) or 0.0)
+    return best[0], listings
+
+
+async def resolve_markets(coins: list[str], core_ctx_map: dict[str, dict[str, Any]]
+                          ) -> tuple[dict[str, Resolution], dict[str, dict[str, Any]]]:
+    """Route every requested coin to a venue and gather any HIP-3 context needed.
+
+    Order per coin (TASK 3): (a) explicit ``deployer:symbol`` → that HIP-3
+    deployer; (b) HL core perp; (c) bare-symbol HIP-3 fallback (across all
+    deployers); (d) ``unknown`` → R-SCREEN gate decides VAR / not-found.
+
+    HIP-3 dex contexts are fetched ONCE per run (only when actually needed): the
+    explicit deployers named in the request, plus every deployer if any plain
+    ticker is missing from HL core (so the bare-symbol index can be built).
+    Returns ``(resolutions, hip3_ctx)`` where ``hip3_ctx`` is keyed by exact coin
+    string and merges into the ctx map the build path looks up."""
+    explicit_deployers: set[str] = set()
+    need_bare_index = False
+    for c in coins:
+        if ":" in c:
+            explicit_deployers.add(c.split(":", 1)[0].lower())
+        elif c.upper() not in core_ctx_map:
+            need_bare_index = True
+
+    hip3_ctx: dict[str, dict[str, Any]] = {}
+    dexes_to_fetch: set[str] = set(explicit_deployers)
+    if need_bare_index:
+        all_dexes = await fetch_perp_dexes()
+        dexes_to_fetch |= set(all_dexes)
+    for dex in sorted(dexes_to_fetch):
+        hip3_ctx.update(await fetch_dex_ctx(dex))
+
+    # Bare-symbol index across whatever HIP-3 ctx we pulled.
+    index: dict[str, list[tuple[str, dict]]] = {}
+    for name, ctx in hip3_ctx.items():
+        if ":" in name:
+            index.setdefault(name.split(":", 1)[1].upper(), []).append((name, ctx))
+
+    resolutions: dict[str, Resolution] = {}
+    for c in coins:
+        if ":" in c:
+            dep = c.split(":", 1)[0].lower()
+            if c in hip3_ctx:
+                resolutions[c] = Resolution(
+                    query_coin=c, kind="hip3", venue_label=f"HIP-3 {dep}",
+                    deployer=dep, run_gate=False,
+                    note="HIP-3: squeeze/z/H n/d (motor R-SCREEN cubre solo HL-core/VAR)",
+                )
+            else:
+                resolutions[c] = Resolution(
+                    query_coin=c, kind="hip3_missing", venue_label=f"HIP-3 {dep}?",
+                    deployer=dep, run_gate=False,
+                    note=f"deployer HIP-3 '{dep}' no lista el símbolo o no expone datos",
+                )
+            continue
+        up = c.upper()
+        if up in core_ctx_map:
+            resolutions[c] = Resolution(query_coin=up, kind="hl_core", run_gate=True)
+            continue
+        picked = _pick_hip3(up, index)
+        if picked is not None:
+            name, listings = picked
+            dep = name.split(":", 1)[0]
+            alt = [x for x in listings if x != name]
+            note = f"símbolo {up} → {name} (HIP-3 {dep})"
+            if alt:
+                note += f"; también en {', '.join(alt[:5])}"
+            note += " · squeeze/z/H n/d (motor R-SCREEN HL-core/VAR)"
+            resolutions[c] = Resolution(
+                query_coin=name, kind="hip3", venue_label=f"HIP-3 {dep}",
+                deployer=dep, run_gate=False, note=note,
+            )
+            continue
+        # Not on HL core nor any HIP-3 dex → let the gate engine probe VAR.
+        resolutions[c] = Resolution(query_coin=up, kind="unknown", run_gate=True)
+    return resolutions, hip3_ctx
+
+
 async def fetch_funding_avg_7d(coin: str) -> tuple[Optional[float], int]:
     """Arithmetic mean of HL ``fundingHistory`` hourly rates over the trailing
     7 days. Returns (mean_rate, n_samples). (None, 0) on miss — never 0-filled."""
-    coin = (coin or "").strip().upper()
+    coin = _norm_coin(coin)
     start_ms = int(time.time() * 1000) - _SEVEN_DAYS_MS
     try:
         rows = await _hl_post(
@@ -187,7 +406,7 @@ async def fetch_funding_avg_7d(coin: str) -> tuple[Optional[float], int]:
 async def fetch_low_7d(coin: str) -> Optional[float]:
     """Minimum 4h candle low over the trailing 7 days from ``candleSnapshot``.
     None on miss. 7d of 4h candles = 42 bars."""
-    coin = (coin or "").strip().upper()
+    coin = _norm_coin(coin)
     now_ms = int(time.time() * 1000)
     start_ms = now_ms - _SEVEN_DAYS_MS
     try:
@@ -211,7 +430,7 @@ async def fetch_depth(coin: str) -> dict[str, Optional[float]]:
     empty: dict[str, Optional[float]] = {
         "bid_05": None, "ask_05": None, "bid_10": None, "ask_10": None
     }
-    coin = (coin or "").strip().upper()
+    coin = _norm_coin(coin)
     try:
         book = await _hl_post({"type": "l2Book", "coin": coin})
         levels = book.get("levels") if isinstance(book, dict) else None
@@ -312,17 +531,26 @@ async def fetch_gate(ticker: str) -> dict[str, Any]:
 
 
 # ─── Per-token assembly (each metric independent → granular n/d) ──────────────
-async def build_one(ticker: str, ctx_map: dict[str, dict[str, Any]]) -> TokenTelemetry:
+async def build_one(ticker: str, ctx_map: dict[str, dict[str, Any]],
+                    resolution: Optional["Resolution"] = None) -> TokenTelemetry:
     """Assemble one ticker's telemetry. Every metric block is independently
-    guarded: a failure in one NEVER blanks the others, and nothing is faked."""
+    guarded: a failure in one NEVER blanks the others, and nothing is faked.
+
+    ``resolution`` (new, optional) is the venue-routing overlay produced by
+    ``resolve_markets``: it supplies the exact ``query_coin`` (so HIP-3 markets
+    like ``xyz:SP500`` are fetched correctly), the venue label, whether to run the
+    R-SCREEN gate, and an explicit note. When ``None`` the legacy behaviour is
+    preserved byte-for-byte (plain ticker, gate always run) so existing callers /
+    tests are unaffected."""
     t = TokenTelemetry(ticker=ticker)
-    ctx = ctx_map.get(ticker)
+    q = resolution.query_coin if resolution is not None else ticker
+    ctx = ctx_map.get(q)
     t.on_hl = ctx is not None
 
     # 1. Funding (live from ctx; 7d avg from fundingHistory)
     if ctx is not None:
         t.funding_live = _f(ctx.get("funding"))
-    avg, n = await fetch_funding_avg_7d(ticker)
+    avg, n = await fetch_funding_avg_7d(q)
     t.funding_avg7d, t.funding_samples = avg, n
 
     # 2. OI notional + 24h vol + ratio
@@ -337,35 +565,87 @@ async def build_one(ticker: str, ctx_map: dict[str, dict[str, Any]]) -> TokenTel
             t.oi_vol_ratio = t.oi_usd / t.vol24h_usd
 
     # 3. Distance from 7d low
-    low = await fetch_low_7d(ticker)
+    low = await fetch_low_7d(q)
     t.low7d = low
     if mark is not None and low is not None and low > 0:
         t.dist_low_pct = (mark - low) / low * 100.0
 
     # 4. Top-of-book depth
-    depth = await fetch_depth(ticker)
+    depth = await fetch_depth(q)
     t.bid_05, t.ask_05 = depth["bid_05"], depth["ask_05"]
     t.bid_10, t.ask_10 = depth["bid_10"], depth["ask_10"]
 
-    # 5. Squeeze + fails-first + z + Hurst (reused engine)
-    gate = await fetch_gate(ticker)
-    t.squeeze_state = gate["squeeze_state"]
-    t.fails_first = gate["fails_first"]
-    t.z = gate["z"]
-    t.hurst = gate["hurst"]
-    if gate["venue_label"]:
-        t.venue_label = gate["venue_label"]
+    # 5. Squeeze + fails-first + z + Hurst (reused engine) — skipped for HIP-3,
+    #    where the 5-gate R-SCREEN engine (HL-core + VAR only) does not apply.
+    run_gate = True if resolution is None else resolution.run_gate
+    gate_vl: Optional[str] = None
+    if run_gate:
+        gate = await fetch_gate(q)
+        t.squeeze_state = gate["squeeze_state"]
+        t.fails_first = gate["fails_first"]
+        t.z = gate["z"]
+        t.hurst = gate["hurst"]
+        gate_vl = gate["venue_label"]
+
+    # Venue label: explicit resolution wins; else gate-derived; else plain HL.
+    if resolution is not None and resolution.venue_label:
+        t.venue_label = resolution.venue_label
+    elif gate_vl:
+        t.venue_label = gate_vl
     elif t.on_hl:
         t.venue_label = "HL"
+
+    # Explicit messaging (TASK 5) — only on the routed path so legacy is intact.
+    if resolution is not None:
+        _annotate_explicit(t, resolution, gate_vl)
     return t
+
+
+def _annotate_explicit(t: TokenTelemetry, resolution: "Resolution",
+                       gate_vl: Optional[str]) -> None:
+    """Append a single, human-readable reason a market has the data (or n/d) it
+    does, so the user never sees a bare ``formato inválido`` / unexplained n/d:
+      - HIP-3 resolved (with or without exposed metrics) → router note,
+      - plain ticker found only on Variational → say VAR exposes no liq data,
+      - plain ticker found nowhere → say not on HL core / HIP-3 / VAR."""
+    kind = resolution.kind
+    if kind in ("hip3", "hip3_missing"):
+        if resolution.note:
+            t.notes.append(resolution.note)
+        return
+    # hl_core: nothing to explain (full data path).
+    if kind == "hl_core":
+        return
+    # unknown: the gate engine just told us where (if anywhere) it lives.
+    vl = (gate_vl or "").upper()
+    if "VAR" in vl:
+        t.venue_label = gate_vl or "VAR"
+        t.notes.append("mercado en Variational (VAR); el HL info API no expone "
+                       "funding/OI/depth → n/d")
+    else:
+        t.venue_label = "—"
+        t.notes.append("no encontrado en HL core / HIP-3 / VAR")
 
 
 async def build_telemetry(tickers: list[str]) -> list[TokenTelemetry]:
     """Assemble telemetry for all requested tickers concurrently. The shared HL
     client de-dupes the single ``metaAndAssetCtxs`` call across them and rate
-    limits the rest; nothing here ever raises."""
-    ctx_map = await fetch_ctx_map()
-    return await asyncio.gather(*[build_one(t, ctx_map) for t in tickers])
+    limits the rest; nothing here ever raises.
+
+    Routing: HL core ctx is fetched once; ``resolve_markets`` then pulls any
+    HIP-3 deployer contexts needed and tags each coin's venue. The merged ctx map
+    is keyed by HL-core UPPER names AND exact HIP-3 coin strings, so ``build_one``
+    looks each up by its ``query_coin``."""
+    core_ctx_map = await fetch_ctx_map()
+    try:
+        resolutions, hip3_ctx = await resolve_markets(tickers, core_ctx_map)
+    except Exception:  # noqa: BLE001 — routing must never break telemetry
+        log.exception("telemetry: resolve_markets failed (non-fatal) — HL-core only")
+        resolutions, hip3_ctx = {}, {}
+    merged = {**core_ctx_map, **hip3_ctx}
+    return await asyncio.gather(
+        *[build_one(t, merged, resolutions.get(t)) for t in tickers]
+    )
 
 
 # ─── Screener-attached telemetry (R-SCREEN-TELEMETRY) ─────────────────────────

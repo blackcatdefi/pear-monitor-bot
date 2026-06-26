@@ -291,3 +291,291 @@ async def test_format_telemetry_groups_and_timestamps(_patch_feeds, monkeypatch)
     out = tel.format_telemetry(tokens, ["nota de prueba"])
     assert "TELEMETRY" in out and "UTC" in out and "BTC" in out
     assert "nota de prueba" in out
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# R-TELEMETRY-HIP3 — HIP-3 deployer:symbol parsing, connector noise filtering,
+# venue routing, and explicit no-data messaging.  All offline.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ─── TASK 1: HIP-3 deployer:symbol parsing ───────────────────────────────────
+def test_parse_hip3_explicit_canonical():
+    # colon is NOT invalid; deployer lower-cased, symbol upper-cased.
+    tickers, notes = tel.parse_tickers(["xyz:SP500", "xyz:NVDA"])
+    assert tickers == ["xyz:SP500", "xyz:NVDA"]
+    assert notes == []
+
+
+def test_parse_hip3_case_is_normalized():
+    # HL is case-sensitive (xyz:SP500 works, XYZ:SP500 / xyz:sp500 do not), so the
+    # parser MUST canonicalize regardless of how the human typed it.
+    tickers, _ = tel.parse_tickers(["XYZ:sp500", "Xyz:Nvda"])
+    assert tickers == ["xyz:SP500", "xyz:NVDA"]
+
+
+def test_parse_hip3_and_plain_mixed():
+    tickers, _ = tel.parse_tickers(["BTC", "xyz:SP500", "hype"])
+    assert tickers == ["BTC", "xyz:SP500", "HYPE"]  # plain path byte-identical
+
+
+def test_parse_hip3_malformed_dropped():
+    tickers, notes = tel.parse_tickers(["xyz:", ":SP500", "a:b:c", "xyz:SP500"])
+    assert tickers == ["xyz:SP500"]
+    assert any("inválido" in n for n in notes)
+
+
+def test_parse_hip3_dedup():
+    tickers, _ = tel.parse_tickers(["xyz:SP500", "XYZ:sp500"])
+    assert tickers == ["xyz:SP500"]
+
+
+def test_parse_hip3_role_marker_in_deployer_dropped():
+    # "system:DROP" sanitizes to "[redacted-injection]DROP" (loses the colon) →
+    # then fails the plain charset → dropped. Never becomes a HIP-3 coin.
+    tickers, _ = tel.parse_tickers(["system:DROP", "BTC"])
+    assert tickers == ["BTC"]
+    assert all(":" not in t for t in tickers if t == "BTC")
+    assert "system:DROP" not in tickers
+
+
+# ─── TASK 2: connector noise filtering ───────────────────────────────────────
+def test_parse_filters_connectors():
+    # "and"/"y"/"&"/"plus" are connectors, never tickers, never consume a slot.
+    tickers, notes = tel.parse_tickers(
+        ["SP500", "NVDA", "and", "HOOD", "y", "META", "&", "plus"])
+    assert tickers == ["SP500", "NVDA", "HOOD", "META"]
+    assert any("conectores" in n for n in notes)
+
+
+def test_parse_connectors_not_flagged_invalid():
+    # a bare "&" must be labelled a connector, NOT "formato inválido".
+    _, notes = tel.parse_tickers(["BTC", "&"])
+    assert any("conectores" in n for n in notes)
+    assert not any("inválido" in n for n in notes)
+
+
+def test_parse_cap_counts_after_connector_filter():
+    # 8 real tickers + connectors → all 8 survive (connectors don't eat slots).
+    raw = "a and b y c & d plus e f g h"
+    tickers, notes = tel.parse_tickers(raw)
+    assert tickers == ["A", "B", "C", "D", "E", "F", "G", "H"]
+    assert not any("máx" in n for n in notes)
+
+
+# ─── _norm_coin: HIP-3 case preservation ─────────────────────────────────────
+def test_norm_coin_plain_upper():
+    assert tel._norm_coin("btc") == "BTC"
+
+
+def test_norm_coin_hip3_preserves_lower_deployer():
+    assert tel._norm_coin("XYZ:sp500") == "xyz:SP500"
+    assert tel._norm_coin("xyz:SP500") == "xyz:SP500"
+
+
+# ─── _pick_hip3: bare-symbol tie-break ───────────────────────────────────────
+def test_pick_hip3_prefers_xyz():
+    index = {"NVDA": [("flx:NVDA", {"dayNtlVlm": 9e9}),
+                      ("xyz:NVDA", {"dayNtlVlm": 1.0}),
+                      ("km:NVDA", {"dayNtlVlm": 5e9})]}
+    coin, listings = tel._pick_hip3("NVDA", index)
+    assert coin == "xyz:NVDA"               # xyz wins even at lower volume
+    assert set(listings) == {"flx:NVDA", "xyz:NVDA", "km:NVDA"}
+
+
+def test_pick_hip3_falls_back_to_most_liquid():
+    index = {"GOLD": [("flx:GOLD", {"dayNtlVlm": 3e9}),
+                      ("km:GOLD", {"dayNtlVlm": 8e9})]}
+    coin, _ = tel._pick_hip3("GOLD", index)
+    assert coin == "km:GOLD"                # no xyz → highest dayNtlVlm
+
+
+def test_pick_hip3_unlisted_returns_none():
+    assert tel._pick_hip3("DOESNOTEXIST", {}) is None
+
+
+# ─── TASK 3 + 4: resolve_markets venue routing ───────────────────────────────
+@pytest.fixture
+def _patch_dexes(monkeypatch):
+    async def _perp_dexes():
+        return ["xyz", "flx"]
+
+    async def _dex_ctx(dex):
+        if dex == "xyz":
+            return {"xyz:SP500": {"funding": 0.00002, "openInterest": 100.0,
+                                  "markPx": 7000.0, "dayNtlVlm": 5e8},
+                    "xyz:NVDA": {"funding": 0.00001, "openInterest": 10.0,
+                                 "markPx": 180.0, "dayNtlVlm": 9e8}}
+        if dex == "flx":
+            return {"flx:NVDA": {"funding": 0.0, "openInterest": 1.0,
+                                 "markPx": 181.0, "dayNtlVlm": 1e9}}
+        return {}
+
+    monkeypatch.setattr(tel, "fetch_perp_dexes", _perp_dexes)
+    monkeypatch.setattr(tel, "fetch_dex_ctx", _dex_ctx)
+
+
+async def test_resolve_explicit_hip3(_patch_dexes):
+    core = {"BTC": {}}
+    res, hip3 = await tel.resolve_markets(["xyz:SP500"], core)
+    r = res["xyz:SP500"]
+    assert r.kind == "hip3" and r.query_coin == "xyz:SP500"
+    assert r.run_gate is False and r.venue_label == "HIP-3 xyz"
+    assert "xyz:SP500" in hip3
+
+
+async def test_resolve_explicit_hip3_missing_symbol(_patch_dexes):
+    core = {"BTC": {}}
+    res, _ = await tel.resolve_markets(["xyz:NOPE"], core)
+    r = res["xyz:NOPE"]
+    assert r.kind == "hip3_missing" and r.run_gate is False
+    assert "no lista" in (r.note or "")
+
+
+async def test_resolve_plain_hl_core_unchanged(_patch_dexes):
+    core = {"BTC": {"funding": 0.0}}
+    res, _ = await tel.resolve_markets(["BTC"], core)
+    r = res["BTC"]
+    assert r.kind == "hl_core" and r.run_gate is True and r.query_coin == "BTC"
+
+
+async def test_resolve_bare_equity_routes_to_hip3_xyz(_patch_dexes):
+    # bare NVDA is not on HL core → resolves to xyz:NVDA (preferred deployer),
+    # noting the alternate flx listing. This is the user's exact failing case.
+    core = {"BTC": {}}
+    res, _ = await tel.resolve_markets(["NVDA"], core)
+    r = res["NVDA"]
+    assert r.kind == "hip3" and r.query_coin == "xyz:NVDA"
+    assert r.run_gate is False and r.venue_label == "HIP-3 xyz"
+    assert "flx:NVDA" in (r.note or "")
+
+
+async def test_resolve_unknown_falls_to_gate(_patch_dexes):
+    core = {"BTC": {}}
+    res, _ = await tel.resolve_markets(["FOOBAR"], core)
+    r = res["FOOBAR"]
+    assert r.kind == "unknown" and r.run_gate is True
+
+
+# ─── build_one with a HIP-3 resolution overlay ───────────────────────────────
+async def test_build_one_hip3_uses_query_coin_and_skips_gate(monkeypatch):
+    seen_coins: list[str] = []
+    gate_called = {"n": 0}
+
+    async def _avg(coin):
+        seen_coins.append(coin)
+        return 0.00002, 168
+
+    async def _low(coin):
+        return 6500.0
+
+    async def _depth(coin):
+        return {"bid_05": 50_000.0, "ask_05": 40_000.0,
+                "bid_10": 90_000.0, "ask_10": 80_000.0}
+
+    async def _gate(coin):
+        gate_called["n"] += 1
+        return {"squeeze_state": "CLEAR", "fails_first": "none — 5/5 GO",
+                "z": 1.0, "hurst": 0.4, "venue_label": "HL"}
+
+    monkeypatch.setattr(tel, "fetch_funding_avg_7d", _avg)
+    monkeypatch.setattr(tel, "fetch_low_7d", _low)
+    monkeypatch.setattr(tel, "fetch_depth", _depth)
+    monkeypatch.setattr(tel, "fetch_gate", _gate)
+
+    ctx_map = {"xyz:SP500": {"funding": 0.00002, "openInterest": 100.0,
+                             "markPx": 7000.0, "dayNtlVlm": 5e8}}
+    r = tel.Resolution(query_coin="xyz:SP500", kind="hip3",
+                       venue_label="HIP-3 xyz", deployer="xyz", run_gate=False,
+                       note="HIP-3: squeeze/z/H n/d")
+    t = await tel.build_one("xyz:SP500", ctx_map, r)
+    # query_coin (not a generic ticker) drove the fetchers
+    assert seen_coins == ["xyz:SP500"]
+    # gate skipped → squeeze/z/H stay n/d, engine never invoked
+    assert gate_called["n"] == 0
+    assert t.squeeze_state is None and t.z is None and t.hurst is None
+    # full ctx-derived metrics ARE present (data IS reachable on HL HIP-3)
+    assert t.on_hl is True
+    assert t.funding_live == 0.00002
+    assert t.oi_usd == pytest.approx(100.0 * 7000.0)
+    assert t.venue_label == "HIP-3 xyz"
+    assert any("HIP-3" in n for n in t.notes)
+    block = tel.format_token(t)
+    assert "xyz:SP500" in block and "HIP-3 xyz" in block
+
+
+# ─── TASK 5: explicit messaging for VAR-only / not-found plain tickers ────────
+async def test_build_one_unknown_var_explicit_note(monkeypatch):
+    async def _avg(coin): return None, 0
+    async def _low(coin): return None
+    async def _depth(coin):
+        return {"bid_05": None, "ask_05": None, "bid_10": None, "ask_10": None}
+    async def _gate(coin):
+        return {"squeeze_state": None, "fails_first": "none — 5/5 GO",
+                "z": 1.2, "hurst": 0.4, "venue_label": "VAR"}
+
+    for name, fn in [("fetch_funding_avg_7d", _avg), ("fetch_low_7d", _low),
+                     ("fetch_depth", _depth), ("fetch_gate", _gate)]:
+        monkeypatch.setattr(tel, name, fn)
+
+    r = tel.Resolution(query_coin="SOMEVAR", kind="unknown", run_gate=True)
+    t = await tel.build_one("SOMEVAR", {}, r)
+    assert "VAR" in t.venue_label
+    assert any("Variational" in n for n in t.notes)
+
+
+async def test_build_one_unknown_not_found_note(monkeypatch):
+    async def _avg(coin): return None, 0
+    async def _low(coin): return None
+    async def _depth(coin):
+        return {"bid_05": None, "ask_05": None, "bid_10": None, "ask_10": None}
+    async def _gate(coin):
+        return {"squeeze_state": None, "fails_first": "no tradeable (HL/VAR)",
+                "z": None, "hurst": None, "venue_label": None}
+
+    for name, fn in [("fetch_funding_avg_7d", _avg), ("fetch_low_7d", _low),
+                     ("fetch_depth", _depth), ("fetch_gate", _gate)]:
+        monkeypatch.setattr(tel, name, fn)
+
+    r = tel.Resolution(query_coin="GHOST", kind="unknown", run_gate=True)
+    t = await tel.build_one("GHOST", {}, r)
+    assert any("no encontrado" in n for n in t.notes)
+
+
+# ─── build_telemetry end-to-end with HIP-3 routing ───────────────────────────
+async def test_build_telemetry_routes_hip3_end_to_end(monkeypatch):
+    async def _ctx():
+        return {"BTC": {"funding": 0.0000125, "openInterest": 1000.0,
+                        "markPx": 100000.0, "dayNtlVlm": 5e8}}
+
+    async def _perp_dexes():
+        return ["xyz"]
+
+    async def _dex_ctx(dex):
+        return {"xyz:SP500": {"funding": 0.00002, "openInterest": 100.0,
+                              "markPx": 7000.0, "dayNtlVlm": 5e8}}
+
+    async def _avg(coin): return 0.00002, 168
+    async def _low(coin): return 6000.0
+    async def _depth(coin):
+        return {"bid_05": 1.0, "ask_05": 1.0, "bid_10": 1.0, "ask_10": 1.0}
+    async def _gate(coin):
+        return {"squeeze_state": "CLEAR", "fails_first": "none — 5/5 GO",
+                "z": 1.0, "hurst": 0.4, "venue_label": "HL"}
+
+    for name, fn in [("fetch_ctx_map", _ctx), ("fetch_perp_dexes", _perp_dexes),
+                     ("fetch_dex_ctx", _dex_ctx), ("fetch_funding_avg_7d", _avg),
+                     ("fetch_low_7d", _low), ("fetch_depth", _depth),
+                     ("fetch_gate", _gate)]:
+        monkeypatch.setattr(tel, name, fn)
+
+    tokens = await tel.build_telemetry(["BTC", "xyz:SP500"])
+    by = {t.ticker: t for t in tokens}
+    # plain BTC: HL core, gate ran (venue HL)
+    assert by["BTC"].venue_label == "HL" and by["BTC"].on_hl is True
+    # HIP-3 SP500: full ctx metrics, venue tagged, gate skipped
+    assert by["xyz:SP500"].venue_label == "HIP-3 xyz"
+    assert by["xyz:SP500"].funding_live == 0.00002
+    assert by["xyz:SP500"].oi_usd == pytest.approx(100.0 * 7000.0)
+    assert by["xyz:SP500"].z is None  # engine skipped for HIP-3
+    out = tel.format_telemetry(tokens)
+    assert "BTC" in out and "xyz:SP500" in out
