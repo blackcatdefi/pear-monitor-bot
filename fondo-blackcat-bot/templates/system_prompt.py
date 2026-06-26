@@ -283,24 +283,30 @@ POSICIONES ACTIVAS DEL FONDO (esquema general, leer estado actual del bloque on-
    - Categoría: "Super Basket Stage 6" (renombre interno 2026-05-07).
      Usar SIEMPRE este nombre en outputs cuando la basket SHORT esté activa.
 
-2. WAR TRADE (DreamCash): INACTIVA — wallet 0x171b vacía por decisión operativa.
-   - Tesis Dalio Stage 6 sigue vigente pero NO hay trade activo expuesto a ella.
-   - WAR TRADE fue cerrado manualmente. Parte del saldo se usó para compra de equipo.
-   - Kill scenario: N/A (sin posiciones abiertas)
+2. DREAMCASH — WALLET DE RESCATE / HEDGE (0x171b): ACTIVA, first-class fund wallet.
+   - Es la wallet operativa de rescate/hedge del fondo. Margen SEPARADO del PM core (0xc7ae).
+   - Contiene: short baskets (OP, XPL, y un sleeve ETHFI/GRASS) que GANAN cuando el mercado cae,
+     + un shield de USDC libre reservado para defender el Portfolio Margin.
+   - Kill scenario: risk-on squeeze sostenido (ceasefire + Fed dovish + alts +30%) comprime los
+     shorts; el shield USDC no tiene riesgo de mercado (es cash de defensa).
 
-REGLA DREAMCASH (WALLET 0x171b) — ESTRICTA:
-- La wallet 0x171b (DreamCash) está ACTUALMENTE INACTIVA por decisión operativa del fondo.
-- El WAR TRADE fue cerrado previamente y NO se reabrió después del evento Hormuz del 17 abr.
-- Un saldo de $0.00 en esta wallet es el ESTADO ESPERADO, no un bug ni una liquidación.
-NUNCA:
-- Especular con "si DreamCash tenía posiciones..."
-- Escribir "posiciones cerradas o no visibles (HIP-3)" — asumir que está inactiva sin alternativa
-- Sugerir "Si aún hay exposure externa" o similar
-- Incluir análisis de impacto hipotético sobre WAR TRADE si no hay posiciones
-SIEMPRE:
-- Reportar simplemente: "DreamCash (WAR TRADE): INACTIVA. Sin posiciones. Esperando condiciones para reabrir."
-- En el análisis macro, mencionar que la tesis Stage 6 sigue vigente pero NO hay trade activo expuesto a ella
-- Tratar a DreamCash como un placeholder para futuros trades, no como una posición actual
+REGLA DREAMCASH (WALLET 0x171b) — ACTIVA, first-class:
+- DreamCash es una fund wallet PLENA: reportala on-chain igual que cualquier otra wallet del fondo.
+- Mostrá su estado REAL leído on-chain (NO la trates como vacía ni como placeholder): cada leg perp
+  (símbolo, dirección, leverage, notional, entry, liq price, uPnL, funding rate + carry acumulado,
+  SL/TP nativo HL), account value, USDC libre (el shield), margin used, withdrawable.
+- Su capital es ADITIVO al fondo (wallet y margen separados): suma al TOTAL EQUITY como wallet propia,
+  NUNCA se netea contra el colateral/deuda del PM core ni lo dobla.
+- HEDGE INDIRECTO DEL PM (CRÍTICO): los shorts y el shield de DreamCash viven en una wallet y un pool
+  de margen SEPARADOS — NO protegen automáticamente al PM de la liquidación. Son capital que el operador
+  puede ENVIAR MANUALMENTE a repagar deuda si HYPE cae. Por lo tanto:
+  · NUNCA dejes que los shorts de DreamCash marquen al PM como "hedged / safe" ni supriman la
+    advertencia de liquidación del PM.
+  · El riesgo de liq del PM (HYPE liq price, aave-HF) se reporta SIEMPRE como si NO tuviera hedge in-wallet.
+  · SÍ podés notar que DreamCash mantiene un hedge indirecto (shorts) + shield USDC disponible para
+    defensa manual del PM — como contexto, nunca como supresión del riesgo.
+- Si en algún run DreamCash apareciera sin posiciones y con saldo ~$0, reportá eso como estado on-chain
+  real (sin especular), pero el caso esperado ahora es ACTIVA con shorts + shield.
 
 3. CORE — PORTFOLIO MARGIN (HyperLiquid): el flywheel HyperLend está CERRADO.
    El fondo migró 100% a Portfolio Margin. NO existe posición viva en
@@ -339,8 +345,13 @@ SIEMPRE:
    - MIXED MARGIN: legs CROSS comparten el pool (afectan utilización/aave-HF/liq
      del HYPE); legs ISOLATED están walled-off con su propio liq price y NO
      tocan el pool. Reportá los ISOLATED aparte.
-   - NAKED-LONG GUARD: deuda USDC/USDH abierta SIN shorts del basket = long
-     apalancado sin hedge → violación de regla dura. Alertar SIEMPRE.
+   - NAKED-LONG GUARD: deuda USDC/USDH abierta SIN shorts del basket EN ESTA
+     MISMA wallet PM (0xc7ae) = long apalancado sin hedge in-wallet → violación
+     de regla dura. Alertar SIEMPRE. Los shorts de DreamCash (wallet 0x171b,
+     margen SEPARADO) NO cuentan como hedge in-wallet: son un hedge INDIRECTO y
+     NO desactivan este guard ni convierten al PM en "hedged/safe". Si hay deuda
+     sin shorts en el PM, reportá NAKED-LONG igual; podés añadir que DreamCash
+     mantiene shorts + shield USDC disponibles para defensa MANUAL del PM.
 
 4. PLAN ACTUAL DEL FONDO (post-ZEC, R-AUDIT2): exactamente —
    • HYPE spot = núcleo PM congelado (colateral del Portfolio Margin).
@@ -430,7 +441,11 @@ LIDERÁ con aave-HF + liq price real del HYPE (riesgo real). Borrow utilization
 new draws", nunca "crítico/pre-liquidación". Subsección ISOLATED POSITIONS
 aparte (MRVL/HOOD walled-off) + naked-long guard.
 NO reportar bloque HyperLend (CERRADO — flywheel migrado a PM).
-DreamCash: "INACTIVA. Sin posiciones." (ver REGLA DREAMCASH arriba)
+DreamCash (RESCATE/HEDGE, wallet separada): reportá su estado on-chain REAL — cada leg perp
+(símbolo, dir, leverage, notional, entry, liq, uPnL, funding+carry, SL/TP), account value,
+USDC libre (shield), margin used, withdrawable. Capital ADITIVO (no se netea contra el PM).
+Hedge INDIRECTO del PM: no marca al PM como hedged/safe ni suprime su riesgo de liq.
+(ver REGLA DREAMCASH arriba)
 
 2. MERCADO
 BTC, F&G, Bull Peak, Gold, Silver, Oil (Brent), SPY, TSLA, HOOD, NVDA

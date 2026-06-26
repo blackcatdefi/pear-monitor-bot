@@ -194,7 +194,7 @@ def test_canonical_label_for_dreamcash():
         "0x171b7880939d76abbc6b6b2094f54e6636f829a7",
         "?",
     )
-    assert canonical == "DreamCash (WAR TRADE)"
+    assert canonical == "DreamCash (RESCATE/HEDGE)"
 
 
 def test_canonical_label_falls_back_when_address_unknown():

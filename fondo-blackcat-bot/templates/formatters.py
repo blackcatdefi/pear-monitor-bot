@@ -1303,7 +1303,7 @@ def format_quick_positions(wallets: list[dict[str, Any]],
         # R-BOT-TERMINOLOGY-UNIFY (2026-05-07) — canonical wallet label.
         # apply_wallet_label resolves the address→label map first (so
         # 0xc7ae → "BlackCatDeFi EVM (Trading)", 0xa44e → "Main
-        # Flywheel (DDS)", 0x171b → "DreamCash (WAR TRADE)", etc.) and
+        # Flywheel (DDS)", 0x171b → "DreamCash (RESCATE/HEDGE)", etc.) and
         # falls back to d["label"] (env-var) for unknown addresses.
         canonical_label = apply_wallet_label(d.get("wallet"), d.get("label"))
         display_label = f"💼 {canonical_label}"

@@ -287,8 +287,15 @@ def build_pm_llm_block(pm) -> str:
 
     if pm.naked_long:
         lines.append(
-            "• 🚨 NAKED-LONG: deuda abierta sin shorts del basket — long "
-            "apalancado sin hedge (violación de regla dura). Alertar SIEMPRE."
+            "• 🚨 NAKED-LONG: deuda abierta sin shorts del basket EN ESTA wallet "
+            "PM — long apalancado sin hedge in-wallet (violación de regla dura). "
+            "Alertar SIEMPRE."
+        )
+        lines.append(
+            "   ↳ DreamCash (wallet 0x171b, margen SEPARADO) tiene shorts + shield "
+            "USDC: es un hedge INDIRECTO disponible para defensa MANUAL del PM — "
+            "NO desactiva este guard ni convierte al PM en 'hedged/safe'. El liq "
+            "price y el aave-HF del PM siguen siendo el riesgo real."
         )
 
     # ── Narrative directive (band-keyed, panel-consistent) ──

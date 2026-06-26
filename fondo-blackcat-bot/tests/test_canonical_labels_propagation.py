@@ -56,7 +56,7 @@ def test_apply_wallet_label_resolves_main_flywheel():
 
 def test_apply_wallet_label_resolves_dreamcash():
     addr = "0x171b7880939d76abbc6b6b2094f54e6636f829a7"
-    assert apply_wallet_label(addr, None) == "DreamCash (WAR TRADE)"
+    assert apply_wallet_label(addr, None) == "DreamCash (RESCATE/HEDGE)"
 
 
 def test_apply_wallet_label_falls_back_when_unknown():

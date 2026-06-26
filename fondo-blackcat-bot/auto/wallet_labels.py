@@ -29,7 +29,12 @@ Categories
 * ``Secondary Flywheel (CLOSED)`` — historical secondary flywheel,
   kept for forensic clarity. Will be filtered if capital < ``DUST_USD``.
 * ``BlackCatDeFi EVM (Trading)`` — the wallet running the active basket.
-* ``DreamCash (WAR TRADE)`` — long-vol commodity hedge.
+* ``DreamCash (RESCATE/HEDGE)`` — the fund's operational rescue / hedge
+  wallet. Holds short baskets (OP, XPL, and an ETHFI/GRASS sleeve) that
+  profit when the market falls, plus a free USDC liquidity shield reserved
+  to defend the Portfolio Margin. SEPARATE wallet, SEPARATE margin pool
+  from the PM core (0xc7ae): its shorts are an INDIRECT hedge for the PM,
+  NOT in-wallet protection (see the naked-long guard).
 * ``Dust`` — wallets that historically held positions but now carry
   only floating residue (<$50). Surface them under a single "Dust"
   bucket on the dashboard so they don't clutter the wallets card.
@@ -50,8 +55,10 @@ CANONICAL_WALLET_LABELS: Final[dict[str, str]] = {
     "0xcddfcc4e597091d8e395a24738f09bbd8973f22e": "Secondary Flywheel (CLOSED)",
     # Trading wallet — runs the active perp basket on Hyperliquid.
     "0xc7ae23316b47f7e75f455f53ad37873a18351505": "BlackCatDeFi EVM (Trading)",
-    # War trade — long commodities / short equities hedge.
-    "0x171b7880939d76abbc6b6b2094f54e6636f829a7": "DreamCash (WAR TRADE)",
+    # DreamCash — operational rescue / hedge wallet. Short baskets (OP, XPL,
+    # ETHFI/GRASS) + free USDC liquidity shield reserved to defend the PM.
+    # First-class fund wallet; SEPARATE margin pool from the 0xc7ae PM core.
+    "0x171b7880939d76abbc6b6b2094f54e6636f829a7": "DreamCash (RESCATE/HEDGE)",
     # Historical wallet with only dust residue.
     "0x00bb6858ccbfc924a86642d438020155ccb36b64": "Dust",
 }
