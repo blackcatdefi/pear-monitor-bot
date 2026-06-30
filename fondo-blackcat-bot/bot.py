@@ -41,8 +41,9 @@ from config import (
 )
 from modules.alerts import run_alert_cycle
 from modules.analysis import (
-    generate_report,
-    generate_thesis_check,
+    # R-COST3 (2026-06-30): generate_report / generate_thesis_check (the Sonnet
+    # FULL ANALYSIS narrative) removed from the live path — /reporte is now a
+    # deterministic assembly. Only the deterministic /tesis helpers remain.
     _load_thesis,
     load_tesis_latest,
 )
@@ -538,44 +539,27 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception:  # noqa: BLE001
         log.exception("format_tradermap_block failed (non-fatal)")
 
-    # ─── Section 3: LLM Analysis (Sonnet primary) ───────────────────────────────
-    merged_intel: dict = {}
-    if isinstance(intel_legacy, dict):
-        merged_intel.update(intel_legacy)
-    if isinstance(intel_unread, dict) and intel_unread.get("status") == "ok":
-        merged_intel["unread_scan"] = intel_unread
-    if isinstance(x_intel, dict):
-        # R-COST (2026-06-26): feed the LLM a slimmed X timeline (top-40 by
-        # engagement, no duplicate by_user map). The user-facing timeline above
-        # already rendered the full payload via format_timeline; the analysis
-        # narrative only cites a handful of high-signal tweets, so the full
-        # ~200-tweet double-serialized blob was the biggest input-token driver.
-        try:
-            from modules.x_intel import slim_x_intel_for_llm
-            merged_intel["x_intel"] = slim_x_intel_for_llm(x_intel, top_n=40)
-        except Exception:  # noqa: BLE001
-            log.exception("slim_x_intel_for_llm failed (non-fatal) — using full payload")
-            merged_intel["x_intel"] = x_intel
-    if isinstance(gmail_intel, dict) and gmail_intel.get("status") == "ok":
-        merged_intel["gmail_intel"] = gmail_intel
-    if bt:
-        merged_intel["bounce_tech"] = bt
-    # R-BOT-FEEDS-EXPAND Task 1: feed TraderMap BTC into the LLM context.
-    if isinstance(tradermap, dict) and tradermap.get("status") == "ok":
-        merged_intel["tradermap_btc"] = tradermap
+    # ─── Section 3: LMEC bear-invalidation triggers (DETERMINISTIC) ──────────
+    # R-COST3 (2026-06-30): the Sonnet FULL ANALYSIS narrative was REMOVED.
+    # The bot is a DATA AGGREGATOR + ALERTING + SCREENER — the co-manager (Claude
+    # in chat) does all analysis; the owner never read the bot's prose. The ONLY
+    # piece of the old LLM section worth keeping is the 4 LMEC bear-invalidation
+    # triggers, which are already auto-computed from real closed weekly BTC
+    # candles (modules.lmec_triggers) — zero LLM. Render it deterministically.
+    lmec_ok = "n/d"
+    try:
+        from modules.lmec_triggers import evaluate_lmec_triggers, format_lmec_block
+        lmec_block = format_lmec_block(evaluate_lmec_triggers(market))
+        if lmec_block and lmec_block.strip():
+            await send_long_message(update, lmec_block, reply_markup=MAIN_KEYBOARD)
+            lmec_ok = "ok"
+    except Exception:  # noqa: BLE001
+        log.exception("LMEC deterministic block failed (non-fatal)")
 
-    # Round 18: Cryexc snapshot (cache 5min, falls back gracefully if disabled)
-    if cryexc_is_enabled():
-        try:
-            cryexc_snap = await fetch_cryexc(force_live=False)
-            merged_intel["cryexc_intel"] = cryexc_snap.to_dict()
-        except Exception:  # noqa: BLE001
-            log.exception("cryexc fetch in /reporte failed (non-fatal)")
-
-    # ─── R-INTEL30 Phase 1 — fan out 11 new sources in parallel for /reporte ──
-    # Adds ETF flows, FRED macro, AR FX, ISW geopol, EIA WPSR, ASXN HYPE,
-    # HypurrScan auctions, Arkham whales, HL info extras, Apollo Spark to the
-    # LLM intel context. Block is wrapped in try/except — never breaks /reporte.
+    # ─── R-INTEL30 Phase 1 — fan out 11 sources in parallel for /reporte ──────
+    # ETF flows, FRED macro, AR FX, ISW geopol, EIA WPSR, ASXN HYPE, HypurrScan
+    # auctions, Arkham whales, HL info extras, Apollo Spark. R-COST3: these now
+    # feed ONLY the deterministic Section 4 render (no LLM payload). Non-fatal.
     intel30_blocks: list[str] = []
     try:
         from modules.intel30 import (
@@ -595,10 +579,8 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             ("farside_etfs", _far), ("arkham", _ark), ("eia", _eia), ("isw_ctp", _isw),
             ("criptoya_ar", _cy), ("bcra", _bcra), ("apollo_spark", _spark),
         ]
-        intel30_payload: dict = {}
         for (key, mod), res in zip(intel30_modules, intel30_results):
             if not isinstance(res, Exception):
-                intel30_payload[key] = res
                 try:
                     _blk = mod.format_for_telegram(res)
                     # WI-9e: silent-skip sources (e.g. Arkham sin key) return ""
@@ -606,25 +588,22 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                         intel30_blocks.append(_blk)
                 except Exception:  # noqa: BLE001
                     log.exception("intel30 %s format failed", key)
-        if intel30_payload:
-            merged_intel["intel30"] = intel30_payload
     except Exception:  # noqa: BLE001
         log.exception("R-INTEL30 fetch in /reporte failed (non-fatal)")
 
-    report, thesis_update = await generate_report(portfolio, hl, market, unlocks, merged_intel)
-
-    await send_long_message(
-        update,
-        "\U0001f9e0 FULL ANALYSIS\n" + ("\u2500" * 30) + "\n\n" + report,
-        reply_markup=MAIN_KEYBOARD,
+    # R-COST3 audit marker: /reporte is now a deterministic assembly — zero LLM
+    # calls in the report path. Sources reaching the final message are logged so
+    # a future orphan-source (fetched-but-never-rendered) is easy to spot.
+    log.info(
+        "[COST_AUDIT] /reporte deterministic assembly — LLM calls=0; "
+        "sections=header,x_timeline,positions,classification,funding,integrity_halt,"
+        "screener,tradermap,lmec(%s),intel30(%d blocks)",
+        lmec_ok, len(intel30_blocks),
     )
-    if thesis_update:
-        await send_long_message(update, thesis_update, reply_markup=MAIN_KEYBOARD)
 
     # ─── Section 4: R-INTEL30 Phase 1 enrichment ─────────────────────────────
-    # Surface the 11 new sources in /reporte as a single combined message after
-    # the LLM analysis so BCD can scan ETF flows + macro + geopol at a glance
-    # without running the dedicated commands.
+    # Surface the 11 sources in /reporte as one combined message so BCD can scan
+    # ETF flows + macro + geopol at a glance without running dedicated commands.
     if intel30_blocks:
         intel30_text = (
             "🌐 R-INTEL30 PHASE 1 — INTEL EXPANDIDO\n"

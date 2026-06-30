@@ -38,21 +38,22 @@ class TaskType(Enum):
 
 
 # Task → tier mapping
+#
+# R-COST3 (2026-06-30) — BOT IS A DATA AGGREGATOR, NOT AN ANALYST.
+# The FULL ANALYSIS Sonnet narrative was removed from /reporte (the co-manager
+# in chat does all analysis). There are NO remaining CRITICAL (Sonnet) tasks.
+# Every entry below is either STRUCTURED (Haiku-first) or ROUTINE (Gemini free).
+# The DEFAULT tier was also flipped CRITICAL → ROUTINE (see route_request) so an
+# unmapped task name can never again silently leak to Sonnet — this was the
+# hourly leak: ``macro_convergence`` had no entry, defaulted to CRITICAL, and
+# fired Sonnet every 60 min. It is now explicitly ROUTINE (free Gemini, with a
+# deterministic heuristic fallback in modules.macro_convergence).
 TASK_TIER: dict[str, TaskType] = {
-    # Critical — Sonnet 4.6 (analysis quality matters; written from raw data)
-    "reporte": TaskType.CRITICAL,
-    "tesis": TaskType.CRITICAL,
-    "kill": TaskType.CRITICAL,
-    "decision_query": TaskType.CRITICAL,
-    # Structured — Haiku 4.5 first, Gemini fallback (R-COST 2026-06-26).
-    # tesis_update only RE-STRUCTURES the already-written Sonnet report into
-    # JSON component statuses; it is faithful extraction, not fresh analysis,
-    # so it does not need Sonnet. Haiku ($1/$5) keeps narrative quality at ~3x
-    # cheaper input + free Gemini fallback. Combined with stripping the raw
-    # dump from its input (analysis._update_thesis_state), this removes the
-    # second expensive Sonnet leg that doubled /reporte cost.
+    # Structured — Haiku 4.5 first, Gemini fallback. Mechanical JSON extraction /
+    # restructuring of already-deterministic data, not fresh analysis.
     "tesis_update": TaskType.STRUCTURED,
-    # Routine — Gemini free (volume matters)
+    # Routine — Gemini free (volume matters; deterministic fallbacks exist)
+    "macro_convergence": TaskType.ROUTINE,
     "intel_parse": TaskType.ROUTINE,
     "telegram_summary": TaskType.ROUTINE,
     "x_sentiment": TaskType.ROUTINE,
@@ -359,7 +360,9 @@ async def route_request(
     Returns (response_text, model_used).
     Raises LLMError if all providers in the chain fail.
     """
-    task_type = TASK_TIER.get(task_name, TaskType.CRITICAL)
+    # R-COST3: default ROUTINE (free Gemini), NOT CRITICAL. An unmapped task
+    # must never silently escalate to Sonnet — that was the hourly cost leak.
+    task_type = TASK_TIER.get(task_name, TaskType.ROUTINE)
 
     if task_type == TaskType.CRITICAL:
         chain = [
@@ -399,8 +402,9 @@ async def complete(
     user_message: str,
     max_tokens: int = 4000,
 ) -> tuple[str, str]:
-    """Backward-compatible — routes as CRITICAL."""
-    return await route_request("reporte", system_prompt, user_message, max_tokens)
+    """Backward-compatible shim (no live callers). Routes via the default
+    ROUTINE tier after R-COST3 removed the CRITICAL/Sonnet report task."""
+    return await route_request("complete_legacy", system_prompt, user_message, max_tokens)
 
 
 # ─── Cost helper (SQLite-backed, stays for legacy callers) ───────────────────

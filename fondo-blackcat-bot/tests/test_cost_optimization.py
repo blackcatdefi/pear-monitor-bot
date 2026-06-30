@@ -38,12 +38,24 @@ def test_tesis_update_is_structured_not_critical():
     assert TASK_TIER["tesis_update"] != TaskType.CRITICAL
 
 
-def test_main_report_still_critical_sonnet():
-    # The actual analysis must NOT be downgraded.
-    assert TASK_TIER["reporte"] == TaskType.CRITICAL
-    assert TASK_TIER["tesis"] == TaskType.CRITICAL
-    assert TASK_TIER["kill"] == TaskType.CRITICAL
-    assert TASK_TIER["decision_query"] == TaskType.CRITICAL
+def test_no_critical_sonnet_tasks_remain():
+    # R-COST3 (2026-06-30): the bot is a DATA AGGREGATOR, not an analyst. The
+    # FULL ANALYSIS Sonnet narrative was removed from /reporte, and /tesis,
+    # /kill, the kill registry and the decision query are all deterministic.
+    # There must be NO CRITICAL (Sonnet) task left in the router.
+    assert all(t != TaskType.CRITICAL for t in TASK_TIER.values()), TASK_TIER
+    # The dead task names must be gone (so they can't be re-wired by accident).
+    for dead in ("reporte", "tesis", "kill", "decision_query"):
+        assert dead not in TASK_TIER, f"dead LLM task still mapped: {dead}"
+
+
+def test_default_tier_is_routine_not_critical():
+    # An UNMAPPED task name must default to ROUTINE (free Gemini), never
+    # CRITICAL — this was the hourly Sonnet leak (macro_convergence had no entry
+    # and silently escalated to Sonnet every 60 min).
+    assert TASK_TIER.get("some_unmapped_future_task", TaskType.ROUTINE) == TaskType.ROUTINE
+    assert "macro_convergence" in TASK_TIER
+    assert TASK_TIER["macro_convergence"] == TaskType.ROUTINE
 
 
 # ── Lever 2: X timeline slimming ─────────────────────────────────────────────
