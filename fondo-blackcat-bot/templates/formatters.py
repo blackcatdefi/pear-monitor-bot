@@ -237,6 +237,25 @@ def _estimate_spot_split(spot_balances: list[dict[str, Any]],
         # ALL stablecoins are part of Unified Account margin when perp
         # is active. Skip them entirely. When idle, fold into cash bucket.
         if coin in _STABLECOINS:
+            # R-PMBORROW-DEDUP (2026-06-30): a borrowed stable (negative total
+            # and/or a positive ``borrowed`` field) is the Portfolio-Margin USDC
+            # LIABILITY, never cash. It is netted EXACTLY ONCE via
+            # ``_spot_native_borrow`` (spot_borrow_total) in the equity
+            # aggregation, so it must NOT enter the cash-equivalent ``stables``
+            # bucket — otherwise the borrow is subtracted twice. This mirrors the
+            # long-standing guard in ``portfolio_snapshot._spot_split_value``;
+            # this formatter mirror previously relied only on the active-perp
+            # skip below, which fails when the PM core (0xc7ae) perp is IDLE
+            # (accountValue=0). The negative USDC then leaked into ``stables``
+            # and the double-count collapsed the headline to $15.6K vs Rabby
+            # ~$128.7K (the DreamCash reserve flip just unmasked it by pushing
+            # the raw total positive, bypassing the parity-stale clamp).
+            try:
+                _bw = float(sb.get("borrowed") or 0.0)
+            except (TypeError, ValueError):
+                _bw = 0.0
+            if _bw > 0 or amt < 0:
+                continue
             # R-DREAMCASH-EQUITY: separate-margin wallets keep their spot
             # stables (independent reserve), everyone else skips while a perp
             # is active (unified-account double-count guard, unchanged).
