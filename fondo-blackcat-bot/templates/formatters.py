@@ -171,9 +171,37 @@ def _build_price_map(market: dict[str, Any] | None = None) -> dict[str, float]:
     return out
 
 
+# R-DREAMCASH-EQUITY (2026-06-30): wallets whose spot USDC pool is a SEPARATE
+# balance from their perp accountValue (NOT a HyperLiquid unified-margin pool).
+# For these, spot stablecoins must NOT be skipped when a perp is active — on
+# chain the spot USDC reserve and the perp accountValue are INDEPENDENT
+# balances, so counting BOTH is correct (no double-count). DreamCash (0x171b,
+# the RESCATE/HEDGE fund wallet) runs perp shorts against a separate ~$25K spot
+# USDC reserve; the unified-account skip dropped that reserve from TOTAL EQUITY
+# and from its per-wallet Capital Total. NOTE: the PM-core wallet 0xc7ae is NOT
+# in this set and is unaffected (its perp is idle, so the skip never triggers,
+# and compute_pm_state still reads ONLY 0xc7ae — guard intact).
+_SEPARATE_MARGIN_WALLETS = {
+    "0x171b7880939d76abbc6b6b2094f54e6636f829a7",
+}
+
+
+def _is_separate_margin_wallet(wallet_addr: str | None) -> bool:
+    """True when a wallet's spot stables are a reserve SEPARATE from its perp.
+
+    Such wallets must count spot stablecoins even with an active perp, because
+    (unlike the unified-margin default) their spot USDC is not the same pool as
+    ``marginSummary.accountValue``. Address match is case-insensitive.
+    """
+    if not wallet_addr:
+        return False
+    return str(wallet_addr).strip().lower() in _SEPARATE_MARGIN_WALLETS
+
+
 def _estimate_spot_split(spot_balances: list[dict[str, Any]],
                           perp_account_value: float = 0.0,
-                          prices: dict[str, Any] | None = None) -> tuple[float, float]:
+                          prices: dict[str, Any] | None = None,
+                          wallet_addr: str | None = None) -> tuple[float, float]:
     """Return ``(non_stable_usd, stables_usd)`` for a wallet's spot bag.
 
     R-DASHBOARD-SPOT-FIX: replaces the legacy ``_estimate_spot_usd`` that
@@ -209,7 +237,10 @@ def _estimate_spot_split(spot_balances: list[dict[str, Any]],
         # ALL stablecoins are part of Unified Account margin when perp
         # is active. Skip them entirely. When idle, fold into cash bucket.
         if coin in _STABLECOINS:
-            if has_active_perp:
+            # R-DREAMCASH-EQUITY: separate-margin wallets keep their spot
+            # stables (independent reserve), everyone else skips while a perp
+            # is active (unified-account double-count guard, unchanged).
+            if has_active_perp and not _is_separate_margin_wallet(wallet_addr):
                 continue
             stables += amt
             continue
@@ -870,7 +901,8 @@ def format_report_header(
             perp_total += pe
             _sb = d.get("spot_balances") or []
             try:
-                ns, st = _estimate_spot_split(_sb, pe, _price_map)
+                ns, st = _estimate_spot_split(_sb, pe, _price_map,
+                                              wallet_addr=d.get("wallet"))
                 spot_non_stable += float(ns)
                 spot_stables += float(st)
             except Exception:  # noqa: BLE001
@@ -1052,7 +1084,8 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                 # so the banner labels exposure accurately and surfaces
                 # stable cash equivalents separately.
                 # R-PMCORE: value non-stable (HYPE) at LIVE oracle price.
-                _ns, _st = _estimate_spot_split(_wsb, _pe, _price_map_qp)
+                _ns, _st = _estimate_spot_split(_wsb, _pe, _price_map_qp,
+                                                wallet_addr=_d.get("wallet"))
                 _spot_non_stable_total += float(_ns)
                 _spot_stables_total += float(_st)
             except Exception:  # noqa: BLE001
@@ -1241,14 +1274,26 @@ def format_quick_positions(wallets: list[dict[str, Any]],
         d = w["data"]
         wallet_addr = (d.get("wallet") or "").lower()
         perp_eq = d.get("account_value") or 0.0
-        spot_usd = _estimate_spot_usd(d.get("spot_balances") or [], perp_eq, _price_map_pw)
+        # R-DREAMCASH-EQUITY (2026-06-30): split so a separate-margin wallet
+        # (DreamCash 0x171b) folds its independent spot USDC reserve into
+        # Capital Total. spot_usd stays NON-STABLE only for the breakdown line;
+        # the stable reserve is added to capital ONLY for separate-margin
+        # wallets (every other wallet's Capital Total is byte-identical —
+        # _estimate_spot_split still skips their stables while a perp is active).
+        _ns_pw, _st_pw = _estimate_spot_split(
+            d.get("spot_balances") or [], perp_eq, _price_map_pw,
+            wallet_addr=wallet_addr,
+        )
+        spot_usd = _ns_pw
+        sep_stables = _st_pw if _is_separate_margin_wallet(wallet_addr) else 0.0
         hl_data = hl_by_wallet.get(wallet_addr, {})
         hl_coll = hl_data.get("collateral_usd", 0.0)
         hl_debt = hl_data.get("debt_usd", 0.0)
-        total_capital = perp_eq + spot_usd + hl_coll
+        total_capital = perp_eq + spot_usd + sep_stables + hl_coll
         d["_total_capital"] = total_capital
         d["_perp_equity"] = perp_eq
         d["_spot_usd"] = spot_usd
+        d["_sep_stables"] = sep_stables
         d["_hl_collateral_usd"] = hl_coll
         d["_hl_debt_usd"] = hl_debt
         d["_margin_used"] = d.get("total_margin_used") or 0.0
@@ -1291,6 +1336,7 @@ def format_quick_positions(wallets: list[dict[str, Any]],
         tc = d.get("_total_capital") or 0.0
         perp_eq = d.get("_perp_equity") or 0.0
         spot_usd = d.get("_spot_usd") or 0.0
+        sep_stables = d.get("_sep_stables") or 0.0
         hl_coll = d.get("_hl_collateral_usd") or 0.0
         hl_debt = d.get("_hl_debt_usd") or 0.0
         margin_used = d.get("_margin_used") or 0.0
@@ -1336,6 +1382,11 @@ def format_quick_positions(wallets: list[dict[str, Any]],
             parts.append(f"Account Value {_fmt_usd(perp_eq)}")
         if spot_usd > 0.01:
             parts.append(f"Spot non-stable {_fmt_usd(spot_usd)}")
+        # R-DREAMCASH-EQUITY: separate-margin spot USDC reserve (DreamCash),
+        # shown explicitly so Capital Total reconciles (= Account Value +
+        # reserve). Only ever > 0 for separate-margin wallets.
+        if sep_stables > 0.01:
+            parts.append(f"Spot USDC reserve {_fmt_usd(sep_stables)}")
         if hl_coll > 0.01:
             parts.append(f"HL Coll {_fmt_usd(hl_coll)}")
         if hl_debt > 0.01:

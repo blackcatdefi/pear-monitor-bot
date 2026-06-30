@@ -24,8 +24,8 @@ from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import BotCommand as TGBotCommand
-from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import KeyboardButton, LinkPreviewOptions, ReplyKeyboardMarkup, Update
+from telegram.ext import Application, CommandHandler, ContextTypes, Defaults
 
 from commands_registry import (
     COMMANDS,
@@ -3827,9 +3827,17 @@ def main() -> None:
         print("ERROR: TELEGRAM_CHAT_ID not configured", file=sys.stderr)
         sys.exit(1)
 
+    # R-NOIMG (2026-06-30): disable Telegram link-preview cards bot-wide. The
+    # reports embed source URLs (DefiLlama, CoinGlass, etc.); Telegram renders
+    # an "image" preview card per URL that BCD had to delete by hand before
+    # pasting the text. There is NO real image/photo generation in the bot —
+    # the cards ARE the link previews — so killing them at the Defaults level
+    # makes every outbound message (/reporte, /unlockcheck, /telemetry, etc.)
+    # text-only with zero attachments. Report content is byte-identical.
     app = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
+        .defaults(Defaults(link_preview_options=LinkPreviewOptions(is_disabled=True)))
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()
