@@ -90,7 +90,7 @@ def explainer_line(liq_price: float) -> str:
     """One-line clarifier separating the borrow cap from liquidation.
 
     "Over max-borrow blocks new USDC draws only; liquidation is at HYPE
-    ~$<liq> (HF 1.0)." NEVER raises.
+    ~$<liq> (trigger ratio>0.95)." NEVER raises.
     """
     try:
         lp = float(liq_price or 0.0)
@@ -99,5 +99,5 @@ def explainer_line(liq_price: float) -> str:
     px = f"~${lp:,.2f}" if lp > 0 else "el precio de mantenimiento"
     return (
         "ℹ️ Over max-borrow bloquea solo nuevos draws de USDC; "
-        f"la liquidación es a HYPE {px} (HF 1.0)."
+        f"la liquidación real es a HYPE {px} (trigger ratio>0.95)."
     )

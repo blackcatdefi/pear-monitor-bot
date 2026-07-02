@@ -63,8 +63,10 @@ def test_no_orders_means_no_committed_line():
 
 
 def test_naked_long_guard_still_fires():
-    # Debt drawn, no shorts → naked long alert regardless of committed orders.
+    # Debt drawn, no shorts → naked_long flag still True regardless of
+    # committed orders. R-BOT-DEFINITIVE-2 T7: the panel line is now a NEUTRAL
+    # owner-decision note, but it must still render whenever the flag is set.
     spot = [{"coin": "HYPE", "total": 1000.0}, {"coin": "USDC", "total": -5000.0}]
     pm = compute_pm_state(spot, [], {"HYPE": 40.0}, open_orders=[])
     assert pm.naked_long is True
-    assert "naked" in format_pm_state_telegram(pm).lower()
+    assert "sin hedge activo" in format_pm_state_telegram(pm).lower()

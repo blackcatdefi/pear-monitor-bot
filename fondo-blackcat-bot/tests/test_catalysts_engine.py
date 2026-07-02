@@ -108,14 +108,18 @@ def test_llm_block_empty_is_explicit(cats):
 
 
 def test_handle_setcatalyst_add_del_list(cats):
+    # Date must stay in the FUTURE relative to "now": /setcatalyst list
+    # filters past events, so a hardcoded date rots. Use now+30d.
+    from datetime import timedelta
+    fut = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%d")
     out = cats.handle_setcatalyst(
-        ["add", "2026-07-01", "13:30", "Evento", "Manual", "critical"]
+        ["add", fut, "13:30", "Evento", "Manual", "critical"]
     )
-    assert "✅" in out and "2026-07-01" in out and "Evento Manual" in out
+    assert "✅" in out and fut in out and "Evento Manual" in out
     listing = cats.handle_setcatalyst(["list"])
     assert "Evento Manual" in listing
     import re
-    m = re.search(r"#(\d+) 2026-07-01", listing)
+    m = re.search(r"#(\d+) " + re.escape(fut), listing)
     assert m
     out_del = cats.handle_setcatalyst(["del", m.group(1)])
     assert "eliminado" in out_del

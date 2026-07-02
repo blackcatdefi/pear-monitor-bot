@@ -239,8 +239,104 @@ def compute_hype_acquisition(
     )
 
 
+# ── R-BOT-DEFINITIVE-2 T5: manual PPC override (/setppc) ─────────────────────
+# The reconciliation gate correctly refuses to fabricate a PPC for the
+# migrated/bridged HYPE balance, but BCD KNOWS his real numbers. /setppc stores
+# a manual override in SQLite (timestamped) that the report renders as the
+# primary line; the reconciliation-gap note stays as a secondary line.
+def _ppc_conn():
+    from modules.intel_memory import _get_conn
+    conn = _get_conn()
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ppc_override (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            ppc_usd REAL NOT NULL,
+            net_acq_usd REAL NOT NULL,
+            set_ts TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    return conn
+
+
+def set_ppc_override(ppc_usd: float, net_acq_usd: float) -> bool:
+    """Persist the manual PPC + net-acquisition override. NEVER raises."""
+    try:
+        ppc = float(ppc_usd)
+        net = float(net_acq_usd)
+        if not (ppc > 0 and net > 0):
+            return False
+        from datetime import datetime, timezone
+        conn = _ppc_conn()
+        conn.execute(
+            "INSERT INTO ppc_override (id, ppc_usd, net_acq_usd, set_ts) "
+            "VALUES (1,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+            "ppc_usd=excluded.ppc_usd, net_acq_usd=excluded.net_acq_usd, "
+            "set_ts=excluded.set_ts",
+            (ppc, net, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("set_ppc_override failed: %s", exc)
+        return False
+
+
+def clear_ppc_override() -> bool:
+    """Remove the manual override (report reverts to fills/n-d). NEVER raises."""
+    try:
+        conn = _ppc_conn()
+        cur = conn.execute("DELETE FROM ppc_override WHERE id=1")
+        conn.commit()
+        cleared = cur.rowcount > 0
+        conn.close()
+        return cleared
+    except Exception as exc:  # noqa: BLE001
+        log.warning("clear_ppc_override failed: %s", exc)
+        return False
+
+
+def get_ppc_override() -> dict[str, Any] | None:
+    """{'ppc_usd', 'net_acq_usd', 'set_date'} or None. NEVER raises."""
+    try:
+        conn = _ppc_conn()
+        row = conn.execute(
+            "SELECT ppc_usd, net_acq_usd, set_ts FROM ppc_override WHERE id=1"
+        ).fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {
+            "ppc_usd": float(row["ppc_usd"]),
+            "net_acq_usd": float(row["net_acq_usd"]),
+            "set_date": str(row["set_ts"] or "")[:10],
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("get_ppc_override failed: %s", exc)
+        return None
+
+
 def format_hype_acquisition_line(acq: HypeAcquisition) -> str:
-    """One-line HYPE acquisition summary for Telegram. Honest n/d when unknown."""
+    """One-line HYPE acquisition summary for Telegram. Honest n/d when unknown.
+
+    R-BOT-DEFINITIVE-2 T5: a manual /setppc override (when set) is the PRIMARY
+    line; the fills-reconciliation note (n/d reason) stays as a secondary line.
+    """
+    ov = get_ppc_override()
+    if ov:
+        line = (
+            f"💠 HYPE adquisición — PPC contable: ${ov['ppc_usd']:,.2f} "
+            f"(manual, set {ov['set_date']}) · "
+            f"adq. neta: ${ov['net_acq_usd']:,.2f} (manual, set {ov['set_date']})"
+        )
+        if not acq.known:
+            line += (
+                f"\n   ℹ️ auto-PPC n/d: {acq.reason or 'no derivable de fills'}"
+            )
+        return line
     if not acq.known:
         return (
             "💠 HYPE adquisición — PPC contable: n/d · adq. neta: n/d  "

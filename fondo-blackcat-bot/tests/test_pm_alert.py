@@ -210,10 +210,16 @@ def test_display_block_shows_borrow_utilization_not_liq_risk():
 
 
 def test_display_naked_long_line_preserved():
+    # R-BOT-DEFINITIVE-2 T7 (2026-07-02): the panel line is now a NEUTRAL
+    # owner-decision note (no siren, no imperative) — but it must still render
+    # whenever naked_long is True (the structure stays visible, never hidden).
     from modules.portfolio_margin import compute_pm_state, format_pm_state_telegram
     bal = [{"coin": "HYPE", "total": 1000.0}, {"coin": "USDC", "total": -10_000}]
     pm = compute_pm_state(bal, [], {"HYPE": 100.0})
-    assert "naked leveraged long" in format_pm_state_telegram(pm).lower()
+    block = format_pm_state_telegram(pm)
+    assert pm.naked_long is True
+    assert "Estructura: long apalancado sin hedge activo (decisión del owner)" in block
+    assert "🚨" not in block
 
 
 # ─── 7. R-UNLOCK intact ─────────────────────────────────────────────────────

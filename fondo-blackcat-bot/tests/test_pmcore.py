@@ -79,7 +79,9 @@ def test_naked_long_guard_fires_when_debt_no_shorts():
     should, msg = pm_alert(pm)
     assert should is True
     assert "hedge missing" in msg.lower()
-    assert "naked leveraged long" in format_pm_state_telegram(pm).lower()
+    # R-BOT-DEFINITIVE-2 T7: the PANEL line is a neutral owner-decision note
+    # (the pm_alert push copy above is unchanged).
+    assert "sin hedge activo" in format_pm_state_telegram(pm).lower()
 
 
 def test_naked_long_guard_clears_with_shorts_open():

@@ -286,10 +286,10 @@ def build_pm_llm_block(pm) -> str:
                 continue
 
     if pm.naked_long:
+        # R-BOT-DEFINITIVE-2 T7: neutral framing — owner-approved structure.
         lines.append(
-            "• 🚨 NAKED-LONG: deuda abierta sin shorts del basket EN ESTA wallet "
-            "PM — long apalancado sin hedge in-wallet (violación de regla dura). "
-            "Alertar SIEMPRE."
+            "• Estructura: long apalancado sin hedge activo (decisión del owner). "
+            "Deuda abierta sin shorts del basket EN ESTA wallet PM."
         )
         lines.append(
             "   ↳ DreamCash (wallet 0x171b, margen SEPARADO) tiene shorts + shield "

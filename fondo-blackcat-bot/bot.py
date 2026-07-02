@@ -388,11 +388,29 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # 4 KPIs surfaced BEFORE timeline: TOTAL EQUITY + BASKET UPnL + HF
     # FLYWHEEL + NEXT CATALYST <72h. Single-source-of-truth via
     # auto.capital_calc / auto.hyperlend_reader / modules.macro_calendar.
+    header_text = ""
     try:
         header_text = format_report_header(portfolio, hl, market, unlocks)
         await update.message.reply_text(header_text, reply_markup=MAIN_KEYBOARD)
     except Exception:  # noqa: BLE001
         log.exception("format_report_header failed (non-fatal — continuing)")
+
+    # ─── Section 0b: DELTA vs previous report (R-BOT-DEFINITIVE-2 T6) ────────
+    # Deterministic KPI diff (equity/aave-HF/HYPE/BTC/debt/UPnL) vs the last
+    # persisted /reporte snapshot. No previous snapshot → omitted silently.
+    _delta_kpis = None
+    try:
+        from modules.report_delta import (
+            collect_report_kpis,
+            format_report_delta_block,
+            load_last_kpis,
+        )
+        _delta_kpis = collect_report_kpis(portfolio, market, header_text)
+        _delta_block = format_report_delta_block(_delta_kpis, load_last_kpis())
+        if _delta_block:
+            await update.message.reply_text(_delta_block, reply_markup=MAIN_KEYBOARD)
+    except Exception:  # noqa: BLE001
+        log.exception("report delta block failed (non-fatal)")
 
     # ─── Section 1: X Timeline (48h) ─────────────────────────────────────────
     x_intel_ok = isinstance(x_intel, dict) and x_intel.get("status") == "ok"
@@ -433,6 +451,24 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             header + timeline_text,
             reply_markup=MAIN_KEYBOARD,
         )
+
+    # ─── Section 1b: Telegram + Gmail intel (R-BOT-DEFINITIVE-2 T3) ──────────
+    # Deterministic $0 render of the ALREADY-FETCHED Telegram/Gmail feeds
+    # (fetched above for the integrity scan; R-COST3 removed the LLM narrative
+    # that used to show them). Render-only — read/mark-read/archive untouched.
+    try:
+        from modules.intel_render import (
+            format_gmail_intel_block,
+            format_telegram_intel_block,
+        )
+        _tg_block = format_telegram_intel_block(intel_legacy, intel_unread)
+        if _tg_block:
+            await send_long_message(update, _tg_block, reply_markup=MAIN_KEYBOARD)
+        _gm_block = format_gmail_intel_block(gmail_intel)
+        if _gm_block:
+            await send_long_message(update, _gm_block, reply_markup=MAIN_KEYBOARD)
+    except Exception:  # noqa: BLE001
+        log.exception("telegram/gmail intel render failed (non-fatal)")
 
     # ─── Section 2: Positions ──────────────────────────────────────────────────
     positions_text = format_quick_positions(
@@ -596,7 +632,8 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # a future orphan-source (fetched-but-never-rendered) is easy to spot.
     log.info(
         "[COST_AUDIT] /reporte deterministic assembly — LLM calls=0; "
-        "sections=header,x_timeline,positions,classification,funding,integrity_halt,"
+        "sections=header,delta,x_timeline,telegram_intel,gmail_intel,positions,"
+        "classification,funding,integrity_halt,"
         "screener,tradermap,lmec(%s),intel30(%d blocks)",
         lmec_ok, len(intel30_blocks),
     )
@@ -625,6 +662,15 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "   Diagnostic: run /debug_x for live probe (bypasses cooldown).",
             reply_markup=MAIN_KEYBOARD,
         )
+
+    # R-BOT-DEFINITIVE-2 T6: persist this run's KPIs at the END of the run so
+    # the NEXT /reporte can render the delta block. Non-fatal.
+    try:
+        if _delta_kpis:
+            from modules.report_delta import save_report_kpis
+            save_report_kpis(_delta_kpis)
+    except Exception:  # noqa: BLE001
+        log.exception("save_report_kpis failed (non-fatal)")
 
 
 @authorized
@@ -1378,6 +1424,76 @@ async def cmd_setlmec(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         raise ValueError("campo desconocido — usá macd|rsi|ma50w|clear")
     except ValueError as exc:
         await update.message.reply_text(f"❌ {exc}", reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_setppc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-BOT-DEFINITIVE-2 T5 — manual HYPE PPC + net-acquisition override.
+
+    Usage:
+      /setppc                   → show current override + usage
+      /setppc <ppc> <net_acq>   → set both (USD), timestamped in SQLite
+      /setppc clear             → remove override (report reverts to n/d/auto)
+    """
+    from modules.hype_acquisition import (
+        clear_ppc_override,
+        get_ppc_override,
+        set_ppc_override,
+    )
+
+    args = context.args or []
+    if not args:
+        ov = get_ppc_override()
+        cur = (
+            f"  • PPC contable: ${ov['ppc_usd']:,.2f} (manual, set {ov['set_date']})\n"
+            f"  • adq. neta: ${ov['net_acq_usd']:,.2f} (manual, set {ov['set_date']})"
+            if ov else "  • sin override — el reporte usa fills/n-d automático"
+        )
+        await update.message.reply_text(
+            "💠 /setppc — override manual de PPC HYPE\n\n" + cur + "\n\n"
+            "Uso:\n  /setppc 53.5 41.5   (PPC contable + adq. neta, USD)\n"
+            "  /setppc clear       (vuelve a n/d/auto)",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    if args[0].strip().lower() == "clear":
+        cleared = clear_ppc_override()
+        await update.message.reply_text(
+            "🧹 Override PPC limpiado (vuelve a n/d/auto)." if cleared
+            else "ℹ️ No había override PPC activo.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    if len(args) < 2:
+        await update.message.reply_text(
+            "❌ Faltan valores — usá: /setppc <ppc> <adq_neta>  (ej: /setppc 53.5 41.5)",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    try:
+        ppc = float(args[0].replace("$", "").replace(",", "."))
+        net = float(args[1].replace("$", "").replace(",", "."))
+        if not (ppc > 0 and net > 0):
+            raise ValueError
+    except (TypeError, ValueError):
+        await update.message.reply_text(
+            "❌ Valores inválidos — ambos deben ser números > 0 "
+            "(ej: /setppc 53.5 41.5)",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    if set_ppc_override(ppc, net):
+        await update.message.reply_text(
+            f"✅ Override PPC guardado: PPC ${ppc:,.2f} · adq. neta ${net:,.2f} "
+            "(aparece en /reporte como línea manual).",
+            reply_markup=MAIN_KEYBOARD,
+        )
+    else:
+        await update.message.reply_text(
+            "❌ No se pudo guardar el override (ver /errors).",
+            reply_markup=MAIN_KEYBOARD,
+        )
 
 
 @authorized
@@ -3759,6 +3875,8 @@ HANDLER_MAP = {
     # R-BOT-LMEC-AUTOFEED
     "lmec_status": cmd_lmec_status,
     "setlmec": cmd_setlmec,
+    # R-BOT-DEFINITIVE-2 T5 — manual HYPE PPC override
+    "setppc": cmd_setppc,
     # R-VARIATIONAL — Farm the DUMP
     "variationalfunding": cmd_variationalfunding,
     "variationalalerts": cmd_variationalalerts,

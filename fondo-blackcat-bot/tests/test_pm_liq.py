@@ -167,11 +167,15 @@ def test_block_renders_real_liq_and_aave_hf():
     assert "Health factor (aave" in block
     assert "SALUDABLE" in block and "🟢" in block          # aave-driven headline
     assert "Utilización borrow" in block                   # HF_app relabelled
-    assert "Liq. price HYPE" in block and "$40.3" in block  # REAL liq price
+    # R-BOT-DEFINITIVE-2 T1: BOTH liq framings render — nominal (0.75, HF 1.0)
+    # and REAL (0.7125, trigger ratio>0.95, always above nominal).
+    assert "Liq nominal (maint-LTV 0.75, HF 1.0)" in block and "$40.3" in block
+    assert "LIQ REAL (0.7125, trigger ratio>0.95)" in block
+    assert "HF at real liquidation = 1.053" in block
     assert "buffer" in block
     assert "$60.45" not in block                            # the OLD wrong price
-    # Naked-long is a SEPARATE hedge-missing note, NOT conflated with liq risk.
-    assert "naked leveraged long" in block.lower()
+    # T7: naked-long is a SEPARATE, NEUTRAL owner-decision note.
+    assert "sin hedge activo (decisión del owner)" in block
     # R-PM-RATIO-RELABEL (2026-06-07): the utilization line no longer carries
     # the WARN/STRESS/CRÍTICO/LIQ scale and NEVER reads "LIQ-RISK" — the borrow
     # ratio is utilization of the max-borrow cap, not a liquidation signal.

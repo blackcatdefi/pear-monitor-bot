@@ -217,6 +217,33 @@ def _is_unified_spot_reserve_wallet(wallet_addr: str | None) -> bool:
 _is_separate_margin_wallet = _is_unified_spot_reserve_wallet
 
 
+def _position_with_liq(p: dict[str, Any]) -> str:
+    """R-BOT-DEFINITIVE-2 T2 — "SIDE COIN (liq $X · dist Y% del mark)".
+
+    Renders one DreamCash position with its LIVE liquidationPx (HL
+    clearinghouseState) and the % distance from the current mark. The mark is
+    derived from the SAME payload (mark = entry + UPnL/size — exact for linear
+    perps), so no extra fetch and nothing fabricated. Missing liq_px → plain
+    "SIDE COIN" (n/d, never invented). NEVER raises.
+    """
+    base = f"{p.get('side', '?')} {p.get('coin', '?')}"
+    try:
+        liq = float(p.get("liq_px") or 0.0)
+        if liq <= 0:
+            return base
+        entry = float(p.get("entry_px") or 0.0)
+        size = float(p.get("size") or 0.0)
+        upnl = float(p.get("unrealized_pnl") or 0.0)
+        mark = (entry + upnl / size) if (entry > 0 and size) else 0.0
+        bits = f"liq ${liq:,.0f}" if liq >= 1000 else f"liq ${liq:,.2f}"
+        if mark > 0:
+            dist_pct = (mark - liq) / liq * 100.0
+            bits += f" · dist {dist_pct:+.1f}% del mark"
+        return f"{base} ({bits})"
+    except (TypeError, ValueError, ZeroDivisionError):
+        return base
+
+
 def _wallet_perp_contribution(wallet_data: dict[str, Any]) -> float:
     """Perp-side contribution to fund equity for ONE wallet.
 
@@ -498,8 +525,10 @@ def _pm_health_for_header(
                 f"{pm.ratio * 100:.1f}% {emoji} {band} "
                 f"(col {_fmt_usd(pm.collateral_usd)} / deuda {_fmt_usd(pm.debt_usd)})"
             )
+        # R-BOT-DEFINITIVE-2 T7: neutral wording — owner-approved structure,
+        # no siren emoji in the header flag.
         if pm.naked_long:
-            txt += " 🚨 NAKED-LONG"
+            txt += " · sin hedge activo (decisión owner)"
         return txt
     except Exception:  # noqa: BLE001
         return "—"
@@ -1434,7 +1463,16 @@ def format_quick_positions(wallets: list[dict[str, Any]],
 
         positions = d.get("positions") or []
         if positions:
-            pos_summary = ", ".join(f"{p['side']} {p['coin']}" for p in positions[:5])
+            # R-BOT-DEFINITIVE-2 T2: DreamCash (0x171b, unified-spot-reserve)
+            # positions render their LIVE liquidationPx + distance % from mark
+            # (mark derived from entry + UPnL/size — same HL payload, no extra
+            # fetch). Other wallets keep the compact "SIDE COIN" summary.
+            if _is_unified_spot_reserve_wallet(d.get("wallet")):
+                pos_summary = ", ".join(
+                    _position_with_liq(p) for p in positions[:5]
+                )
+            else:
+                pos_summary = ", ".join(f"{p['side']} {p['coin']}" for p in positions[:5])
         elif _is_alt_short_wallet(d.get("wallet", "")) and not BASKET_STATUS.get("active"):
             # Wallet historically from Super Basket Stage 6 basket, now IDLE.
             last = BASKET_STATUS.get("last_basket", "?")

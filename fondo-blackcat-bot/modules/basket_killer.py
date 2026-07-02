@@ -13,6 +13,9 @@ Triggers actuales (cada uno con input LIVE — nunca valores fabricados):
      del Portfolio Margin nativo (HL Earn), MISMA que el panel y el canal
      real-risk. NO lee HyperLend (protocolo muerto, el fondo no lo usa).
   4. Basket UPnL < -$2,000 (drawdown extremo → alert_only) — live perps.
+  5. BTC mark <= DreamCash liquidationPx × 1.06 (BTC long cross en wallet
+     0x171b acercándose a su liq) — live clearinghouseState liquidationPx.
+     MANUAL REVIEW only (alert_only), nunca cierra nada.
 
 R-BOT-DEFINITIVE-KILLCLEAN (2026-06-15): eliminado el trigger
 ``ueth_apy_above_10`` (UETH borrow APY del flywheel HyperLend pair-trade).
@@ -196,6 +199,8 @@ async def _evaluate_pm_hf() -> TriggerResult:
     """
     aave_hf: float | None = None
     has_debt = False
+    liq_real = 0.0
+    hype_px = 0.0
     try:
         from modules.portfolio import fetch_all_wallets
         from modules.pm_context import select_primary_pm_state
@@ -205,8 +210,18 @@ async def _evaluate_pm_hf() -> TriggerResult:
             has_debt = pm.debt_usd > 1.0
             if has_debt and pm.aave_hf > 0:
                 aave_hf = float(pm.aave_hf)
+            liq_real = float(getattr(pm, "liq_price_real", 0.0) or 0.0)
+            hype_px = float(getattr(pm, "hype_px", 0.0) or 0.0)
     except Exception as exc:  # noqa: BLE001
         log.warning("pm_hf trigger: PM state unavailable: %s", exc)
+
+    # R-BOT-DEFINITIVE-2 T1: alert copy cites the REAL liquidation price
+    # (effective LTV 0.7125 = 0.75 × trigger ratio 0.95), not the nominal one.
+    _liq_bit = ""
+    if liq_real > 0:
+        _liq_bit = f" · LIQ REAL (0.7125, ratio>0.95) HYPE ${liq_real:,.2f}"
+        if hype_px > 0:
+            _liq_bit += f" vs oracle ${hype_px:,.2f}"
 
     fired = False
     distance = "far"
@@ -218,12 +233,12 @@ async def _evaluate_pm_hf() -> TriggerResult:
     elif aave_hf < 1.10:
         fired = True
         distance = "ACTIVE"
-        detail = f"PM aave-HF = {aave_hf:.3f} < 1.10 — ZONA CRÍTICA"
+        detail = f"PM aave-HF = {aave_hf:.3f} < 1.10 — ZONA CRÍTICA{_liq_bit}"
     elif aave_hf < 1.20:
         distance = "near"
-        detail = f"PM aave-HF = {aave_hf:.3f} (zona observación)"
+        detail = f"PM aave-HF = {aave_hf:.3f} (zona observación){_liq_bit}"
     else:
-        detail = f"PM aave-HF = {aave_hf:.3f} (saludable)"
+        detail = f"PM aave-HF = {aave_hf:.3f} (saludable){_liq_bit}"
     return TriggerResult(
         trigger_id="pm_hf_below_110",
         name="PM aave-HF < 1.10 (colateral HYPE — zona crítica)",
@@ -281,11 +296,107 @@ async def _evaluate_basket_drawdown() -> TriggerResult:
     )
 
 
+# ─── R-BOT-DEFINITIVE-2 T2: DreamCash BTC-long liq proximity ─────────────────
+
+# DreamCash (RESCATE/HEDGE) wallet — HL unified account, BTC long cross.
+_DREAMCASH_ADDR = "0x171b7880939d76abbc6b6b2094f54e6636f829a7"
+# Fire when BTC mark <= liquidationPx × 1.06 (6% cushion above the liq px).
+_DREAMCASH_LIQ_CUSHION = 1.06
+
+
+def dreamcash_liq_proximity(
+    mark_px: float | None, liq_px: float | None, cushion: float = _DREAMCASH_LIQ_CUSHION,
+) -> tuple[bool, float]:
+    """Pure threshold math: returns ``(fired, distance_pct)``.
+
+    ``fired`` is True when ``mark <= liq × cushion``. ``distance_pct`` is the
+    % the mark sits above the liq price (0.0 when unavailable). NEVER raises.
+    """
+    try:
+        mark = float(mark_px or 0.0)
+        liq = float(liq_px or 0.0)
+    except (TypeError, ValueError):
+        return False, 0.0
+    if mark <= 0 or liq <= 0:
+        return False, 0.0
+    fired = mark <= liq * float(cushion)
+    dist_pct = (mark - liq) / liq * 100.0
+    return fired, dist_pct
+
+
+async def _evaluate_btc_near_dreamcash_liq() -> TriggerResult:
+    """Trigger #5 — BTC mark approaching the DreamCash BTC-long liquidationPx.
+
+    Live inputs ONLY: the liq price comes from HL clearinghouseState
+    (``assetPositions[].position.liquidationPx``) of the DreamCash wallet and
+    the mark from the live BTC price. No position / no liq px / no price →
+    reports n/d and NEVER fires on fabricated data. MANUAL REVIEW only.
+    """
+    liq_px: float | None = None
+    mark: float | None = None
+    try:
+        from modules.portfolio import fetch_all_wallets, get_spot_price
+        wallets = await fetch_all_wallets()
+        for w in wallets or []:
+            if not isinstance(w, dict) or w.get("status") != "ok":
+                continue
+            data = w.get("data") or {}
+            addr = str(data.get("wallet") or "").lower()
+            if addr != _DREAMCASH_ADDR:
+                continue
+            for pos in data.get("positions") or []:
+                if (pos.get("coin") or "").upper() != "BTC":
+                    continue
+                if str(pos.get("side") or "").upper() != "LONG":
+                    continue
+                lp = pos.get("liq_px")
+                if lp:
+                    liq_px = float(lp)
+                break
+            break
+        mark = await get_spot_price("BTC")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("dreamcash_liq trigger: data unavailable: %s", exc)
+
+    fired = False
+    distance = "far"
+    if liq_px is None:
+        detail = "DreamCash BTC long: liquidationPx n/d (sin posición o dato no disponible)"
+    elif not mark:
+        detail = f"DreamCash BTC liq ${liq_px:,.0f} — BTC mark n/d"
+    else:
+        fired, dist_pct = dreamcash_liq_proximity(mark, liq_px)
+        base = (
+            f"BTC ${mark:,.0f} vs DreamCash liq ${liq_px:,.0f} "
+            f"(distancia {dist_pct:+.1f}%)"
+        )
+        if fired:
+            distance = "ACTIVE"
+            detail = (
+                f"{base} — BTC <= liq × {_DREAMCASH_LIQ_CUSHION} — MANUAL REVIEW "
+                "(defensa manual del BTC long DreamCash; nada se cierra solo)"
+            )
+        elif mark <= liq_px * (_DREAMCASH_LIQ_CUSHION + 0.04):
+            distance = "near"
+            detail = base
+        else:
+            detail = base
+    return TriggerResult(
+        trigger_id="btc_near_dreamcash_liq",
+        name="BTC cerca del liq de DreamCash (mark <= liq × 1.06 — MANUAL REVIEW)",
+        fired=fired,
+        distance_text=distance,
+        detail=detail,
+        action="alert_only",
+    )
+
+
 _TRIGGERS: list[Callable[[], Awaitable[TriggerResult]]] = [
     _evaluate_btc_above_82k,
     _evaluate_btc_dca_zone,
     _evaluate_pm_hf,
     _evaluate_basket_drawdown,
+    _evaluate_btc_near_dreamcash_liq,
 ]
 
 

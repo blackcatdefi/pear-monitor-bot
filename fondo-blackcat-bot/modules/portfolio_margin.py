@@ -129,6 +129,17 @@ class PMState:
     hype_price_at_hf_130: float = 0.0
     hype_price_at_hf_120: float = 0.0
     hype_price_at_hf_110: float = 0.0
+    # R-BOT-DEFINITIVE-2 T1 (2026-07-02): HL PM liquidation TRIGGERS at
+    # portfolio_margin_ratio > 0.95, i.e. BEFORE the nominal maintenance point.
+    # Effective liquidation LTV = 0.95 × liq_threshold (0.7125 for HYPE 0.75).
+    #   * ``liq_price_real``       — HYPE px where ratio hits 0.95 (the REAL
+    #                                 liquidation price; higher than nominal).
+    #   * ``price_buffer_real_pct`` — % HYPE can fall before REAL liquidation.
+    #   * ``hf_at_real_liq``       — aave_HF at the real trigger = 1/0.95 ≈ 1.053.
+    # ``liq_price`` above stays the NOMINAL (0.75, HF=1.0) maintenance price.
+    liq_price_real: float = 0.0
+    price_buffer_real_pct: float = 0.0
+    hf_at_real_liq: float = 0.0
 
 
 def _f(v: Any) -> float:
@@ -243,6 +254,25 @@ def compute_pm_risk_metrics(
     if liq_price > 0 and hype_px > 0:
         buffer_pct = max(0.0, (hype_px - liq_price) / hype_px * 100.0)
 
+    # R-BOT-DEFINITIVE-2 T1 — REAL liquidation price. HL PM liquidation fires
+    # when portfolio_margin_ratio = liability / liq_weighted > PM_LIQ_RATIO
+    # (0.95), NOT at ratio = 1.0. Solving liq_weighted(px) × 0.95 = liability
+    # (+ min-borrow offset; other collateral constant) gives, in the single-
+    # collateral case, LIQ_REAL = debt / (0.95 × 0.75 × qty) = debt /
+    # (0.7125 × qty) — ALWAYS above the nominal HF=1.0 price. The aave-HF at
+    # this trigger is 1/0.95 ≈ 1.053.
+    trigger = _f(PM_LIQ_RATIO) or 0.95
+    eff_threshold = hype_liq_threshold * trigger  # 0.7125 for HYPE (0.75 × 0.95)
+    liq_price_real = 0.0
+    if debt > 0 and hype_qty > 0 and eff_threshold > 0:
+        target_real = (liability + _f(min_borrow_offset)) - other_liq * trigger
+        if target_real > 0:
+            liq_price_real = target_real / (eff_threshold * hype_qty)
+    buffer_real_pct = 0.0
+    if liq_price_real > 0 and hype_px > 0:
+        buffer_real_pct = max(0.0, (hype_px - liq_price_real) / hype_px * 100.0)
+    hf_at_real_liq = (1.0 / trigger) if trigger > 0 else 0.0
+
     # R-BOT-DEFINITIVE WI-7 — HYPE price at aave-HF thresholds (OUTPUT ONLY,
     # same liability basis as aave_hf: debt + perp cross maint margin; other
     # collateral held constant). px(HF=h) = (h×liability − other_liq) /
@@ -261,6 +291,10 @@ def compute_pm_risk_metrics(
         "current_ltv": current_ltv,
         "liq_price": liq_price,
         "price_buffer_pct": buffer_pct,
+        "liq_price_real": liq_price_real,
+        "price_buffer_real_pct": buffer_real_pct,
+        "hf_at_real_liq": hf_at_real_liq,
+        "liq_trigger_ratio": trigger,
         "max_ltv": _f(ltv_map.get("HYPE", PM_HYPE_LTV)) or PM_HYPE_LTV,
         "liq_threshold": hype_liq_threshold,
         "hype_price_at_hf_130": _px_at_hf(1.30),
@@ -488,6 +522,9 @@ def compute_pm_state(
         hype_price_at_hf_130=metrics.get("hype_price_at_hf_130", 0.0),
         hype_price_at_hf_120=metrics.get("hype_price_at_hf_120", 0.0),
         hype_price_at_hf_110=metrics.get("hype_price_at_hf_110", 0.0),
+        liq_price_real=metrics.get("liq_price_real", 0.0),
+        price_buffer_real_pct=metrics.get("price_buffer_real_pct", 0.0),
+        hf_at_real_liq=metrics.get("hf_at_real_liq", 0.0),
     )
 
 
@@ -595,26 +632,40 @@ def format_pm_state_telegram(
                 f"├─ Perp cross maint-margin (en cuenta PM): {_fmt_usd(pm.perp_cross_mm)}"
             )
         if pm.liq_price > 0:
-            buf = (
-                f" · buffer {pm.price_buffer_pct:.1f}%"
-                if pm.price_buffer_pct > 0 else ""
+            lines.append(
+                f"├─ Liq nominal (maint-LTV {pm.liq_threshold:.2f}, HF 1.0): "
+                f"${pm.liq_price:,.2f}"
+            )
+        # R-BOT-DEFINITIVE-2 T1: HL PM liquidation triggers at ratio > 0.95 —
+        # the REAL liq price uses the effective LTV 0.95 × maint (0.7125) and
+        # is ALWAYS above nominal. The buffer is measured against LIQ REAL.
+        if pm.liq_price_real > 0:
+            eff_ltv = pm.liq_threshold * 0.95 if pm.liq_threshold > 0 else 0.7125
+            buf_real = (
+                f" · buffer {pm.price_buffer_real_pct:.1f}%"
+                if pm.price_buffer_real_pct > 0 else ""
             )
             lines.append(
-                f"├─ Liq. price HYPE (maint-LTV {pm.liq_threshold:.2f}): "
-                f"${pm.liq_price:,.2f}"
-                + (f"  (oracle ${pm.hype_px:,.2f}{buf})" if pm.hype_px > 0 else "")
+                f"├─ LIQ REAL ({eff_ltv:.4f}, trigger ratio>0.95): "
+                f"${pm.liq_price_real:,.2f}"
+                + (f"  (oracle ${pm.hype_px:,.2f}{buf_real})" if pm.hype_px > 0 else "")
             )
+            hf_real = pm.hf_at_real_liq if pm.hf_at_real_liq > 0 else 1.0 / 0.95
+            lines.append(f"├─ HF at real liquidation = {hf_real:.3f}")
         # R-BOT-DEFINITIVE WI-7: aave-HF threshold prices for HYPE — the ONLY
         # observation/action zones the narrative may cite (panel parity).
         if pm.hype_price_at_hf_120 > 0 or pm.hype_price_at_hf_110 > 0:
+            _liq_ref = pm.liq_price_real if pm.liq_price_real > 0 else pm.liq_price
             lines.append(
                 f"├─ Umbrales HYPE: HF1.20 ${pm.hype_price_at_hf_120:,.2f} (observación) | "
                 f"HF1.10 ${pm.hype_price_at_hf_110:,.2f} (acción) | "
-                f"liq ${pm.liq_price:,.2f}"
+                f"liq real ${_liq_ref:,.2f}"
             )
         # Clarify that over-max-borrow only blocks NEW draws — liquidation is the
-        # maintenance-LTV price, not the 100%-utilization point.
-        lines.append(explainer_line(pm.liq_price))
+        # real-trigger price (ratio > 0.95), not the 100%-utilization point.
+        lines.append(explainer_line(
+            pm.liq_price_real if pm.liq_price_real > 0 else pm.liq_price
+        ))
     # R-NOISE-CUT (2026-06-16): perp cross utilization, INFORMATIONAL only (the
     # ex-MARGIN-STRESS datum). Rendered only when cross perp legs exist and the
     # ratio is available; at/over 100% it blocks opening NEW perp legs and is
@@ -672,10 +723,12 @@ def format_pm_state_telegram(
             parts.append(f"UPnL {upnl_sign}{_fmt_usd(abs(leg.upnl))}")
             lines.append(f"{lead} " + " · ".join(parts))
 
+    # R-BOT-DEFINITIVE-2 T7: neutral one-liner — the leveraged long without an
+    # in-wallet hedge is a KNOWN, owner-approved structure, not an alarm. No
+    # siren, no imperative. HF/liq threshold alerts above are untouched.
     if pm.naked_long:
         lines.append(
-            "🚨 WARNING: USDC debt vs HYPE with no shorts open — "
-            "naked leveraged long, hedge missing."
+            "Estructura: long apalancado sin hedge activo (decisión del owner)"
         )
     return "\n".join(lines)
 

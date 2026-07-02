@@ -113,6 +113,7 @@ COMMANDS: List[BotCommand] = [
     BotCommand("setcatalyst", "Catalysts engine: add/del/list (FRED+FOMC+manual) — WI-1", "trading", "cmd_setcatalyst"),
     BotCommand("lmec_status", "LMEC bear-invalidation telemetry (R-BOT-LMEC-AUTOFEED)", "trading", "cmd_lmec_status"),
     BotCommand("setlmec", "Set manual LMEC inputs: MACD/RSI/MA50w semanal (P1.9)", "trading", "cmd_setlmec"),
+    BotCommand("setppc", "Override manual PPC HYPE + adq. neta (/setppc 53.5 41.5 | clear) — T5", "trading", "cmd_setppc"),
 
     # ─── R-VARIATIONAL — Farm the DUMP ───
     BotCommand("variationalfunding", "Scan Variational perps: funding anualizado ≤ umbral (-500% def)", "trading", "cmd_variationalfunding"),

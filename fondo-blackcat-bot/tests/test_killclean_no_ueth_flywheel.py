@@ -34,6 +34,8 @@ SURVIVING_IDS = {
     "btc_dca_63_65",
     "pm_hf_below_110",
     "basket_drawdown_2k",
+    # R-BOT-DEFINITIVE-2 T2 (2026-07-02): DreamCash BTC-long liq proximity.
+    "btc_near_dreamcash_liq",
 }
 
 
@@ -57,8 +59,9 @@ def _registry_ids() -> set[str]:
 
 
 def test_ueth_borrow_apy_trigger_removed_from_registry():
-    assert len(basket_killer._TRIGGERS) == 4, (
-        "Expected exactly 4 surviving kill triggers after UETH removal"
+    assert len(basket_killer._TRIGGERS) == 5, (
+        "Expected exactly 5 kill triggers (4 post-UETH-removal + "
+        "btc_near_dreamcash_liq from R-BOT-DEFINITIVE-2 T2)"
     )
     names = [fn.__name__ for fn in basket_killer._TRIGGERS]
     assert "_evaluate_ueth_borrow_apy" not in names

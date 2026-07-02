@@ -44,6 +44,44 @@ _DEFAULT_KEYWORDS = (
 # on-chain — their flags NEVER auto-clear on "no confirmation".
 _DEFAULT_SHIELDED = ("ZEC", "XMR", "DASH", "SCRT", "ROSE", "ARRR", "FIRO", "BEAM")
 
+# ── R-BOT-DEFINITIVE-2 T4: price-action false-positive filter ────────────────
+# Trader commentary ("$X looks bearish, struggling at support, chart like a
+# slow rug") matches integrity keywords but is NOT an integrity event. When a
+# matched message ALSO matches ≥1 price-action pattern AND does NOT match a
+# real-event pattern, the HALT downgrades to an informational note. Real-event
+# patterns ALWAYS win — a message with both price-action words and a genuine
+# exploit report still HALTs.
+_PRICE_ACTION_RE = re.compile(
+    r"(bearish|bullish|trend|support|resistance|breakout|struggling|"
+    r"price action|chart|level|holding|yearly low)",
+    re.IGNORECASE,
+)
+_REAL_EVENT_RE = re.compile(
+    r"(exploit|hack|drained|insolven|halted withdrawals|delisted|"
+    r"delisting announcement|sec charges|lawsuit|frozen funds|rug pulled|"
+    # Unambiguous integrity events that never occur in pure price-action talk
+    # (guards the live Zcash/Orchard "unlimited minting" blob, which also
+    # contains "holds support" trader phrasing):
+    r"unlimited mint|infinite mint|double.spend|backdoor|secretly print|"
+    r"secret print|counterfeit|depeg)",
+    re.IGNORECASE,
+)
+
+
+def is_price_action_context(text: str) -> bool:
+    """True when the text reads as price-action commentary, NOT a real event.
+
+    Deterministic (pure regex, zero LLM). Real-event patterns always win.
+    NEVER raises.
+    """
+    try:
+        tl = str(text or "")
+        if _REAL_EVENT_RE.search(tl):
+            return False
+        return bool(_PRICE_ACTION_RE.search(tl))
+    except Exception:  # noqa: BLE001
+        return False
+
 
 def _enabled() -> bool:
     return (os.getenv("INTEGRITY_HALT_ENABLED", "true") or "true").lower() == "true"
@@ -76,7 +114,7 @@ class IntegrityHit:
 class IntegrityNote:
     """A suppressed / informational rumor — NEVER a per-position STOP.
 
-    reason ∈ {"blocklisted", "not_held", "unresolved"}.
+    reason ∈ {"blocklisted", "not_held", "unresolved", "price_action"}.
     """
     asset: str | None
     keyword: str
@@ -291,6 +329,22 @@ def scan_integrity(
         subjects = _resolve_subjects(
             tl, all_kw_pos, held_tickers=detect_tickers, alias_map=alias_map
         )
+        # R-BOT-DEFINITIVE-2 T4: price-action commentary is NOT an integrity
+        # event — downgrade the whole message to an info note (real-event
+        # patterns always win inside is_price_action_context).
+        if is_price_action_context(text):
+            if subjects:
+                for asset in subjects:
+                    notes.setdefault((asset, "price_action"), IntegrityNote(
+                        asset=asset, keyword=first_kw, excerpt=excerpt,
+                        source=str(source), reason="price_action",
+                    ))
+            else:
+                notes.setdefault((None, "price_action"), IntegrityNote(
+                    asset=None, keyword=first_kw, excerpt=excerpt,
+                    source=str(source), reason="price_action",
+                ))
+            continue
         if not subjects:
             # Fail-closed: a keyword with no resolvable subject NEVER attaches
             # to a held position. At most a single generic info note.
@@ -481,6 +535,12 @@ def build_notes_block(notes: list[IntegrityNote] | None) -> str:
             lines.append(
                 f"ℹ️ Rumor de integridad notado para {n.asset} «{n.keyword}» "
                 f"(no en posición) — sin acción."
+            )
+        elif n.reason == "price_action":
+            asset_bit = f" ({n.asset})" if n.asset else ""
+            lines.append(
+                f"ℹ️ price-action context, not an integrity event{asset_bit} "
+                f"«{n.keyword}» — comentario de trader, sin acción."
             )
         else:  # unresolved
             lines.append(
