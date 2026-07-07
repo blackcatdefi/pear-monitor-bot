@@ -47,6 +47,12 @@ except Exception:  # noqa: BLE001
 _RECONCILE_TOL = float(os.getenv("HYPE_ACQ_RECONCILE_TOL", "0.05") or 0.05)
 # HL userFills hard cap — a full page strongly implies truncated history.
 _FILLS_CAP = int(os.getenv("HYPE_ACQ_FILLS_CAP", "2000") or 2000)
+# R-EQUITY-DEDUP-DREAMCASH: pagination depth for userFillsByTime (each page is
+# up to _FILLS_CAP fills → 10 pages ≈ 20K fills, far beyond fund history).
+_FILLS_MAX_PAGES = int(os.getenv("HYPE_ACQ_FILLS_MAX_PAGES", "10") or 10)
+# Set by the REAL _fetch_fills on each call; consumed by the reconciliation
+# gate. Monkeypatched test doubles never touch it (stays False).
+_LAST_FETCH_TRUNCATED = False
 
 
 @dataclass(frozen=True)
@@ -119,17 +125,75 @@ def _resolve_spot_map() -> dict[str, str]:
 
 
 def _fetch_fills(wallet: str) -> list[dict] | None:
-    """Fetch userFills for *wallet*. None on failure."""
+    """Full fill history for *wallet*. None on failure.
+
+    R-EQUITY-DEDUP-DREAMCASH (2026-07-07): the old single ``userFills`` call
+    was capped at ~2000 most-recent fills, so the PPC reconciliation saw only
+    net 1987.38 HYPE vs 3006.28 on-chain (34% gap → permanent n/d). Now pages
+    through ``userFillsByTime`` (startTime advanced past each page's max fill
+    time, dedup by tid) up to ``_FILLS_MAX_PAGES``. Falls back to the legacy
+    single call if the first page fails. Return type unchanged (list | None).
+    """
+    global _LAST_FETCH_TRUNCATED
+    _LAST_FETCH_TRUNCATED = False
     try:
+        import time as _time
+
         from modules.hl_client import post_info_sync
 
-        data = post_info_sync(
-            {"type": "userFills", "user": wallet, "aggregateByTime": True}
-        )
+        end_ms = int(_time.time() * 1000)
+        start_ms = 0
+        out: list[dict] = []
+        seen: set[Any] = set()
+        pages_exhausted = True
+        for page in range(_FILLS_MAX_PAGES):
+            batch = post_info_sync({
+                "type": "userFillsByTime", "user": wallet,
+                "startTime": start_ms, "endTime": end_ms,
+                "aggregateByTime": True,
+            })
+            if not isinstance(batch, list):
+                if page == 0:
+                    # First page failed → legacy single-call fallback.
+                    data = post_info_sync(
+                        {"type": "userFills", "user": wallet,
+                         "aggregateByTime": True}
+                    )
+                    if isinstance(data, list):
+                        _LAST_FETCH_TRUNCATED = len(data) >= _FILLS_CAP
+                        return data
+                    return None
+                pages_exhausted = False
+                break
+            new = 0
+            max_t = start_ms
+            for f in batch:
+                if not isinstance(f, dict):
+                    continue
+                key = f.get("tid") or (
+                    f.get("oid"), f.get("time"), f.get("px"), f.get("sz"),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(f)
+                new += 1
+                try:
+                    t = int(f.get("time") or 0)
+                    if t > max_t:
+                        max_t = t
+                except (TypeError, ValueError):
+                    pass
+            if len(batch) < _FILLS_CAP or new == 0:
+                pages_exhausted = False
+                break
+            start_ms = max_t + 1
+        # All pages consumed and every one was full → history likely longer.
+        _LAST_FETCH_TRUNCATED = pages_exhausted
+        return out
     except Exception as exc:  # noqa: BLE001
         log.warning("hype_acquisition: fills read failed for %s: %s", wallet, exc)
         return None
-    return data if isinstance(data, list) else None
 
 
 def compute_hype_acquisition(
@@ -195,7 +259,10 @@ def compute_hype_acquisition(
 
     # Reliability gate: the fills must explain the live balance.
     net_qty = buy_qty - sell_qty
-    truncated = len(fills) >= _FILLS_CAP
+    # Paginated fetch → truncation now means "max pages exhausted" (set by the
+    # real _fetch_fills); the raw len-vs-cap check stays as a belt-and-braces
+    # signal for the legacy fallback path.
+    truncated = _LAST_FETCH_TRUNCATED or len(fills) >= _FILLS_CAP * _FILLS_MAX_PAGES
     if balance is None:
         return HypeAcquisition(
             known=False, ppc_usd=None, net_acq_usd=None,

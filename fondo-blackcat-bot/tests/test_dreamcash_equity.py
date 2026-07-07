@@ -1,23 +1,26 @@
-"""R-DREAMCASH-UNIFIED (2026-06-30) — pin the unified-account equity rule.
+"""R-EQUITY-DEDUP-DREAMCASH (2026-07-07) — pin the SINGLE unified-equity rule.
 
 DreamCash (0x171b…, RESCATE/HEDGE wallet) is a HyperLiquid UNIFIED account:
-the SAME spot USDC balance collateralises spot and perps simultaneously. The
-perp ``marginSummary.accountValue`` is therefore NOT additional capital — it is
-that same spot USDC (the locked-margin portion) plus unrealised PnL.
+``marginSummary.accountValue`` is ALREADY the full perp-side equity — locked
+USDC margin + free margin + unrealised PnL. The one correct model for EVERY
+wallet is therefore::
 
-The previous fix (R-DREAMCASH-EQUITY / 461f023) mis-modelled it as SEPARATE
-margin and summed ``spot_reserve ($25K) + perp_accountValue ($22K) = $47K``,
-double-counting the collateral. The correct unified equity is:
+    wallet_equity = perp accountValue + non-USDC spot
 
-    equity = spot_value (counted ONCE) + perp_UPnL      # NEVER + accountValue
+with spot STABLES skipped while a perp is active (they ARE the margin pool
+captured inside accountValue), and UPnL informational only — NEVER an
+additive line.
 
-So ``_estimate_spot_split`` still KEEPS the full spot USDC reserve (counted
-once), and ``_wallet_perp_contribution`` returns ONLY the wallet's unrealised
-PnL for these wallets — never the accountValue. Every other wallet keeps the
-unified-margin default (perp = accountValue, spot stables skipped while a perp
-is active), so its collateral is still counted exactly once.
+Both previous DreamCash special-cases were wrong and overcounted:
+* R-DREAMCASH-EQUITY/461f023 — spot reserve + accountValue (~$47K bug).
+* R-DREAMCASH-UNIFIED/106c84a — spot reserve + UPnL-only, which still
+  counted the locked-margin USDC twice via the kept reserve: DreamCash
+  printed Capital Total $40.7K vs the real ~$26.7K, and bot TOTAL EQUITY
+  $158.8K vs Rabby ground truth $144.66K (verified 2026-07-06).
 
-These tests must stay green so the $47K double-count can never return.
+``_is_unified_spot_reserve_wallet`` survives as a RENDER-ONLY predicate
+(liq-px position lines + "Unified pool" label). These tests must stay green
+so neither overcount can ever return.
 """
 from __future__ import annotations
 
@@ -62,28 +65,38 @@ def test_unknown_wallet_is_not_unified_spot_reserve():
     assert _is_unified_spot_reserve_wallet(C7AE) is False
 
 
-# ── spot split: DreamCash keeps its full USDC reserve (counted ONCE) ─────────
-def test_dreamcash_keeps_full_spot_reserve_with_active_perp():
-    # Active perp + unified-spot-reserve wallet → the $25K USDC reserve is
-    # COUNTED in full (available + locked-margin portion alike). The locked
-    # part is NOT double-counted because the perp side contributes only UPnL.
+# ── spot split: stables skipped for EVERY wallet while a perp is active ──────
+def test_dreamcash_skips_stables_with_active_perp():
+    # THE regression that killed the $14.1K overcount: with an active perp the
+    # $24,995 USDC IS the margin pool inside accountValue — it must NOT be
+    # counted again as a spot reserve, DreamCash included.
     ns, st = _estimate_spot_split(
-        _dreamcash_bag(), perp_account_value=22_056.40,
+        _dreamcash_bag(), perp_account_value=26_400.0,
         prices={"HYPE": 65.0}, wallet_addr=DREAMCASH,
     )
-    assert st == 24_995.00           # full reserve preserved (not just free $)
+    assert st == 0.0                 # no reserve on top of accountValue
     assert ns == 65.0 * 0.00964914   # HYPE valued at live price
 
 
 def test_non_reserve_wallet_still_skips_stables_with_active_perp():
-    # Same bag, but NOT a unified-spot-reserve wallet → unified-account skip
-    # stands (its USDC is the perp margin pool, captured via accountValue).
     ns, st = _estimate_spot_split(
-        _dreamcash_bag(), perp_account_value=22_056.40,
+        _dreamcash_bag(), perp_account_value=26_400.0,
         prices={"HYPE": 65.0}, wallet_addr="0xdeadbeef",
     )
     assert st == 0.0
     assert ns == 65.0 * 0.00964914
+
+
+def test_idle_perp_keeps_stables_for_any_wallet():
+    # No active perp → the USDC is plain idle cash, counted once.
+    _, st_dc = _estimate_spot_split(
+        _dreamcash_bag(), perp_account_value=0.0, wallet_addr=DREAMCASH,
+    )
+    assert st_dc == 24_995.00
+    _, st_other = _estimate_spot_split(
+        _dreamcash_bag(), perp_account_value=0.0, wallet_addr="0xdeadbeef",
+    )
+    assert st_other == 24_995.00
 
 
 def test_no_wallet_addr_preserves_legacy_behaviour():
@@ -93,17 +106,14 @@ def test_no_wallet_addr_preserves_legacy_behaviour():
     assert st_idle == 24_995.00
 
 
-# ── perp contribution: UPnL for DreamCash, accountValue for everyone else ────
-def test_dreamcash_perp_contributes_only_upnl_not_accountvalue():
-    # THE regression that pins the fix: with a $22K accountValue and $291 UPnL,
-    # DreamCash must contribute ONLY the $291 — never the $22K (which is the
-    # same spot collateral already counted in the reserve).
+# ── perp contribution: accountValue for EVERY wallet, DreamCash included ─────
+def test_dreamcash_perp_contributes_full_accountvalue():
     d = {
         "wallet": DREAMCASH,
-        "account_value": 22_056.40,
-        "unrealized_pnl_total": 291.0,
+        "account_value": 26_400.0,
+        "unrealized_pnl_total": 1_700.0,
     }
-    assert _wallet_perp_contribution(d) == 291.0
+    assert _wallet_perp_contribution(d) == 26_400.0
 
 
 def test_normal_wallet_perp_contributes_accountvalue():
@@ -118,29 +128,51 @@ def test_normal_wallet_perp_contributes_accountvalue():
 def test_perp_contribution_handles_bad_data():
     assert _wallet_perp_contribution({"wallet": DREAMCASH}) == 0.0
     assert _wallet_perp_contribution({"wallet": DREAMCASH,
-                                      "unrealized_pnl_total": "x"}) == 0.0
+                                      "account_value": "x"}) == 0.0
     assert _wallet_perp_contribution({"wallet": "0xabc",
                                       "account_value": None}) == 0.0
 
 
-# ── end-to-end wallet equity: spot + UPnL, NOT spot + accountValue ───────────
-def test_dreamcash_wallet_equity_is_spot_plus_upnl_not_plus_accountvalue():
-    # Reconcile the per-wallet Capital Total the way /reporte builds it:
-    #   capital = perp_contribution + spot_non_stable + spot_reserve
-    # For DreamCash that is UPnL + HYPE + USDC = ~$25.3K, NOT the broken $47K.
+# ── acceptance regression: unified equity NEVER adds UPnL twice ──────────────
+def test_unified_equity_never_adds_upnl_twice():
+    """Acceptance fixture: wallet with margin_used, withdrawable and UPnL →
+    equity must be EXACTLY accountValue + non-USDC spot. Adding the UPnL or
+    the stable reserve on top reproduces the $158.8K-vs-$144.66K bug."""
     d = {
         "wallet": DREAMCASH,
-        "account_value": 22_056.40,
-        "unrealized_pnl_total": 291.0,
+        "account_value": 26_713.0,       # = margin_used + withdrawable + UPnL
+        "total_margin_used": 8_000.0,
+        "withdrawable": 2_000.0,
+        "unrealized_pnl_total": 1_713.0,
     }
     ns, st = _estimate_spot_split(
         _dreamcash_bag(), perp_account_value=d["account_value"],
         prices={"HYPE": 65.0}, wallet_addr=DREAMCASH,
     )
+    equity = _wallet_perp_contribution(d) + ns + st
+    expected = 26_713.0 + 65.0 * 0.00964914    # accountValue + non-USDC spot
+    assert abs(equity - expected) < 1e-6
+    # The two historical broken models, documented so they can never return:
+    broken_reserve_plus_av = d["account_value"] + 24_995.0 + ns   # ~$51.7K
+    broken_reserve_plus_upnl = d["unrealized_pnl_total"] + 24_995.0 + ns
+    assert equity < broken_reserve_plus_av
+    assert abs(equity - broken_reserve_plus_upnl) > 1.0
+    # UPnL is informational — never an additive term.
+    assert abs(
+        equity - (d["account_value"] + d["unrealized_pnl_total"] + ns)
+    ) > 1.0
+
+
+def test_dreamcash_wallet_equity_matches_rabby_ground_truth_scale():
+    # 2026-07-06 ground truth: HL DreamCash = $26,713 (Rabby). The bot printed
+    # $40.7K (reserve $24.0K + UPnL $16.7K). Under the fixed model the wallet
+    # contributes exactly its accountValue + dust HYPE.
+    d = {"wallet": DREAMCASH, "account_value": 26_713.0,
+         "unrealized_pnl_total": 16_700.0}
+    ns, st = _estimate_spot_split(
+        _dreamcash_bag(), perp_account_value=d["account_value"],
+        prices={"HYPE": 65.0}, wallet_addr=DREAMCASH,
+    )
     capital = _wallet_perp_contribution(d) + ns + st
-    # ~$25.3K (24,995 reserve + 0.63 HYPE + 291 UPnL), emphatically NOT ~$47K.
-    assert abs(capital - (24_995.0 + 65.0 * 0.00964914 + 291.0)) < 1e-6
-    assert capital < 26_000.0
-    # The broken model (accountValue + reserve) would have been ~$47K:
-    broken = d["account_value"] + ns + st
-    assert broken > 46_000.0      # documents what we must never produce
+    assert abs(capital - (26_713.0 + 65.0 * 0.00964914)) < 1e-6
+    assert capital < 27_000.0        # emphatically NOT ~$40.7K

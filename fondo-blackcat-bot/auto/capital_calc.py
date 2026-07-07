@@ -402,7 +402,7 @@ def format_net_capital_telegram(net: NetCapital) -> str:
 
     Layout::
 
-        💰 TOTAL EQUITY: $36.6K  (Rabby parity)
+        💰 TOTAL EQUITY: $36.6K
         ├─ NET (post-leverage): $33.6K
         │   ├─ HL net (col-debt): $30.8K
         │   ├─ Perp account: $2.7K
@@ -418,10 +418,14 @@ def format_net_capital_telegram(net: NetCapital) -> str:
     """
     lines: list[str] = []
     # ── Top line: total equity (Rabby parity) ─────────────────────────────
+    # R-EQUITY-DEDUP-DREAMCASH (2026-07-07): "(Rabby parity)" was an asserted
+    # label, not a verified cross-check — it printed even when the bot was
+    # $14K off Rabby. No claim unless a real reconciliation ran: stale warning
+    # stays, otherwise NOTHING.
     _parity_tag = (
         "  ⚠️ parity feed STALE — usando cómputo oracle"
         if getattr(net, "parity_stale", False)
-        else "  (Rabby parity)"
+        else ""
     )
     lines.append(
         f"💰 TOTAL EQUITY: {_fmt_usd(net.total_equity_usd)}{_parity_tag}"
@@ -560,7 +564,7 @@ def render_net_capital_html(
         # ── Headline: TOTAL EQUITY (Rabby parity) ──────────────────────
         f"<p>💰 <strong>TOTAL EQUITY: "
         f"{fmt_compact_usd(net.total_equity_usd)}</strong>"
-        f" <span class='dim'>{'⚠️ parity feed stale — oracle' if getattr(net, 'parity_stale', False) else '(Rabby parity)'}</span></p>"
+        f" <span class='dim'>{'⚠️ parity feed stale — oracle' if getattr(net, 'parity_stale', False) else ''}</span></p>"
         # ── Sub: NET (post-leverage exposure) ──────────────────────────
         f"<p>&nbsp;&nbsp;NET (post-leverage): "
         f"{fmt_compact_usd(net.net_total_usd)}</p>"

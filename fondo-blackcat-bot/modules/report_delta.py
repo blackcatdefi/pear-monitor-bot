@@ -153,6 +153,50 @@ def load_last_kpis() -> dict[str, Any] | None:
         return None
 
 
+# ── One-time baseline-correction note (R-EQUITY-DEDUP-DREAMCASH) ─────────────
+# The first /reporte after the 2026-07-07 fix shows TOTAL EQUITY ~$14K lower
+# than the previous snapshot — that drop is a CORRECTION (prior runs double
+# counted DreamCash USDC reserve + UPnL on top of accountValue), not a loss.
+# Env-gated (set in Railway, absent in tests) + SQLite consumed-flag so the
+# note fires EXACTLY once in production and never in the test suite.
+_BASELINE_NOTE_ENV = "EQUITY_BASELINE_CORRECTION_NOTE"
+_BASELINE_NOTE_KEY = "equity_baseline_note_consumed_v1"
+
+
+def _consume_baseline_note() -> str:
+    """Return the one-time note (and mark it consumed), or ''. NEVER raises."""
+    try:
+        import os
+        if not (os.getenv(_BASELINE_NOTE_ENV) or "").strip():
+            return ""
+        conn = _conn()
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS report_delta_flags "
+            "(key TEXT PRIMARY KEY, ts TEXT NOT NULL)"
+        )
+        row = conn.execute(
+            "SELECT 1 FROM report_delta_flags WHERE key = ?",
+            (_BASELINE_NOTE_KEY,),
+        ).fetchone()
+        if row:
+            conn.close()
+            return ""
+        conn.execute(
+            "INSERT OR IGNORE INTO report_delta_flags (key, ts) VALUES (?, ?)",
+            (_BASELINE_NOTE_KEY, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+        conn.close()
+        return (
+            "ℹ️ baseline corregida: reportes previos doble-contaban DreamCash "
+            "USDC+UPnL (~$14K). La caída de TOTAL EQUITY es la corrección, "
+            "no una pérdida."
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("baseline note check failed", exc_info=True)
+        return ""
+
+
 # ── Rendering ─────────────────────────────────────────────────────────────────
 def _age_text(prev_ts: Any) -> str:
     try:
@@ -223,7 +267,9 @@ def format_report_delta_block(
             "🔀 DELTA vs REPORTE ANTERIOR" + _age_text(previous.get("ts"))
             + "\n" + ("─" * 30)
         )
-        return header + "\n" + "\n".join(rows)
+        note = _consume_baseline_note()
+        body = header + "\n" + "\n".join(rows)
+        return (body + "\n" + note) if note else body
     except Exception:  # noqa: BLE001
         log.exception("format_report_delta_block failed")
         return ""

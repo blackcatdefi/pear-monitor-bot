@@ -139,14 +139,14 @@ def test_total_equity_formula_invariant():
 
 # ─── Telegram render also lands within parity tolerance ────────────────────
 def test_telegram_render_shows_post_fix_total_equity():
-    """``/reporte`` capital block must surface the post-fix total. The
-    "Rabby parity" suffix is a UX promise — this test asserts the
-    promise is kept."""
+    """``/reporte`` capital block must surface the post-fix total.
+    R-EQUITY-DEDUP-DREAMCASH: the "(Rabby parity)" suffix was an asserted
+    label, not a verified cross-check — it must NOT print anymore."""
     net = compute_net_capital(_rabby_v2_dict())
     tg = format_net_capital_telegram(net)
     first_line = tg.splitlines()[0]
     assert "TOTAL EQUITY" in first_line
-    assert "Rabby parity" in first_line
+    assert "Rabby parity" not in first_line
     # Compact format → "$36.8K" (not "$38.8K" pre-fix).
     assert "$36" in first_line
 

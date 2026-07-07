@@ -171,42 +171,39 @@ def _build_price_map(market: dict[str, Any] | None = None) -> dict[str, float]:
     return out
 
 
-# R-DREAMCASH-EQUITY (2026-06-30): wallets whose spot USDC pool is a SEPARATE
-# balance from their perp accountValue (NOT a HyperLiquid unified-margin pool).
-# For these, spot stablecoins must NOT be skipped when a perp is active — on
-# chain the spot USDC reserve and the perp accountValue are INDEPENDENT
-# balances, so counting BOTH is correct (no double-count). DreamCash (0x171b,
-# the RESCATE/HEDGE fund wallet) runs perp shorts against a separate ~$25K spot
-# USDC reserve; the unified-account skip dropped that reserve from TOTAL EQUITY
-# and from its per-wallet Capital Total. NOTE: the PM-core wallet 0xc7ae is NOT
-# in this set and is unaffected (its perp is idle, so the skip never triggers,
-# and compute_pm_state still reads ONLY 0xc7ae — guard intact).
+# R-EQUITY-DEDUP-DREAMCASH (2026-07-07): RENDER-ONLY set. DreamCash (0x171b,
+# RESCATE/HEDGE fund wallet) is a HyperLiquid UNIFIED account whose perp
+# marginSummary.accountValue ALREADY equals the full perp-side equity (locked
+# USDC margin + free margin + UPnL). Its equity follows the same default math
+# as every other wallet: accountValue + non-USDC spot, stables skipped while a
+# perp is active. Membership here only selects presentation extras (per-leg
+# liquidationPx render, "Unified pool" account-value label). NOTE: the PM-core
+# wallet 0xc7ae is NOT in this set and compute_pm_state still reads ONLY
+# 0xc7ae — guard intact.
 _UNIFIED_SPOT_RESERVE_WALLETS = {
     "0x171b7880939d76abbc6b6b2094f54e6636f829a7",
 }
 
-# Backwards-compat alias. These wallets were briefly MIS-MODELLED as "separate
-# margin" (R-DREAMCASH-EQUITY/461f023), which summed spot reserve + perp
-# accountValue and double-counted the collateral. They are actually UNIFIED —
-# see ``_wallet_perp_contribution``.
+# Backwards-compat alias. These wallets were MIS-MODELLED twice ("separate
+# margin" R-DREAMCASH-EQUITY/461f023, then "reserve+UPnL"
+# R-DREAMCASH-UNIFIED/106c84a) — both overcounted. Since
+# R-EQUITY-DEDUP-DREAMCASH the set is RENDER-ONLY (labels + liq-px lines);
+# equity math is identical for every wallet.
 _SEPARATE_MARGIN_WALLETS = _UNIFIED_SPOT_RESERVE_WALLETS
 
 
 def _is_unified_spot_reserve_wallet(wallet_addr: str | None) -> bool:
-    """True when a wallet's spot USDC must be counted DIRECTLY as equity.
+    """True for DreamCash-style unified wallets — RENDER-ONLY predicate.
 
-    R-DREAMCASH-UNIFIED (2026-06-30): DreamCash (0x171b…29A7) is a HyperLiquid
-    UNIFIED account — the SAME spot USDC balance collateralises spot and perps
-    simultaneously. ``marginSummary.accountValue`` is therefore NOT additional
-    capital; it is that same spot USDC (the locked-margin portion) plus
-    unrealised PnL. So for these wallets we count the FULL spot reserve once
-    (``_estimate_spot_split`` keeps the stables) and the perp side contributes
-    ONLY its unrealised PnL (see ``_wallet_perp_contribution``) — never the
-    accountValue, which would double-count the collateral already in spot.
+    R-EQUITY-DEDUP-DREAMCASH (2026-07-07): this predicate no longer changes
+    ANY equity math. Every wallet now follows the single correct unified
+    model — ``equity = perp accountValue + non-USDC spot`` with stables
+    skipped while a perp is active (see ``_wallet_perp_contribution`` /
+    ``_estimate_spot_split``). Membership here only drives presentation:
+    per-position liquidationPx render (R-BOT-DEFINITIVE-2 T2) and the
+    "Unified pool (margin+UPnL incl.)" account-value label.
 
-    Every other wallet keeps the unified-margin DEFAULT, where the same
-    double-count is instead avoided by SKIPPING the spot stables while a perp
-    is active. Address match is case-insensitive.
+    Address match is case-insensitive.
     """
     if not wallet_addr:
         return False
@@ -247,28 +244,33 @@ def _position_with_liq(p: dict[str, Any]) -> str:
 def _wallet_perp_contribution(wallet_data: dict[str, Any]) -> float:
     """Perp-side contribution to fund equity for ONE wallet.
 
-    Under a HyperLiquid UNIFIED account the spot USDC IS the perp collateral,
-    so ``marginSummary.accountValue`` already lives inside the wallet's spot
-    value. For wallets whose spot reserve we count directly
-    (``_is_unified_spot_reserve_wallet`` → ``_estimate_spot_split`` keeps the
-    stables) the perp side must contribute ONLY unrealised PnL — otherwise the
-    collateral is counted twice (the $47K DreamCash double-count of
-    R-DREAMCASH-EQUITY/461f023: spot $25K + perp accountValue $22K).
+    R-EQUITY-DEDUP-DREAMCASH (2026-07-07): on a HyperLiquid UNIFIED account
+    ``marginSummary.accountValue`` is ALREADY the full perp-side equity —
+    locked USDC margin + free margin + unrealised PnL. The correct model for
+    EVERY wallet (DreamCash included) is therefore::
 
-    Every other wallet contributes its ``account_value`` as before (its spot
-    stables are skipped while the perp is active, so the collateral is still
-    counted exactly once). On bad/missing data returns 0.0; never raises.
+        wallet_equity = perp accountValue + non-USDC spot
+
+    with the spot STABLES skipped while a perp is active (they ARE the margin
+    pool captured inside accountValue — see ``_estimate_spot_split``). UPnL is
+    informational only and must NEVER be an additive line on top.
+
+    The two previous DreamCash special-cases were both wrong:
+    * R-DREAMCASH-EQUITY/461f023: spot reserve + accountValue → $47K overcount.
+    * R-DREAMCASH-UNIFIED/106c84a: spot reserve + UPnL-only → still counted the
+      locked-margin USDC twice via the kept spot reserve, printing DreamCash
+      Capital Total $40.7K vs the real unified equity ~$26.7K (bot TOTAL
+      EQUITY $158.8K vs Rabby ground truth $144.66K, 2026-07-06).
+
+    So: ALWAYS return ``account_value``. On bad/missing data returns 0.0;
+    never raises. ``_is_unified_spot_reserve_wallet`` remains for RENDER-only
+    purposes (liq-px position lines, "Unified pool" label) — it no longer
+    changes any equity math.
     """
     try:
-        account_value = float(wallet_data.get("account_value") or 0.0)
+        return float(wallet_data.get("account_value") or 0.0)
     except (TypeError, ValueError):
-        account_value = 0.0
-    if _is_unified_spot_reserve_wallet(wallet_data.get("wallet")):
-        try:
-            return float(wallet_data.get("unrealized_pnl_total") or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
-    return account_value
+        return 0.0
 
 
 def _estimate_spot_split(spot_balances: list[dict[str, Any]],
@@ -329,12 +331,13 @@ def _estimate_spot_split(spot_balances: list[dict[str, Any]],
                 _bw = 0.0
             if _bw > 0 or amt < 0:
                 continue
-            # R-DREAMCASH-UNIFIED: unified-spot-reserve wallets (DreamCash) keep
-            # their full spot USDC reserve — it is counted ONCE here while the
-            # perp side contributes ONLY UPnL (see _wallet_perp_contribution).
-            # Every other wallet skips its stables while a perp is active
-            # (unified-account double-count guard, unchanged).
-            if has_active_perp and not _is_unified_spot_reserve_wallet(wallet_addr):
+            # R-EQUITY-DEDUP-DREAMCASH (2026-07-07): while a perp is active the
+            # stables ARE the unified-account margin pool, already captured in
+            # perp accountValue — skip them for EVERY wallet, DreamCash
+            # included. The former unified-spot-reserve exception double
+            # counted DreamCash's ~$24K locked USDC on top of accountValue.
+            # ``wallet_addr`` is kept for signature compat / render callers.
+            if has_active_perp:
                 continue
             stables += amt
             continue
@@ -994,10 +997,9 @@ def format_report_header(
                 pe = float(d.get("account_value") or 0.0)
             except (TypeError, ValueError):
                 pe = 0.0
-            # R-DREAMCASH-UNIFIED: perp contributes accountValue for normal
-            # wallets, but ONLY UPnL for unified-spot-reserve wallets (DreamCash)
-            # whose full spot USDC is already counted via _estimate_spot_split —
-            # adding accountValue there double-counts the collateral.
+            # R-EQUITY-DEDUP-DREAMCASH: perp contributes accountValue for
+            # EVERY wallet (it already includes margin + UPnL); stables are
+            # skipped by _estimate_spot_split while a perp is active.
             perp_total += _wallet_perp_contribution(d)
             _sb = d.get("spot_balances") or []
             try:
@@ -1177,9 +1179,8 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                 _pe = float(_d.get("account_value") or 0.0)
             except (TypeError, ValueError):
                 _pe = 0.0
-            # R-DREAMCASH-UNIFIED: ONLY UPnL for unified-spot-reserve wallets
-            # (DreamCash); accountValue for everyone else. Mirrors the DESTACADO
-            # header so the /reporte capital banner reconciles to the same total.
+            # R-EQUITY-DEDUP-DREAMCASH: accountValue for EVERY wallet. Mirrors
+            # the DESTACADO header so the capital banner reconciles.
             _perp_total += _wallet_perp_contribution(_d)
             _wsb = _d.get("spot_balances") or []
             try:
@@ -1377,21 +1378,22 @@ def format_quick_positions(wallets: list[dict[str, Any]],
         d = w["data"]
         wallet_addr = (d.get("wallet") or "").lower()
         perp_eq = d.get("account_value") or 0.0
-        # R-DREAMCASH-UNIFIED (2026-06-30): DreamCash (0x171b) is a UNIFIED
-        # account — its spot USDC IS the perp collateral. Count the full spot
-        # reserve once (sep_stables) and let the perp side contribute ONLY UPnL
-        # to Capital Total; adding accountValue too double-counts the collateral
-        # (the old $47K bug). spot_usd stays NON-STABLE only for the breakdown.
-        # Every other wallet is byte-identical (perp = accountValue, stables
-        # skipped while a perp is active).
+        # R-EQUITY-DEDUP-DREAMCASH (2026-07-07): ONE equity model for every
+        # wallet — Capital Total = perp accountValue + non-USDC spot (+ idle
+        # stables when no perp is active) + HL collateral. UPnL is
+        # informational only; it lives INSIDE accountValue and is never an
+        # additive line. sep_stables only ever > 0 when the perp is idle.
         _unified_reserve = _is_unified_spot_reserve_wallet(wallet_addr)
         _ns_pw, _st_pw = _estimate_spot_split(
             d.get("spot_balances") or [], perp_eq, _price_map_pw,
             wallet_addr=wallet_addr,
         )
         spot_usd = _ns_pw
+        # Idle-perp stables render per-wallet only for DreamCash (its reserve
+        # when flat); other wallets keep the legacy banner-only treatment so
+        # their Capital Total stays byte-identical.
         sep_stables = _st_pw if _unified_reserve else 0.0
-        _perp_contrib = _wallet_perp_contribution(d) if _unified_reserve else perp_eq
+        _perp_contrib = _wallet_perp_contribution(d)
         hl_data = hl_by_wallet.get(wallet_addr, {})
         hl_coll = hl_data.get("collateral_usd", 0.0)
         hl_debt = hl_data.get("debt_usd", 0.0)
@@ -1494,21 +1496,23 @@ def format_quick_positions(wallets: list[dict[str, Any]],
         # USDH/USDT0/USDT/DAI used to inflate this line — they're now
         # tracked as cash equivalent (see banner) and dropped from exposure.
         parts: list[str] = []
-        # R-DREAMCASH-UNIFIED: for a unified-spot-reserve wallet the
-        # accountValue is the SAME collateral as the spot reserve, NOT extra
-        # capital — so we DON'T render it as an additive "Account Value" line
-        # (it would make Capital Total look like reserve + accountValue). The
-        # perp side shows up only via the UPnL line below. Capital Total then
-        # reconciles as: Spot USDC reserve + Spot non-stable + UPnL.
-        if perp_eq > 0.01 and not d.get("_unified_spot_reserve"):
-            parts.append(f"Account Value {_fmt_usd(perp_eq)}")
+        # R-EQUITY-DEDUP-DREAMCASH: Account Value renders for EVERY wallet
+        # with an active perp — it IS the perp-side equity (margin + UPnL).
+        # DreamCash gets the explicit unified label so nobody re-adds UPnL or
+        # a "reserve" on top when eyeballing the breakdown.
+        if perp_eq > 0.01:
+            if d.get("_unified_spot_reserve"):
+                parts.append(
+                    f"Unified pool (margin+UPnL incl.) {_fmt_usd(perp_eq)}"
+                )
+            else:
+                parts.append(f"Account Value {_fmt_usd(perp_eq)}")
         if spot_usd > 0.01:
             parts.append(f"Spot non-stable {_fmt_usd(spot_usd)}")
-        # R-DREAMCASH-UNIFIED: unified-account spot USDC reserve (DreamCash),
-        # shown explicitly so Capital Total reconciles (= reserve + non-stable
-        # + UPnL). Only ever > 0 for unified-spot-reserve wallets.
+        # Idle-perp DreamCash reserve (only reachable when the perp is flat —
+        # with an active perp the stables live inside accountValue).
         if sep_stables > 0.01:
-            parts.append(f"Spot USDC reserve {_fmt_usd(sep_stables)}")
+            parts.append(f"Spot USDC idle {_fmt_usd(sep_stables)}")
         if hl_coll > 0.01:
             parts.append(f"HL Coll {_fmt_usd(hl_coll)}")
         if hl_debt > 0.01:

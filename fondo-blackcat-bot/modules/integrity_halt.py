@@ -53,7 +53,18 @@ _DEFAULT_SHIELDED = ("ZEC", "XMR", "DASH", "SCRT", "ROSE", "ARRR", "FIRO", "BEAM
 # exploit report still HALTs.
 _PRICE_ACTION_RE = re.compile(
     r"(bearish|bullish|trend|support|resistance|breakout|struggling|"
-    r"price action|chart|level|holding|yearly low)",
+    r"price action|chart|level|holding|yearly low|"
+    # R-EQUITY-DEDUP-DREAMCASH: broader trader vocabulary so chart commentary
+    # (ZordXBT-style "slow rug", "looks like it wants to bleed") never HALTs.
+    # Real-event patterns below ALWAYS win, so this only widens the
+    # informational-note bucket, never suppresses a genuine exploit report.
+    r"lower high|higher low|\bbleed(ing)?\b|\bdump(ing|ed)?\b|\bnuk(e|ing)\b|"
+    r"capitulat|downtrend|uptrend|\brange\b|\branging\b|consolidat|retrace|"
+    r"pullback|fibonacci|moving average|\bma\d{1,3}\b|\bema\b|\brsi\b|"
+    r"\bmacd\b|candle|\bwick\b|weekly close|daily close|"
+    r"looks (weak|heavy|dead)|no bid|down only|down bad|dead cat|\bbounce\b|"
+    r"local (top|bottom)|double (top|bottom)|invalidat|price target|"
+    r"stop loss|long[- ]term hold|bag ?holder)",
     re.IGNORECASE,
 )
 _REAL_EVENT_RE = re.compile(

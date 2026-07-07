@@ -359,6 +359,21 @@ def reconcile_persisted_flags(
                 )
                 resolved = res.resolved_asset
 
+                # R-EQUITY-DEDUP-DREAMCASH (2026-07-07): persisted flags whose
+                # stored excerpt reads as PRICE-ACTION commentary (trader chart
+                # talk — "slow rug", "struggling at support") are false
+                # positives and auto-dismiss BEFORE the held-adverse guard.
+                # Real-event patterns (exploit/hack/drained/mint/…) always win
+                # inside is_price_action_context, so genuine events keep the
+                # guard. Without this, a stale PA flag on a held-negative
+                # asset (the BTC ZordXBT tweet) was pinned alive forever.
+                if excerpt and ih.is_price_action_context(excerpt):
+                    if _dismiss(conn, asset, "price_action_commentary", res):
+                        dismissed.append((asset, "price_action_commentary"))
+                    else:
+                        _touch(conn, asset, res)
+                    continue
+
                 # GUARD: a genuine flag whose excerpt still maps to a HELD asset
                 # with adverse PnL must NEVER auto-clear (even if text drifted).
                 if resolved == asset and asset in held_neg:

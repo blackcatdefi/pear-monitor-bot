@@ -105,7 +105,9 @@ def test_telegram_render_leads_with_total_equity():
     tg = format_net_capital_telegram(net)
     first_line = tg.splitlines()[0]
     assert "TOTAL EQUITY" in first_line
-    assert "Rabby parity" in first_line
+    # R-EQUITY-DEDUP-DREAMCASH: "(Rabby parity)" was an asserted label, not a
+    # verified cross-check — it must NOT print unless a reconciliation ran.
+    assert "Rabby parity" not in first_line
     assert "$36" in first_line  # $36.6K compact format
     # NET sub-line still present
     assert "NET (post-leverage)" in tg
