@@ -29,13 +29,13 @@ from modules import basket_killer  # noqa: E402
 
 # ─── 1. Kill-trigger registry: UETH gone, PM aave-HF survives ────────────────
 
+# R-SIGNAL-DIET (2026-07-20): registry reduced to EXACTLY these 3.
+# btc_dca_63_65 (price-zone DCA disguised as kill) and btc_near_dreamcash_liq
+# (wallet 0x171b verified empty on-chain) were DELETED.
 SURVIVING_IDS = {
     "btc_above_82k_4h",
-    "btc_dca_63_65",
     "pm_hf_below_110",
     "basket_drawdown_2k",
-    # R-BOT-DEFINITIVE-2 T2 (2026-07-02): DreamCash BTC-long liq proximity.
-    "btc_near_dreamcash_liq",
 }
 
 
@@ -59,9 +59,9 @@ def _registry_ids() -> set[str]:
 
 
 def test_ueth_borrow_apy_trigger_removed_from_registry():
-    assert len(basket_killer._TRIGGERS) == 5, (
-        "Expected exactly 5 kill triggers (4 post-UETH-removal + "
-        "btc_near_dreamcash_liq from R-BOT-DEFINITIVE-2 T2)"
+    assert len(basket_killer._TRIGGERS) == 3, (
+        "Expected exactly 3 kill triggers post R-SIGNAL-DIET "
+        "(btc_above_82k_4h / pm_hf_below_110 / basket_drawdown_2k)"
     )
     names = [fn.__name__ for fn in basket_killer._TRIGGERS]
     assert "_evaluate_ueth_borrow_apy" not in names
@@ -118,7 +118,6 @@ def test_kill_status_only_surviving_triggers_no_ueth():
 
     results = [
         TriggerResult("btc_above_82k_4h", "BTC > $82K sustained 4h", False, "far", "BTC $70k", "alert_only"),
-        TriggerResult("btc_dca_63_65", "BTC en zona DCA $63-65K", False, "far", "BTC $70k", "alert_only"),
         TriggerResult("pm_hf_below_110", "PM aave-HF < 1.10 (colateral HYPE)", False, "far", "PM aave-HF n/d", "suggest_close"),
         TriggerResult("basket_drawdown_2k", "Basket UPnL < -$2,000", False, "far", "Basket UPnL +$0", "alert_only"),
     ]

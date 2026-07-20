@@ -608,6 +608,40 @@ async def compute_screen(advance_state: bool = False) -> ScreenResult:
     )
 
 
+# ─── R-SIGNAL-DIET cost guard: 10-min in-process result cache ────────────────
+# Reutiliza el último ScreenResult (advance_state=False, pure read) si el run
+# completo ocurrió hace <10 min — evita duplicar el barrido de velas HL cuando
+# el job de GO alerts y un /unlockcheck manual caen cerca en el tiempo.
+_CACHE_TTL_SEC = 600
+_screen_cache: dict[str, Any] = {"ts": 0.0, "result": None}
+_screen_cache_lock: Optional[asyncio.Lock] = None
+
+
+def _get_cache_lock() -> asyncio.Lock:
+    global _screen_cache_lock
+    if _screen_cache_lock is None:
+        _screen_cache_lock = asyncio.Lock()
+    return _screen_cache_lock
+
+
+async def compute_screen_cached(max_age_sec: int = _CACHE_TTL_SEC) -> ScreenResult:
+    """Pure-read ``compute_screen(advance_state=False)`` behind a TTL cache.
+
+    NEVER advances z-persistence state (that stays exclusive to the
+    ``advance_universe_state`` scheduler hook). Concurrent callers coalesce on a
+    lock so at most ONE full universe sweep runs at a time."""
+    import time as _time
+    async with _get_cache_lock():
+        now = _time.monotonic()
+        cached = _screen_cache.get("result")
+        if cached is not None and (now - float(_screen_cache["ts"])) < max_age_sec:
+            return cached
+        res = await compute_screen(advance_state=False)
+        _screen_cache["result"] = res
+        _screen_cache["ts"] = _time.monotonic()
+        return res
+
+
 async def advance_universe_state() -> int:
     """SILENT scheduler hook: advance z-persistence over the full universe so the
     screen can reach 5/5 over time. Emits NOTHING (R-SILENT safe). Returns the

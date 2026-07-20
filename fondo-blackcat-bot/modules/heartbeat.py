@@ -1,28 +1,20 @@
-"""Round 18.3.4 — Heartbeat every 6h.
+"""R-SIGNAL-DIET (2026-07-20) — heartbeat es ON-DEMAND, nunca push.
 
-Sends a minimal "I'm alive" snapshot to Telegram so BCD has positive
-confirmation the bot is up even if no alerts fire. Includes uptime, capital
-total, HF flywheel, and basket status.
-
-Kill switch: ``HEARTBEAT_ENABLED=false``.
-Cadence: every ``HEARTBEAT_INTERVAL_HOURS`` (default 6).
+Antes (Round 18.3.4) este módulo empujaba un "I'm alive" cada 6h a Telegram.
+Ese push scheduler fue ELIMINADO: era ruido que ahogaba las alertas reales.
+``build_heartbeat()`` queda como builder del snapshot (uptime, capital, HF,
+BTC) y lo consume el comando on-demand ``/health`` en bot.py. NO existe más
+``send_heartbeat`` ni ningún job programado que use este módulo.
 """
 from __future__ import annotations
 
 import logging
-import os
 import time
 from datetime import datetime, timezone
-
-from config import TELEGRAM_CHAT_ID
 
 log = logging.getLogger(__name__)
 
 _PROCESS_START = time.monotonic()
-
-
-def _is_enabled() -> bool:
-    return os.getenv("HEARTBEAT_ENABLED", "true").strip().lower() != "false"
 
 
 def _uptime_str() -> str:
@@ -40,7 +32,7 @@ def _uptime_str() -> str:
 async def build_heartbeat() -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines = [
-        "💓 HEARTBEAT — bot alive",
+        "💓 /health — bot alive (on-demand)",
         f"Hora: {now}",
         f"Uptime proceso: {_uptime_str()}",
     ]
@@ -65,14 +57,4 @@ async def build_heartbeat() -> str:
     return "\n".join(lines)
 
 
-async def send_heartbeat(bot=None) -> int:
-    if not _is_enabled() or not TELEGRAM_CHAT_ID or bot is None:
-        return 0
-    try:
-        text = await build_heartbeat()
-        from utils.telegram import send_bot_message
-        await send_bot_message(bot, TELEGRAM_CHAT_ID, text)
-        return 1
-    except Exception:  # noqa: BLE001
-        log.exception("heartbeat: send failed")
-        return 0
+# R-SIGNAL-DIET: ``send_heartbeat`` ELIMINADO — este módulo no empuja nada.

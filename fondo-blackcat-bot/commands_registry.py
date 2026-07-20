@@ -38,7 +38,7 @@ COMMANDS: List[BotCommand] = [
     # ─── TRADING ───
     BotCommand("hf", "Portfolio Margin aave-HF + liq price (colateral HYPE)", "trading", "cmd_hf"),
     BotCommand("kill", "Kill scenarios per position", "trading", "cmd_kill"),
-    BotCommand("kill_status", "Status of the 4 kill triggers (BTC×2 / PM aave-HF / basket DD)", "trading", "cmd_kill_status"),
+    BotCommand("kill_status", "Status of the 3 kill triggers (BTC >82k / PM aave-HF / basket DD)", "trading", "cmd_kill_status"),
     # R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): /ciclo y /ciclo_update ELIMINADOS.
     BotCommand("dca", "Tiered DCA plan BTC/ETH/HYPE + current zone", "trading", "cmd_dca"),
     BotCommand("pnl", "Realized PnL 7D / 30D / YTD", "trading", "cmd_pnl"),
@@ -143,6 +143,8 @@ COMMANDS: List[BotCommand] = [
     BotCommand("version", "Commit SHA + uptime + provider status", "debug", "cmd_version"),
     BotCommand("errors", "Last 20 captured errors", "debug", "cmd_errors"),
     BotCommand("metrics", "Bot health dashboard (24h)", "debug", "cmd_metrics"),
+    # R-SIGNAL-DIET — reemplaza el heartbeat push 6h (mismo snapshot, on-demand)
+    BotCommand("health", "Bot alive on-demand: uptime + capital + BTC (ex-heartbeat)", "debug", "cmd_health"),
 ]
 
 

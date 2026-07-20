@@ -137,82 +137,25 @@ def test_pm_hf_alert_copy_cites_liq_real(monkeypatch):
     assert "$52.86" in res.detail
 
 
-# ─── T2 — threshold math + trigger #5 ────────────────────────────────────────
+# ─── T2 — R-SIGNAL-DIET (2026-07-20): trigger #5 ELIMINADO ───────────────────
+# DreamCash wallet 0x171b verificada VACÍA on-chain (accountValue=0, sin
+# posiciones) → btc_near_dreamcash_liq + dreamcash_liq_proximity borrados.
+# El registry queda en EXACTAMENTE 3 triggers.
 
-def test_dreamcash_proximity_math():
-    fired, dist = basket_killer.dreamcash_liq_proximity(50_000, 48_000)
-    assert fired is True  # 50,000 <= 48,000 × 1.06 = 50,880
-    assert dist == pytest.approx((50_000 - 48_000) / 48_000 * 100, rel=1e-9)
-    fired, _ = basket_killer.dreamcash_liq_proximity(60_000, 48_000)
-    assert fired is False
-    # Exact boundary fires.
-    fired, _ = basket_killer.dreamcash_liq_proximity(48_000 * 1.06, 48_000)
-    assert fired is True
-    # Garbage inputs never raise, never fire.
-    fired, dist = basket_killer.dreamcash_liq_proximity(None, "x")
-    assert fired is False and dist == 0.0
+def test_dreamcash_trigger_removed():
+    assert not hasattr(basket_killer, "_evaluate_btc_near_dreamcash_liq")
+    assert not hasattr(basket_killer, "dreamcash_liq_proximity")
+    assert not hasattr(basket_killer, "_DREAMCASH_ADDR")
 
 
-def _dc_wallets(liq_px):
-    return [
-        {"status": "ok", "data": {
-            "wallet": "0xc7ae0000000000000000000000000000000000aa",
-            "positions": [{"coin": "BTC", "side": "LONG", "liq_px": 99.0}],
-        }},
-        {"status": "ok", "data": {
-            "wallet": basket_killer._DREAMCASH_ADDR.upper(),  # case-insensitive
-            "positions": [
-                {"coin": "ETH", "side": "SHORT", "liq_px": 5000.0},
-                {"coin": "BTC", "side": "LONG", "liq_px": liq_px},
-            ],
-        }},
-    ]
-
-
-def test_trigger5_fires_inside_cushion(monkeypatch):
-    async def _fake_wallets():
-        return _dc_wallets(48_000.0)
-
-    async def _fake_px(coin):
-        return 50_000.0
-
-    monkeypatch.setattr("modules.portfolio.fetch_all_wallets", _fake_wallets, raising=False)
-    monkeypatch.setattr("modules.portfolio.get_spot_price", _fake_px, raising=False)
-    res = asyncio.run(basket_killer._evaluate_btc_near_dreamcash_liq())
-    assert res.trigger_id == "btc_near_dreamcash_liq"
-    assert res.fired is True
-    assert res.action == "alert_only"  # MANUAL REVIEW only — never auto-close
-    assert "MANUAL REVIEW" in res.detail
-    assert "48,000" in res.detail and "50,000" in res.detail
-
-
-def test_trigger5_silent_outside_cushion(monkeypatch):
-    async def _fake_wallets():
-        return _dc_wallets(48_000.0)
-
-    async def _fake_px(coin):
-        return 60_000.0
-
-    monkeypatch.setattr("modules.portfolio.fetch_all_wallets", _fake_wallets, raising=False)
-    monkeypatch.setattr("modules.portfolio.get_spot_price", _fake_px, raising=False)
-    res = asyncio.run(basket_killer._evaluate_btc_near_dreamcash_liq())
-    assert res.fired is False
-
-
-def test_trigger5_nd_without_data(monkeypatch):
-    async def _fake_wallets():
-        return []
-
-    monkeypatch.setattr("modules.portfolio.fetch_all_wallets", _fake_wallets, raising=False)
-    res = asyncio.run(basket_killer._evaluate_btc_near_dreamcash_liq())
-    assert res.fired is False
-    assert "n/d" in res.detail
-
-
-def test_registry_has_five_triggers():
-    assert len(basket_killer._TRIGGERS) == 5
-    names = [fn.__name__ for fn in basket_killer._TRIGGERS]
-    assert "_evaluate_btc_near_dreamcash_liq" in names
+def test_registry_has_three_triggers():
+    assert len(basket_killer._TRIGGERS) == 3
+    names = {fn.__name__ for fn in basket_killer._TRIGGERS}
+    assert names == {
+        "_evaluate_btc_above_82k",
+        "_evaluate_pm_hf",
+        "_evaluate_basket_drawdown",
+    }
 
 
 # ─── T2 — DreamCash position render ──────────────────────────────────────────

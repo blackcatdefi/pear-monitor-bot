@@ -196,11 +196,9 @@ try:
     from modules.pnl_extended import build_period_summary as r18_pnl_period
 except Exception:  # noqa: BLE001
     r18_pnl_period = None
-# Round 18 add-on: heartbeat + scheduler self-healing + perf attribution + aipear auto-prompt
-try:
-    from modules.heartbeat import send_heartbeat as r18_send_heartbeat
-except Exception:  # noqa: BLE001
-    r18_send_heartbeat = None
+# R-SIGNAL-DIET (2026-07-20): heartbeat push cada 6h ELIMINADO del scheduler.
+# La misma info (uptime, capital, BTC) ahora es on-demand vía /health.
+# modules.heartbeat.build_heartbeat queda como builder del texto para /health.
 try:
     from modules.scheduler_self_healing import (
         format_health as r18_sched_health_format,
@@ -977,6 +975,18 @@ async def cmd_errors(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def cmd_metrics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Round 16: 24h health dashboard (errors, llm cost, x api, db size)."""
     text = format_metrics()
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-SIGNAL-DIET: on-demand alive snapshot (reemplaza el heartbeat push 6h).
+
+    Misma info que el viejo heartbeat (uptime, capital, HF, BTC) pero SOLO
+    cuando BCD la pide. Cero pushes programados."""
+    from modules.heartbeat import build_heartbeat
+    text = await build_heartbeat()
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
@@ -2806,13 +2816,24 @@ async def _reconcile_job(application: Application) -> None:
 
 
 async def _kill_triggers_job(application: Application) -> None:
-    """R17: every 5 min — evaluate 5 kill triggers, edge-trigger Telegram alerts."""
+    """R17: every 5 min — evaluate the 3 kill triggers, edge-trigger Telegram alerts."""
     if os.getenv("KILL_TRIGGERS_ENABLED", "true").strip().lower() == "false":
         return
     try:
         await kill_scheduled_check(application.bot)
     except Exception:  # noqa: BLE001
         log.exception("kill triggers job failed")
+
+
+async def _go_alerts_job(application: Application) -> None:
+    """R-SIGNAL-DIET: hourly 5/5 GO entry alerts — the ONE proactive trading
+    signal the bot pushes. Diff-based (new entrants only) + 6h cooldown +
+    grouping >5 + 3-strike failure gate; all logic in modules.go_alerts."""
+    try:
+        from modules.go_alerts import run_go_alert_cycle
+        await run_go_alert_cycle(application.bot)
+    except Exception:  # noqa: BLE001
+        log.exception("go_alerts job failed (non-fatal)")
 
 
 # R-BOT-DEFINITIVE-KILLCLEAN (2026-06-15): _rates_monitor_job ELIMINADO.
@@ -2873,24 +2894,21 @@ async def _pat_expiry_job(application: Application) -> None:
 
 
 async def _selftest_cron_job(application: Application) -> None:
-    """R-PERFECT Fase 4: 4x/day /selftest + flap-alert evaluation."""
+    """R-PERFECT Fase 4: 4x/day /selftest + flap evaluation.
+
+    R-SIGNAL-DIET (2026-07-20): source flap/recovery reports son ruido de
+    proceso interno — van SOLO a logs (Railway), NUNCA a Telegram. El estado
+    por fuente se sigue persistiendo (source_state.db) y es visible on-demand
+    vía /intel_sources y el health server."""
     if os.getenv("SELFTEST_CRON_ENABLED", "true").strip().lower() == "false":
         return
     try:
         from modules.intel_selftest import run_selftest
-        from modules.source_alerts import evaluate_matrix, format_alerts
+        from modules.source_alerts import evaluate_matrix
         matrix = await run_selftest()
         alerts = evaluate_matrix(matrix)
-        if alerts:
-            text = format_alerts(alerts)
-            chat_id = os.getenv("ALERT_CHAT_ID") or os.getenv("AUTHORIZED_USER_ID")
-            if chat_id and text:
-                try:
-                    await application.bot.send_message(
-                        chat_id=int(chat_id), text=text, parse_mode="Markdown"
-                    )
-                except Exception:  # noqa: BLE001
-                    log.exception("selftest cron alert send failed")
+        for a in alerts:
+            log.warning("source flap (log-only): %s", a)
     except Exception:  # noqa: BLE001
         log.exception("selftest cron job failed")
 
@@ -3046,16 +3064,8 @@ async def _portfolio_snapshot_refresh_job() -> None:
         log.exception("portfolio_snapshot proactive refresh job failed")
 
 
-async def _heartbeat_job(application: Application) -> None:
-    """R18 add-on: every HEARTBEAT_INTERVAL_HOURS — minimal alive snapshot."""
-    if r18_send_heartbeat is None:
-        return
-    if os.getenv("HEARTBEAT_ENABLED", "true").strip().lower() == "false":
-        return
-    try:
-        await r18_send_heartbeat(application.bot)
-    except Exception:  # noqa: BLE001
-        log.exception("heartbeat job failed")
+# R-SIGNAL-DIET (2026-07-20): _heartbeat_job ELIMINADO — cero pushes de
+# heartbeat. Ver cmd_health (on-demand).
 
 
 def _risk_validator_state_path() -> str:
@@ -3663,26 +3673,28 @@ async def post_init(application: Application) -> None:
             )
             log.info("R18 pre_event_brief ENABLED (every 5min)")
 
-        # R18 add-on: heartbeat every N hours
-        if r18_send_heartbeat is not None and os.getenv(
-            "HEARTBEAT_ENABLED", "true"
-        ).strip().lower() != "false":
+        # R-SIGNAL-DIET (2026-07-20): heartbeat scheduled push ELIMINADO.
+        # /health entrega la misma info on-demand. Cero pushes periódicos.
+
+        # R-SIGNAL-DIET: 5/5 GO entry alerts — cada GO_ALERTS_INTERVAL_MIN
+        # (default 60) corre el engine R-SCREEN (mismo code path que
+        # /unlockcheck, pure read) y pushea SOLO nuevos entrantes 5/5
+        # (cooldown 6h, agrupado, silencio en fallas <3 consecutivas).
+        if os.getenv("GO_ALERTS_ENABLED", "true").strip().lower() != "false":
             try:
-                hb_hours = float(os.getenv("HEARTBEAT_INTERVAL_HOURS", "6"))
+                go_min = int(os.getenv("GO_ALERTS_INTERVAL_MIN", "60"))
             except ValueError:
-                hb_hours = 6.0
-            # R-RISK-VALIDATOR-HOTFIX: async coroutine registered natively
-            # (same dead create_task-in-executor anti-pattern as risk validator).
+                go_min = 60
             scheduler.add_job(
-                _heartbeat_job,
+                _go_alerts_job,
                 "interval",
-                hours=hb_hours,
+                minutes=max(10, go_min),
                 args=[application],
-                id="heartbeat",
+                id="go_alerts",
                 max_instances=1,
                 coalesce=True,
             )
-            log.info("R18 add-on heartbeat ENABLED (every %.1fh)", hb_hours)
+            log.info("R-SIGNAL-DIET go_alerts ENABLED (every %dmin)", max(10, go_min))
 
         # R18 audit: risk_config_validator proactive scheduler.
         # R-RISK-VALIDATOR-HOTFIX (2026-06-10): the old registration was
@@ -3846,6 +3858,8 @@ HANDLER_MAP = {
     "pat_status": cmd_pat_status,
     "errors": cmd_errors,
     "metrics": cmd_metrics,
+    # R-SIGNAL-DIET — on-demand alive snapshot (ex-heartbeat push)
+    "health": cmd_health,
     "test_alerts": cmd_test_alerts,
     "reload_commands": cmd_reload_commands,
     # Round 17
