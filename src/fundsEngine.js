@@ -30,8 +30,11 @@
  *                        abs(negative balances): stables at $1, non-stables
  *                        at live mids.
  *
- * LTV source: HL's public info API does not expose a per-asset max-borrow
- * LTV list (verified against spotMeta / spotMetaAndAssetCtxs — token entries
+ * LTV source (R-PUBLIC-FUNDS-FIX1): spotClearinghouseState now returns a
+ * per-balance `ltv` field (e.g. "0.5" on HYPE) — that live value is used
+ * when present. Resolution order: PM_LTV_MAP env override (token-index or
+ * name keys) → API per-balance ltv → DEFAULT_LTV → null ($0 conservative).
+ * Historical note: spotMeta / spotMetaAndAssetCtxs (token entries
  * carry szDecimals/weiDecimals/index, no risk params). We therefore ship a
  * MAINTAINED CONSTANT MAP (DEFAULT_LTV, HYPE=0.50) overridable at runtime
  * via env PM_LTV_MAP='{"HYPE":0.5,"UBTC":0.7}'. Assets with no known LTV
@@ -57,20 +60,23 @@ const LIQ_THRESHOLD_HYPE = parseFloat(
   process.env.PM_LIQ_THRESHOLD_HYPE || '0.7125'
 );
 
+// Returns { env, defaults }. `env` keys may be token NAMES ("HYPE") or
+// numeric token INDICES ("150") — both forms are honored downstream, and
+// env entries override even the API-provided per-balance ltv.
 function _ltvMap() {
-  let map = { ...DEFAULT_LTV };
+  const env = {};
   try {
     if (process.env.PM_LTV_MAP) {
       const extra = JSON.parse(process.env.PM_LTV_MAP);
       for (const [k, v] of Object.entries(extra)) {
         const n = parseFloat(v);
-        if (Number.isFinite(n) && n >= 0 && n <= 1) map[k.toUpperCase()] = n;
+        if (Number.isFinite(n) && n >= 0 && n <= 1) env[k.toUpperCase()] = n;
       }
     }
   } catch (_) {
-    /* malformed env → defaults */
+    /* malformed env → defaults only */
   }
-  return map;
+  return { env, defaults: { ...DEFAULT_LTV } };
 }
 
 function _stableSet() {
@@ -112,18 +118,44 @@ async function fetchSpotPrices() {
       return _priceCache.map; // stale better than nothing
     }
     const tokens = meta.tokens || [];
-    const map = {};
-    for (let i = 0; i < meta.universe.length; i++) {
-      const pair = meta.universe[i];
-      const ctx = ctxs[i];
-      if (!pair || !ctx) continue;
+    // token entries carry their own canonical `index`; the array position is
+    // NOT guaranteed to equal it — build an index→token lookup.
+    const tokByIdx = {};
+    for (const t of tokens) if (t && t.index != null) tokByIdx[t.index] = t;
+    // CRITICAL (R-PUBLIC-FUNDS-FIX1): ctxs is NOT positionally aligned with
+    // meta.universe (universe[105] may be pair "@107" while ctxs[105] is
+    // "@105"). Join by ctx.coin === pair.name or HYPE prices as $0.144.
+    const ctxByName = {};
+    for (const c of ctxs) if (c && c.coin != null) ctxByName[c.coin] = c;
+    const stableNames = _stableSet();
+    const map = {};      // name (UPPER) → usd
+    const quality = {};  // name → 2 (USDC-quoted) | 1 (other-stable-quoted)
+    for (const pair of meta.universe) {
+      if (!pair || !Array.isArray(pair.tokens)) continue;
+      const ctx = ctxByName[pair.name];
+      if (!ctx) continue;
       const mid = parseFloat(ctx.midPx || ctx.markPx || 0);
       if (!Number.isFinite(mid) || mid <= 0) continue;
-      // pair.tokens = [baseTokenIndex, quoteTokenIndex]; quote is USDC(0)
-      const baseIdx = Array.isArray(pair.tokens) ? pair.tokens[0] : null;
-      const tok = baseIdx != null ? tokens[baseIdx] : null;
-      const name = tok && tok.name ? String(tok.name).toUpperCase() : null;
-      if (name && !(name in map)) map[name] = mid;
+      const [baseIdx, quoteIdx] = pair.tokens;
+      const base = tokByIdx[baseIdx];
+      const quote = tokByIdx[quoteIdx];
+      if (!base || !base.name) continue;
+      // Only USD-denominated quotes are usable as a USD price.
+      let q = 0;
+      if (quoteIdx === 0) q = 2; // USDC — canonical
+      else if (quote && stableNames.has(String(quote.name).toUpperCase())) q = 1;
+      if (q === 0) continue;
+      const name = String(base.name).toUpperCase();
+      if (q > (quality[name] || 0)) {
+        map[name] = mid;
+        quality[name] = q;
+      }
+      // Token-index key — unambiguous even if ticker names ever collide.
+      const idxKey = `IDX:${baseIdx}`;
+      if (q > (quality[idxKey] || 0)) {
+        map[idxKey] = mid;
+        quality[idxKey] = q;
+      }
     }
     // Stables are $1 by definition for debt/collateral valuation.
     for (const s of DEFAULT_STABLES) map[s] = map[s] || 1;
@@ -147,8 +179,14 @@ async function fetchAccountState(wallet) {
     if (spot && Array.isArray(spot.balances)) {
       spotBalances = spot.balances.map((b) => ({
         coin: b.coin,
+        token: b.token != null ? Number(b.token) : null, // canonical token index
         total: _num(b.total),
         hold: _num(b.hold),
+        // HL now returns the max-borrow LTV per balance (e.g. "0.5" on HYPE).
+        // Carry it through — it's the authoritative live value.
+        api_ltv: b.ltv != null && Number.isFinite(parseFloat(b.ltv))
+          ? parseFloat(b.ltv)
+          : null,
       }));
     }
   } catch (e) {
@@ -191,11 +229,32 @@ function computeUniversalDeployable({ spotBalances, perp, prices }) {
 
   const stables = _stableSet();
   const ltvMap = _ltvMap();
-  const priceOf = (coin) => {
-    const c = String(coin || '').toUpperCase();
+  // Accepts a balance object ({coin, token}) or a plain coin string.
+  // Token-index lookup ("IDX:<n>") is preferred — ticker names are not
+  // unique on HL spot, indices are.
+  const priceOf = (bal) => {
+    const isObj = bal && typeof bal === 'object';
+    const c = String((isObj ? bal.coin : bal) || '').toUpperCase();
     if (stables.has(c)) return 1;
-    const p = prices && Number.isFinite(prices[c]) ? prices[c] : null;
+    if (!prices) return null;
+    if (isObj && bal.token != null) {
+      const byIdx = prices[`IDX:${bal.token}`];
+      if (Number.isFinite(byIdx) && byIdx > 0) return byIdx;
+    }
+    const p = Number.isFinite(prices[c]) ? prices[c] : null;
     return p && p > 0 ? p : null;
+  };
+  // LTV resolution: PM_LTV_MAP env override (by token index, then name) →
+  // API-provided per-balance ltv → DEFAULT_LTV → null (unknown, $0).
+  const ltvOf = (bal) => {
+    const coin = String(bal.coin || '').toUpperCase();
+    if (bal.token != null && String(bal.token) in ltvMap.env) {
+      return ltvMap.env[String(bal.token)];
+    }
+    if (coin in ltvMap.env) return ltvMap.env[coin];
+    if (bal.api_ltv != null) return bal.api_ltv;
+    if (coin in ltvMap.defaults) return ltvMap.defaults[coin];
+    return null;
   };
 
   // Leg 1 — spot free stables (MAX rule, negatives never counted).
@@ -227,7 +286,7 @@ function computeUniversalDeployable({ spotBalances, perp, prices }) {
     let debt = 0;
     let debtUnpriced = false;
     for (const b of negatives) {
-      const px = priceOf(b.coin);
+      const px = priceOf(b);
       if (px == null) { debtUnpriced = true; continue; }
       debt += Math.abs(_num(b.total)) * px;
     }
@@ -236,10 +295,10 @@ function computeUniversalDeployable({ spotBalances, perp, prices }) {
     let unknownLtv = [];
     for (const b of nonStableCollateral) {
       const coin = String(b.coin).toUpperCase();
-      const px = priceOf(coin);
+      const px = priceOf(b);
       const tokens = _num(b.total);
       const value = px != null ? tokens * px : null;
-      const ltv = coin in ltvMap ? ltvMap[coin] : null;
+      const ltv = ltvOf(b);
       if (value != null && ltv != null) {
         capacity += value * ltv;
       } else if (ltv == null) {

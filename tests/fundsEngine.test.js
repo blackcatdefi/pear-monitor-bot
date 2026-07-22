@@ -208,3 +208,98 @@ test('PM_LTV_MAP env override extends the LTV map', () => {
     delete process.env.PM_LTV_MAP;
   }
 });
+
+// ───────────── R-PUBLIC-FUNDS-FIX1 — production identifier shape ─────────────
+// The real 0xc7ae payload: balances carry `token` (canonical index) and a
+// per-balance `ltv` string; ctxs are NOT positionally aligned with universe,
+// so prices must resolve via the IDX:<token> key, never a name-collision mid.
+
+test('FIX1: HYPE recognized under exact production identifier (token 150 + api ltv 0.5)', () => {
+  const view = computeUniversalDeployable({
+    spotBalances: [
+      { coin: 'USDC', token: 0, total: -91722.704, hold: -91722.704, api_ltv: 0 },
+      { coin: 'HYPE', token: 150, total: 3006.2846298, hold: 3006.2846298, api_ltv: 0.5 },
+      { coin: 'USDH', token: 360, total: 0.35931473, hold: 0 },
+      { coin: 'MAX', token: 734, total: 3376.100606, hold: 0 },
+    ],
+    perp: { accountValue: 0, marginUsed: 0, withdrawable: 0 },
+    // IDX key = real HYPE/USDC mid; name key poisoned with a fake dup price —
+    // the engine must prefer the token-index key.
+    prices: { 'IDX:150': 59.42, HYPE: 0.144015 },
+  });
+  assert.strictEqual(view.account_type, 'pm');
+  const hype = view.pm.collateral.find((c) => c.coin === 'HYPE');
+  assert.strictEqual(hype.tokens, 3006.2846298);
+  assert.strictEqual(hype.price, 59.42);          // NOT the 0.144 dup artifact
+  assert.strictEqual(hype.ltv, 0.5);              // from api_ltv, no map needed
+  const expCap = 3006.2846298 * 59.42 * 0.5;      // ≈ $89,317
+  assert.ok(Math.abs(view.pm.capacity - expCap) < 1);
+  // Real headroom number, not a mapping artifact: max(0, cap − debt).
+  assert.strictEqual(view.pm_borrow_headroom, Math.max(0, view.pm.capacity - view.pm.debt));
+  // MAX (no api ltv, not in map) stays conservative $0 WITH the note.
+  assert.ok(view.pm.unknown_ltv_assets.includes('MAX'));
+});
+
+test('FIX1: alert can fire once HYPE capacity clears debt + threshold', () => {
+  const view = computeUniversalDeployable({
+    spotBalances: [
+      { coin: 'USDC', token: 0, total: -91722.704, hold: -91722.704 },
+      { coin: 'HYPE', token: 150, total: 3006.2846298, hold: 3006.2846298, api_ltv: 0.5 },
+    ],
+    perp: null,
+    prices: { 'IDX:150': 70.0 }, // HYPE pump: cap ≈ $105.2K > debt $91.7K
+  });
+  assert.ok(view.pm_borrow_headroom > 13000);
+  assert.ok(view.total_deployable > 13000);
+});
+
+test('FIX1: PM_LTV_MAP override works by token INDEX key and beats api_ltv', () => {
+  process.env.PM_LTV_MAP = '{"150":0.4}';
+  try {
+    const view = computeUniversalDeployable({
+      spotBalances: [
+        { coin: 'USDC', token: 0, total: -1000, hold: -1000 },
+        { coin: 'HYPE', token: 150, total: 100, hold: 100, api_ltv: 0.5 },
+      ],
+      perp: null,
+      prices: { 'IDX:150': 50 },
+    });
+    const hype = view.pm.collateral.find((c) => c.coin === 'HYPE');
+    assert.strictEqual(hype.ltv, 0.4); // env index-key override wins
+    assert.ok(Math.abs(view.pm.capacity - 100 * 50 * 0.4) < 1e-6);
+  } finally {
+    delete process.env.PM_LTV_MAP;
+  }
+});
+
+test('FIX1: PM_LTV_MAP override still works by NAME key', () => {
+  process.env.PM_LTV_MAP = '{"ubtc":0.7}';
+  try {
+    const view = computeUniversalDeployable({
+      spotBalances: [
+        { coin: 'USDC', token: 0, total: -1000, hold: -1000 },
+        { coin: 'UBTC', token: 197, total: 0.5, hold: 0.5 },
+      ],
+      perp: null,
+      prices: { 'IDX:197': 100000 },
+    });
+    const u = view.pm.collateral.find((c) => c.coin === 'UBTC');
+    assert.strictEqual(u.ltv, 0.7);
+  } finally {
+    delete process.env.PM_LTV_MAP;
+  }
+});
+
+test('FIX1: legacy fixtures without token/api_ltv still resolve HYPE via DEFAULT_LTV', () => {
+  const view = computeUniversalDeployable({
+    spotBalances: [
+      { coin: 'USDC', total: -1000, hold: -1000 },
+      { coin: 'HYPE', total: 10, hold: 10 },
+    ],
+    perp: null,
+    prices: { HYPE: 40 },
+  });
+  const hype = view.pm.collateral.find((c) => c.coin === 'HYPE');
+  assert.strictEqual(hype.ltv, 0.5);
+  assert.strictEqual(hype.price, 40);
+});
