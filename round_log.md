@@ -35,3 +35,15 @@ Append-only round-level summary per constitución §6 paso 8.
 | asxn_data | GRACEFUL_SPA | html_no_data@/ → link a data.asxn.xyz/dashboard/hype |
 
 **Próximo round**: R-INTEL30-PHASE2 (16 fuentes, semana 2). NO arrancar hasta que BCD pegue FRED_API_KEY + ARKHAM_API_KEY en `.secrets/tokens.env` y confirme smoke en Telegram.
+
+## R-PUBLIC-FUNDS — 2026-07-22
+
+**Scope**: public bot (gentle-luck) — universal deployable-capital engine + /funds + /fundsalert opt-in scheduler; side task private bot DESTACADO tactical label.
+
+- NEW src/fundsEngine.js — universal per-wallet deployable capital: spot free stables (MAX rule, negatives=borrowed never free), perp withdrawable, PM borrow headroom (LTV map HYPE=0.5 + PM_LTV_MAP override, projected liq debt/(0.7125·tokens) single-asset), account_type detection (unified/perp_only/spot_only/pm/empty), fetch errors surface as 'fetch error' never $0.
+- NEW src/fundsAlertStore.js — opt-in store + edge-triggered hysteresis (fire on below→above crossing, disarm, re-arm <50%·threshold or 12h cooldown). JSON on Railway volume.
+- NEW src/commandsFunds.js — /funds (tracked or explicit wallet) + /fundsalert <usd>|off (default $500). Branded footer, health telemetry handlers.
+- NEW src/fundsAlertScheduler.js — 20-min scan (clamped 15–30), unique-wallet dedup, 10-min cache, jitter, 60-wallet/cycle rotation. PM metric preferred when both fire, one msg/wallet/cycle.
+- src/extensions.js — additive wiring only (2 requires, 1 wire entry, scheduler start/stop).
+- Private bot: templates/formatters.py `_tactical_book_label()` — DESTACADO header now TACTICAL SHORTS/LONGS/BOOK derived from real sides (was hardcoded LONGS over an all-shorts book).
+- Tests: Node 528→560 (+32, 0 regressions). Python 1130→1136 passed (+6; the 40 fails are pre-existing env/network, identical set on baseline). Surface regression guard asserts all 14 pre-existing wire modules intact + exactly 2 new handlers.

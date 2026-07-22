@@ -69,6 +69,11 @@ const copyTrading = require('./copyTrading');
 const commandsCopyTrading = require('./commandsCopyTrading');
 // R-PUBLIC-V3-TRACKING — /hf command + AWAITING_HF_ADDRESS state handler.
 const commandsHealthFactor = require('./commandsHealthFactor');
+// R-PUBLIC-FUNDS — universal deployable-capital (/funds, /fundsalert) +
+// opt-in funds-available scanner (spot free / perp withdrawable / PM
+// borrow headroom, every HL account type).
+const commandsFunds = require('./commandsFunds');
+const fundsAlertScheduler = require('./fundsAlertScheduler');
 
 function _safeInt(v, d) {
   const n = parseInt(v, 10);
@@ -670,6 +675,8 @@ function bootstrap({
       ['commandsCopyTrading', () => commandsCopyTrading.attach(bot)],
       // R-PUBLIC-V3-TRACKING — /hf + AWAITING_HF_ADDRESS handler
       ['commandsHealthFactor', () => commandsHealthFactor.attach(bot)],
+      // R-PUBLIC-FUNDS — /funds + /fundsalert
+      ['commandsFunds', () => commandsFunds.attach(bot)],
     ];
     for (const [name, fn] of wireAutocopy) {
       try { fn(); }
@@ -760,6 +767,18 @@ function bootstrap({
     );
   }
 
+  // 10c. R-PUBLIC-FUNDS — opt-in funds-available scanner (15–30 min cycle,
+  //      unique-wallet dedup + cache + jitter + hysteresis).
+  let fundsAlertTimer = null;
+  try {
+    fundsAlertTimer = fundsAlertScheduler.startSchedule({ notify: wrappedNotify });
+  } catch (e) {
+    console.error(
+      '[extensions] fundsAlertScheduler.startSchedule failed:',
+      e && e.message ? e.message : e
+    );
+  }
+
   console.log('[extensions] R(v2)+R(v3)+R-PUBLIC+R-AUTOCOPY bootstrap complete.');
 
   return {
@@ -791,6 +810,10 @@ function bootstrap({
         if (dailyDigestTimer) clearInterval(dailyDigestTimer);
       } catch (_) {}
       try { dailyDigest.stopSchedule(); } catch (_) {}
+      try {
+        if (fundsAlertTimer) clearInterval(fundsAlertTimer);
+      } catch (_) {}
+      try { fundsAlertScheduler.stopSchedule(); } catch (_) {}
       try { copyTrading.stopSchedulers(); } catch (_) {}
     },
   };

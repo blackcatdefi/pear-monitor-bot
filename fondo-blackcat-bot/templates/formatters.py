@@ -633,6 +633,57 @@ def _perp_upnl_split(
     return basket_upnl, basket_n, tactical_upnl, tactical_coins, total
 
 
+def _tactical_book_label(wallets: list[dict[str, Any]]) -> str:
+    """R-PUBLIC-FUNDS side-task — derive the DESTACADO tactical label from
+    the ACTUAL sides of the tactical legs (same classification as
+    ``_perp_upnl_split``: tactical = every leg that is NOT a builder-dex
+    short).
+
+      • all tactical legs SHORT → "TACTICAL SHORTS"
+      • all tactical legs LONG  → "TACTICAL LONGS"
+      • mixed                   → "TACTICAL BOOK"
+      • no tactical legs        → "TACTICAL LONGS" (legacy visual, renders
+        alongside "sin tácticas" so the label is cosmetic)
+
+    NEVER raises.
+    """
+    basket_addr = "0xc7ae23316b47f7e75f455f53ad37873a18351505"
+    try:
+        from config import PM_PRIMARY_WALLET as _pmw
+        if _pmw:
+            basket_addr = _pmw.lower()
+    except Exception:  # noqa: BLE001
+        pass
+    sides: set[str] = set()
+    try:
+        for w in wallets or []:
+            if not isinstance(w, dict) or w.get("status") != "ok":
+                continue
+            d = w.get("data") or {}
+            if (d.get("wallet") or "").lower() != basket_addr:
+                continue
+            for p in d.get("positions") or []:
+                try:
+                    sz = float(p.get("size") or p.get("szi") or 0.0)
+                except (TypeError, ValueError):
+                    sz = 0.0
+                side = str(
+                    p.get("side") or ("LONG" if sz > 0 else "SHORT")
+                ).upper()
+                dex = str(p.get("dex") or "main").lower()
+                if side == "SHORT" and dex not in ("", "main"):
+                    continue  # basket leg, not tactical
+                sides.add("SHORT" if side == "SHORT" else "LONG")
+            break
+    except Exception:  # noqa: BLE001
+        return "TACTICAL BOOK"
+    if sides == {"SHORT"}:
+        return "TACTICAL SHORTS"
+    if sides == {"LONG"} or not sides:
+        return "TACTICAL LONGS"
+    return "TACTICAL BOOK"
+
+
 def _cat_date_label(dt: datetime) -> str:
     """Compact UTC date like '6 Jun' (no leading zero, platform-agnostic)."""
     return f"{dt.day} {dt.strftime('%b')}"
@@ -1073,8 +1124,9 @@ def format_report_header(
             )
             ts = "+" if t_upnl >= 0 else ""
             tc = ", ".join(t_coins) if t_coins else "sin tácticas"
+            t_label = _tactical_book_label(wallets)
             lines.append(
-                f"🎯 TACTICAL LONGS UPnL ({tc}): {ts}{_fmt_usd(t_upnl)}"
+                f"🎯 {t_label} UPnL ({tc}): {ts}{_fmt_usd(t_upnl)}"
             )
             os_ = "+" if tot_upnl >= 0 else ""
             lines.append(
