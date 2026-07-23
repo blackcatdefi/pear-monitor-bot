@@ -75,7 +75,6 @@ from modules.bounce_tech import detect_closes as bt_detect_closes, fetch_bounce_
 from modules.gmail_intel import scan_gmail_unread
 from modules.version_info import format_version_block
 from modules.x_intel import (
-    budget_banner_for_report,
     cache_banner_for_report,
     debug_x_status,
     fetch_x_intel,
@@ -432,11 +431,8 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if x_intel_ok:
         timeline_text = format_timeline(x_intel, top_n=40)
-        # R-COST-V2 CHANGE 4: budget-exhausted banner (cache-only render)
-        if isinstance(x_intel, dict) and x_intel.get("budget_exhausted"):
-            banner = budget_banner_for_report()
-        else:
-            banner = cache_banner_for_report()
+        # R-COST-V2-FIX: no budget banner — fetch is never gated by consumption.
+        banner = cache_banner_for_report()
         header = (
             "\U0001f4e1 X TIMELINE \u2014 48H\n"
             + ("\u2500" * 30) + "\n"
@@ -737,10 +733,6 @@ async def cmd_xrefresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         reply_markup=MAIN_KEYBOARD,
     )
     x_intel = await fetch_x_intel(hours=48, caller="xrefresh", app=context.application)
-    if isinstance(x_intel, dict) and x_intel.get("budget_exhausted"):
-        from modules.x_intel import budget_banner_for_report as _bb
-        await update.message.reply_text(_bb(), reply_markup=MAIN_KEYBOARD)
-        return
     if not isinstance(x_intel, dict) or x_intel.get("status") != "ok":
         err = str((x_intel or {}).get("error") or "")[:200] if isinstance(x_intel, dict) else ""
         await update.message.reply_text(

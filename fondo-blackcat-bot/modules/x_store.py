@@ -1,4 +1,4 @@
-"""R-COST-V2 (2026-07-23) — persistent X tweet store + monthly post budget.
+"""R-COST-V2 (2026-07-23) — persistent X tweet store.
 
 THE PROBLEM (owner evidence, X Developer Console Jun 23–Jul 23 2026):
 $106.21 for 21,240 posts read (real rate ≈ $0.005/post). The bot re-fetched
@@ -12,14 +12,15 @@ THE FIX — never pay twice:
   * The 48h timeline view is assembled from the LOCAL store
     (new fetch + previously stored tweets inside the window).
   * Entries older than X_STORE_RETENTION_HOURS (72h) are pruned.
-  * A monthly post budget (X_MONTHLY_POST_BUDGET, default 8000) gates live
-    fetches: at 80% one warning push; at 100% /reporte renders from cache
-    only with an explicit banner. X_BUDGET_OVERRIDE=true bypasses (emergency).
 
 Owner design decisions (do NOT deviate):
   * The X List composition is curated BY THE OWNER inside X. The store never
     filters accounts — it stores whatever the complete list returns.
   * X reads happen EXCLUSIVELY inside the /reporte flow (+ manual /xrefresh).
+  * R-COST-V2-FIX (owner override): there is NO limit on X API usage. The
+    report is ALWAYS complete — no budget cap, no warning push, no hard-stop.
+    Cost control = on-demand model + incremental store, nothing else.
+    usage_state() below is PURE VISIBILITY (/costs) and never gates a fetch.
 """
 from __future__ import annotations
 
@@ -39,16 +40,6 @@ DB_PATH = os.path.join(DATA_DIR, "intel_memory.db")
 # Retention: window shown is 48h; keep 72h so the view is always assemblable
 # even right after a prune.
 RETENTION_HOURS = int(os.getenv("X_STORE_RETENTION_HOURS", "72"))
-
-# Monthly post budget (calendar month, UTC). At the real $0.005/post rate the
-# default 8000 caps X spend at $40/mo worst case; actual usage with the
-# incremental fetch should land far below.
-MONTHLY_POST_BUDGET = int(os.getenv("X_MONTHLY_POST_BUDGET", "8000"))
-# Emergency override: when true, the 100% budget gate does NOT block live
-# fetches (the 80% warning still fires). For "I need fresh data NOW" moments.
-BUDGET_OVERRIDE = os.getenv("X_BUDGET_OVERRIDE", "false").strip().lower() in (
-    "true", "1", "yes", "on"
-)
 
 COST_PER_POST_USD = 0.005  # measured: $106.21 / 21,240 posts (Jun-Jul 2026)
 
@@ -303,7 +294,9 @@ def store_stats() -> dict[str, Any]:
                 "retention_hours": RETENTION_HOURS}
 
 
-# ─── Monthly post budget (reads x_api_calls written by intel_memory) ────────
+# ─── Usage visibility (reads x_api_calls written by intel_memory) ───────────
+# R-COST-V2-FIX: PURE VISIBILITY for /costs. Nothing here gates, blocks,
+# degrades or alters fetch behavior — there is NO limit on X API usage.
 
 def posts_fetched_since(start_iso: str) -> int:
     """SUM(tweets_returned) from x_api_calls since a UTC ISO timestamp."""
@@ -331,11 +324,10 @@ def posts_fetched_month() -> int:
     return posts_fetched_since(m0.isoformat())
 
 
-def budget_state() -> dict[str, Any]:
-    """Current budget picture: used, %, projections at $0.005/post."""
+def usage_state() -> dict[str, Any]:
+    """Informational usage picture: posts today/MTD + projections at
+    $0.005/post. R-COST-V2-FIX: NO limit semantics — never gates a fetch."""
     used = posts_fetched_month()
-    budget = max(1, MONTHLY_POST_BUDGET)
-    pct = used / budget * 100.0  # percentage 0–100
     now = datetime.now(timezone.utc)
     day_of_month = max(1, now.day)
     # days in current month
@@ -343,47 +335,9 @@ def budget_state() -> dict[str, Any]:
     days_in_month = (nxt - now.replace(day=1)).days
     projected_posts = int(used / day_of_month * days_in_month)
     return {
-        "budget": budget,
         "used": used,
-        "pct": pct,
-        "exhausted": (used >= budget) and not BUDGET_OVERRIDE,
-        "override": BUDGET_OVERRIDE,
         "today": posts_fetched_today(),
         "projected_month_posts": projected_posts,
         "projected_month_cost_usd": projected_posts * COST_PER_POST_USD,
         "mtd_cost_usd": used * COST_PER_POST_USD,
     }
-
-
-def should_send_budget_warning(pct: float | None = None) -> bool:
-    """True once per calendar month when usage crosses 80% of the budget.
-
-    Uses the existing x_api_alerts table (intel_memory) for throttling so the
-    state survives redeploys and joins the critical-ops push path.
-    """
-    st = budget_state() if pct is None else None
-    p = st["pct"] if st is not None else pct
-    if p is None or p < 80.0:
-        return False
-    try:
-        conn = _get_conn()
-        month = datetime.now(timezone.utc).strftime("%Y-%m")
-        key = f"x_budget_80pct_{month}"
-        row = conn.execute(
-            "SELECT last_sent_utc FROM x_api_alerts WHERE key=?", (key,)
-        ).fetchone()
-        if row:
-            conn.close()
-            return False
-        conn.execute(
-            "INSERT OR REPLACE INTO x_api_alerts (key, last_sent_utc, payload) "
-            "VALUES (?, ?, ?)",
-            (key, datetime.now(timezone.utc).isoformat(),
-             json.dumps({"pct": p})),
-        )
-        conn.commit()
-        conn.close()
-        return True
-    except Exception:
-        log.exception("x_store.should_send_budget_warning failed")
-        return False

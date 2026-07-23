@@ -5,7 +5,8 @@ Prior to R-XLIST-CANONICAL, ``fetch_timeline_via_list`` returned a cap
 diagnostic (and the report fell back to cache) once the per-day call budget was
 exhausted. That would blind the /reporte X TIMELINE to the 185-member set. These
 tests lock in that the cap no longer suppresses the bulk read, while the kill
-switch and the R-COST-V2 monthly budget still bound cost.
+switch still bounds cost (R-COST-V2-FIX: no monthly budget — cost control is
+the on-demand model + incremental since_id store only).
 """
 from __future__ import annotations
 

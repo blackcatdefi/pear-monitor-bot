@@ -20,10 +20,11 @@ R-COST-V2 (2026-07-23) — ON-DEMAND ONLY + NEVER PAY TWICE:
     - Incremental fetch via since_id (modules.x_store) — each fetch pays
       only for tweets posted since the last one. 48h view assembled locally.
     - Retweets/replies excluded at query level (X_EXCLUDE_RT_REPLIES).
-    - Monthly post budget (X_MONTHLY_POST_BUDGET, default 8000): 80% → one
-      warning push; 100% → cache-only with banner. X_BUDGET_OVERRIDE=true
-      bypasses in emergencies.
-    - Cost persistence: each call recorded to SQLite (survives redeploy).
+    - R-COST-V2-FIX (owner override): there is NO limit on X API usage. The
+      report is ALWAYS complete. No budget cap, no warning push, no hard-stop.
+      Cost control = on-demand model + incremental store, nothing else.
+    - Cost persistence: each call recorded to SQLite (survives redeploy) —
+      pure visibility via /costs.
 """
 from __future__ import annotations
 
@@ -68,7 +69,8 @@ X_LIST_ID = os.getenv("X_LIST_ID", "").strip()
 # R-COST-V2 (2026-07-23): the 2h cooldown gate is REMOVED. With the since_id
 # incremental fetch (modules.x_store) a second /reporte only pays for tweets
 # posted in between, so blocking it with a cooldown no longer saves money —
-# it only stales the report. Cost is bounded by the monthly post budget.
+# it only stales the report. R-COST-V2-FIX: no budget guard either — cost is
+# controlled solely by the on-demand model + incremental store.
 DAILY_CALL_CAP = int(
     os.getenv("X_DAILY_CAP", os.getenv("X_API_DAILY_CAP", "15"))
 )
@@ -925,31 +927,8 @@ def get_store_timeline_payload(hours: int = 48) -> dict[str, Any]:
     st = x_store.store_stats()
     payload["store_age_hours"] = st.get("newest_age_hours")
     payload["store_last_fetch"] = st.get("last_fetch")
-    payload["budget"] = x_store.budget_state()
+    payload["usage"] = x_store.usage_state()
     return payload
-
-
-async def _send_budget_warning(app, budget: dict[str, Any]) -> None:
-    """80% monthly-budget warning — one push per calendar month (critical-ops)."""
-    msg = (
-        f"⚠️ X API budget 80%\n\n"
-        f"Posts fetched this month: {budget['used']:,}/{budget['budget']:,} "
-        f"({budget['pct']:.0f}%).\n"
-        f"MTD cost ≈ ${budget['mtd_cost_usd']:.2f} @ $0.005/post.\n"
-        f"Projected month-end: {budget['projected_month_posts']:,} posts "
-        f"≈ ${budget['projected_month_cost_usd']:.2f}.\n\n"
-        f"At 100% /reporte switches to cached timeline until month rollover.\n"
-        f"Emergency override: Railway → X_BUDGET_OVERRIDE=true."
-    )
-    log.warning("[X_BUDGET] 80%% ALERT: %s", msg.replace("\n", " | "))
-    if app is not None:
-        try:
-            from config import TELEGRAM_CHAT_ID
-            if TELEGRAM_CHAT_ID:
-                from utils.telegram import send_bot_message
-                await send_bot_message(app.bot, int(TELEGRAM_CHAT_ID), msg)
-        except Exception:
-            log.exception("_send_budget_warning send failed (non-fatal)")
 
 
 async def fetch_x_intel(
@@ -960,13 +939,15 @@ async def fetch_x_intel(
     """R-COST-V2 incremental fetch: NEVER PAY TWICE.
 
     Flow:
-      1. Kill switch / monthly budget exhausted → serve the 48h window from
-         the local store (flagged, so /reporte can banner it). Zero API calls.
+      1. Kill switch → serve the 48h window from the local store (flagged,
+         so /reporte can banner it). Zero API calls.
       2. Otherwise fetch ONLY tweets newer than the persisted since_id
          (first run after deploy = one bounded backfill of the 48h window).
       3. Persist new tweets to the store, advance since_id, prune >72h.
       4. Assemble the FULL 48h view from the store (new + previously stored).
-      5. At 80% of X_MONTHLY_POST_BUDGET fire one warning push per month.
+
+    R-COST-V2-FIX: there is NO budget guard. Fetches proceed at ANY
+    consumption level — the report is always complete.
 
     On live failure the store window is served with `live_error` set, so
     /reporte degrades to cache instead of losing the timeline section.
@@ -983,15 +964,7 @@ async def fetch_x_intel(
         return _from_store(from_cache=True, cache_reason="kill_switch",
                            live_error=_DIAG_KILL_SWITCH)
 
-    # Gate B: monthly post budget (CHANGE 4).
-    budget = x_store.budget_state()
-    if budget["exhausted"]:
-        log.warning(
-            "[X_BUDGET] EXHAUSTED %d/%d posts this month — serving cache (caller=%s)",
-            budget["used"], budget["budget"], caller,
-        )
-        return _from_store(from_cache=True, budget_exhausted=True,
-                           cache_reason="budget_exhausted")
+    # R-COST-V2-FIX: no budget gate — the fetch ALWAYS proceeds.
 
     # Incremental fetch: only tweets newer than the stored high-water mark.
     since_id = x_store.get_since_id()
@@ -1046,20 +1019,12 @@ async def fetch_x_intel(
     except Exception:
         log.exception("[X_STORE] persist failed (non-fatal)")
 
-    # CHANGE 4: 80% budget warning (one push per calendar month).
-    try:
-        budget = x_store.budget_state()
-        if x_store.should_send_budget_warning(budget["pct"]):
-            await _send_budget_warning(app, budget)
-    except Exception:
-        log.exception("budget warning dispatch failed (non-fatal)")
-
     # Assemble the FULL window from the store (new fetch + prior tweets).
     stored = x_store.get_window(hours)
     payload = _build_payload(stored, hours, extras_added, extras_diag, extras_inactive)
     payload["fetched_new"] = fetched_new
     payload["from_store"] = True
-    payload["budget"] = budget
+    payload["usage"] = x_store.usage_state()
 
     if CANONICAL_HANDLES:
         log.info(
@@ -1118,7 +1083,7 @@ async def debug_x_status() -> str:
     # R-COST-V2: local tweet store (incremental fetch)
     try:
         ss = x_store.store_stats()
-        budget = x_store.budget_state()
+        usage = x_store.usage_state()
         lines.append("💾 Local tweet store (incremental since_id):")
         lines.append(f"  Tweets stored: {ss['total_tweets']} (retention {ss['retention_hours']}h)")
         lines.append(f"  Newest: {ss['newest_created_at'] or '— empty'}")
@@ -1126,14 +1091,9 @@ async def debug_x_status() -> str:
         lines.append(f"  since_id: {ss['since_id'] or '— first fetch pending'}")
         lines.append(f"  Last fetch: {ss['last_fetch_ts'] or '— never'}")
         lines.append("")
-        lines.append("💰 Monthly budget:")
-        lines.append(
-            f"  Posts MTD: {budget['used']}/{budget['budget']} ({budget['pct']:.0f}%)"
-            + (" 🛑 EXHAUSTED" if budget["exhausted"] else "")
-        )
-        lines.append(f"  Projected month-end: {budget['projected_month_posts']} posts ≈ ${budget['projected_month_cost_usd']:.2f}")
-        if budget.get("override"):
-            lines.append("  ⚠️ X_BUDGET_OVERRIDE active — guard bypassed")
+        lines.append("💰 Usage (informational — no limit, R-COST-V2-FIX):")
+        lines.append(f"  Posts MTD: {usage['used']} (${usage['mtd_cost_usd']:.2f})")
+        lines.append(f"  Projected month-end: {usage['projected_month_posts']} posts ≈ ${usage['projected_month_cost_usd']:.2f}")
     except Exception as exc:
         lines.append(f"💾 Store stats unavailable: {exc}")
 
@@ -1272,51 +1232,20 @@ def cache_banner_for_report() -> str:
     )
 
 
-def budget_banner_for_report() -> str:
-    """CHANGE 4: banner rendered in /reporte when the monthly budget is
-    exhausted and the timeline section falls back to the local store."""
-    try:
-        budget = x_store.budget_state()
-        ss = x_store.store_stats()
-        age = "?"
-        if ss.get("last_fetch_ts"):
-            try:
-                ts = datetime.fromisoformat(ss["last_fetch_ts"])
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-                age = f"{(datetime.now(timezone.utc) - ts).total_seconds() / 3600:.1f}"
-            except Exception:
-                pass
-        return (
-            f"🛑 X budget exhausted ({budget['used']}/{budget['budget']} posts this month) "
-            f"— showing cached timeline (age: {age}h). Override: X_BUDGET_OVERRIDE=true"
-        )
-    except Exception:
-        return "🛑 X budget exhausted — showing cached timeline"
-
-
 async def format_x_costs() -> str:
-    """Output for the new /costs command (CHANGE 5 — cost visibility)."""
-    budget = x_store.budget_state()
+    """Output for the /costs command — PURE VISIBILITY (R-COST-V2-FIX).
+    Informational only: nothing here gates or alters fetch behavior."""
+    usage = x_store.usage_state()
     ss = x_store.store_stats()
 
-    bar_pct = min(budget["pct"], 100.0)
-    filled = int(bar_pct // 10)
-    bar = "█" * filled + "░" * (10 - filled)
-
     lines: list[str] = []
-    lines.append("💰 X API COSTS — R-COST-V2")
+    lines.append("💰 X API COSTS — R-COST-V2 (informational, no limit)")
     lines.append("─" * 32)
     lines.append("")
-    lines.append(f"📅 Posts today (UTC): {budget['today']} (${budget['today'] * x_store.COST_PER_POST_USD:.2f})")
-    lines.append(f"📅 Posts MTD: {budget['used']} (${budget['mtd_cost_usd']:.2f})")
+    lines.append(f"📅 Posts today (UTC): {usage['today']} (${usage['today'] * x_store.COST_PER_POST_USD:.2f})")
+    lines.append(f"📅 Posts MTD: {usage['used']} (${usage['mtd_cost_usd']:.2f})")
     lines.append("")
-    lines.append(f"🎯 Monthly budget: {budget['used']}/{budget['budget']} ({budget['pct']:.0f}%)")
-    lines.append(f"   [{bar}]" + (" 🛑 EXHAUSTED — cache-only" if budget["exhausted"] else ""))
-    if budget.get("override"):
-        lines.append("   ⚠️ X_BUDGET_OVERRIDE=true — guard bypassed")
-    lines.append("")
-    lines.append(f"📈 Projection month-end: {budget['projected_month_posts']} posts ≈ ${budget['projected_month_cost_usd']:.2f}")
+    lines.append(f"📈 Projection month-end: {usage['projected_month_posts']} posts ≈ ${usage['projected_month_cost_usd']:.2f}")
     lines.append(f"   (cost model: ${x_store.COST_PER_POST_USD:.3f}/post — real Console rate)")
     lines.append("")
     lines.append("💾 Local store:")
@@ -1336,7 +1265,7 @@ async def format_x_status() -> str:
     used_today = count_x_calls_today_calendar()
     successful_today = count_x_calls_today_live_only()
     last_ok = last_successful_x_call_ts(LIST_ENDPOINT_KEY)
-    budget = x_store.budget_state()
+    usage = x_store.usage_state()
     ss = x_store.store_stats()
 
     lines: list[str] = []
@@ -1346,21 +1275,18 @@ async def format_x_status() -> str:
     lines.append("⚙️ Configuration:")
     lines.append(f"  X_LIVE_ENABLED: {'✅ true' if X_LIVE_ENABLED else '🛑 false (cache-only)'}")
     lines.append(f"  X_EXCLUDE_RT_REPLIES: {'✅ on' if X_EXCLUDE_RT_REPLIES else 'off'}")
-    lines.append(f"  X_MONTHLY_POST_BUDGET: {budget['budget']} posts")
+    lines.append("  Budget: 🛑 NONE (R-COST-V2-FIX) — no limit on X usage")
     lines.append(f"  X_DAILY_CAP (extras only): {DAILY_CALL_CAP}/day (UTC)")
     lines.append("  Scheduler: 🛑 NONE — X reads only inside /reporte and /xrefresh")
     lines.append("")
     lines.append("📊 Usage today (UTC calendar day):")
     lines.append(f"  API calls: {used_today} ({successful_today} successful)")
-    lines.append(f"  Posts fetched today: {budget['today']}")
+    lines.append(f"  Posts fetched today: {usage['today']}")
     lines.append(f"  Last fetch OK: {last_ok.isoformat() if last_ok else '— never'}")
     lines.append("")
-    lines.append("💰 Monthly budget:")
-    lines.append(
-        f"  Posts MTD: {budget['used']}/{budget['budget']} ({budget['pct']:.0f}%)"
-        + (" 🛑 EXHAUSTED — cache-only" if budget["exhausted"] else "")
-    )
-    lines.append(f"  MTD cost: ${budget['mtd_cost_usd']:.2f} | Projection: {budget['projected_month_posts']} posts ≈ ${budget['projected_month_cost_usd']:.2f}")
+    lines.append("💰 Usage MTD (informational — no limit):")
+    lines.append(f"  Posts MTD: {usage['used']}")
+    lines.append(f"  MTD cost: ${usage['mtd_cost_usd']:.2f} | Projection: {usage['projected_month_posts']} posts ≈ ${usage['projected_month_cost_usd']:.2f}")
     lines.append("")
     lines.append("💾 Local store (since_id incremental):")
     lines.append(f"  Tweets: {ss['total_tweets']} | since_id: {ss['since_id'] or '—'}")

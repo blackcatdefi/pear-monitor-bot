@@ -1,13 +1,13 @@
-"""R-COST-V2 (2026-07-23) — acceptance fixtures.
+"""R-COST-V2 + R-COST-V2-FIX (2026-07-23) — acceptance fixtures.
 
-Locks in the four contract points of the X cost optimization:
+Locks in the contract points of the X cost optimization:
 
 1. INCREMENTAL: fetch_x_intel passes the persisted since_id to the API and
    never re-ingests an already-stored tweet id (INSERT OR IGNORE).
 2. PRUNE: tweets older than 72h are removed from the local store.
-3. BUDGET 80%: one warning per calendar month when MTD posts cross 80%.
-4. BUDGET 100%: fetch_x_intel makes ZERO API calls and renders from the
-   store with budget_exhausted=True (cache banner in /reporte).
+3. NO LIMIT (R-COST-V2-FIX, owner override): the fetch proceeds normally at
+   ANY consumption level — no budget guard, no warning push, no cache
+   fallback tied to usage. usage_state() is pure visibility for /costs.
 
 Plus the static guarantee: no scheduler/cron path in bot.py references the
 X API — the only call sites are /reporte and /xrefresh.
@@ -121,7 +121,7 @@ def test_prune_removes_only_older_than_retention(fresh_store):
     assert len(xs.get_window(48)) == 2
 
 
-# ─── 3 + 4. Monthly budget guard ────────────────────────────────────────────
+# ─── 3. NO LIMIT (R-COST-V2-FIX) ────────────────────────────────────────────
 
 def _record_posts(n: int, db_module):
     """Write API-call rows so posts_fetched_month() sees n posts MTD."""
@@ -130,53 +130,55 @@ def _record_posts(n: int, db_module):
                                    tweets_returned=n, caller="test")
 
 
-def test_budget_80pct_warning_fires_once_per_month(fresh_store, monkeypatch):
-    xs = fresh_store
-    monkeypatch.setattr(xs, "MONTHLY_POST_BUDGET", 1000)
-    _record_posts(850, xs)
-    b = xs.budget_state()
-    assert 80.0 <= b["pct"] < 100.0
-    assert not b["exhausted"]
-    assert xs.should_send_budget_warning(b["pct"]) is True
-    # Second crossing in the same month: throttled.
-    assert xs.should_send_budget_warning(b["pct"]) is False
-
-
-def test_budget_below_80_no_warning(fresh_store, monkeypatch):
-    xs = fresh_store
-    monkeypatch.setattr(xs, "MONTHLY_POST_BUDGET", 1000)
-    _record_posts(500, xs)
-    assert xs.should_send_budget_warning(xs.budget_state()["pct"]) is False
-
-
 @pytest.mark.asyncio
-async def test_budget_exhausted_renders_cache_only_zero_api_calls(fresh_store, monkeypatch):
+async def test_fetch_proceeds_at_any_consumption_level(fresh_store, monkeypatch):
+    """OWNER OVERRIDE: even with absurd MTD consumption the live fetch runs,
+    the payload has NO budget/exhausted semantics, and the report is complete."""
     from modules import x_intel as _xi
     xs = fresh_store
     monkeypatch.setattr(_xi, "X_LIVE_ENABLED", True)
+    monkeypatch.setattr(_xi, "X_EXTRA_HANDLES", [])
     monkeypatch.setattr(_xi, "save_x_timeline_payload", lambda *a, **k: None)
-    monkeypatch.setattr(xs, "MONTHLY_POST_BUDGET", 100)
-    monkeypatch.setattr(xs, "BUDGET_OVERRIDE", False)
-    _record_posts(120, xs)  # over budget
-    xs.upsert_tweets([_mk_tweet("400", hours_ago=1)])
+    _record_posts(999_999, xs)  # would have been 125x the old 8000 budget
 
-    async def _boom(*a, **k):
-        raise AssertionError("X API called while budget exhausted")
+    called = {"live": False}
 
-    monkeypatch.setattr(_xi, "fetch_timeline_via_list", _boom)
+    async def _fake_list(hours, max_tweets=1200, caller="", bypass_cooldown=False, since_id=None):
+        called["live"] = True
+        return [_mk_tweet("500", hours_ago=0.5)], None
+
+    monkeypatch.setattr(_xi, "fetch_timeline_via_list", _fake_list)
 
     payload = await _xi.fetch_x_intel(hours=48, caller="test", app=None)
-    assert payload["budget_exhausted"] is True
-    assert payload["from_store"] is True
-    assert payload["total"] == 1  # cached timeline still renders
+    assert called["live"] is True                  # API WAS called
+    assert payload["status"] == "ok"
+    assert payload["fetched_new"] == 1
+    assert "budget_exhausted" not in payload       # no limit semantics
+    assert payload.get("cache_reason") != "budget_exhausted"
+    assert payload["usage"]["used"] >= 999_999     # visibility intact
 
 
-def test_budget_override_unblocks(fresh_store, monkeypatch):
+def test_usage_state_is_pure_visibility(fresh_store):
+    """usage_state() exposes only informational keys — no pct/exhausted/
+    override/budget keys that could carry limit semantics."""
     xs = fresh_store
-    monkeypatch.setattr(xs, "MONTHLY_POST_BUDGET", 100)
-    monkeypatch.setattr(xs, "BUDGET_OVERRIDE", True)
-    _record_posts(120, xs)
-    assert xs.budget_state()["exhausted"] is False
+    _record_posts(300, xs)
+    u = xs.usage_state()
+    assert set(u.keys()) == {"used", "today", "projected_month_posts",
+                             "projected_month_cost_usd", "mtd_cost_usd"}
+    assert u["used"] == 300
+    assert u["mtd_cost_usd"] == pytest.approx(300 * xs.COST_PER_POST_USD)
+
+
+def test_no_budget_guard_symbols_in_prod_code():
+    """Static proof: no code path can block/degrade an X fetch by consumption."""
+    banned = ("budget_state", "should_send_budget_warning", "budget_exhausted",
+              "MONTHLY_POST_BUDGET", "BUDGET_OVERRIDE", "budget_banner_for_report",
+              "_send_budget_warning")
+    for rel in ("bot.py", "modules/x_intel.py", "modules/x_store.py"):
+        src = (REPO / rel).read_text(encoding="utf-8")
+        for sym in banned:
+            assert sym not in src, f"{sym} still present in {rel}"
 
 
 # ─── Static: no scheduled path touches the X API ────────────────────────────
