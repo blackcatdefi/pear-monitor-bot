@@ -10,19 +10,20 @@ Env vars required:
     X_API_BEARER_TOKEN  — Bearer token from X Developer Console (Pay Per Use app)
     X_LIST_ID           — numeric ID of the private list
 
-Round 12 cost hardening (post Apr 22 $20.48 overrun):
-    - Realistic cost model: $0.25 per 1,000 tweets returned (NOT $0.001/req).
-      X bills per tweet data returned, not per HTTP request.
-    - Internal gate: only 1 live list fetch per FETCH_COOLDOWN_HOURS (default 4h).
-      Any caller inside the cooldown window falls back to the SQLite-persisted
-      cache. This stops /reporte, /timeline, /debug_x from triggering fresh
-      fetches on top of the scheduler.
-    - Daily cap: max 15 X API calls in any 24h window (all handlers combined).
-    - Pagination cap: 2 pages × 100 tweets = 200 tweets/fetch max.
+R-COST-V2 (2026-07-23) — ON-DEMAND ONLY + NEVER PAY TWICE:
+    Owner evidence (X Dev Console Jun 23–Jul 23 2026): $106.21 for 21,240
+    posts → real rate $0.005/post. Root cause: every /reporte re-fetched the
+    FULL 48h window. Fixes:
+    - X reads happen EXCLUSIVELY inside /reporte (+ manual /xrefresh).
+      Every scheduled/cron/startup X job is dead. Zero X reads on days
+      without a /reporte.
+    - Incremental fetch via since_id (modules.x_store) — each fetch pays
+      only for tweets posted since the last one. 48h view assembled locally.
+    - Retweets/replies excluded at query level (X_EXCLUDE_RT_REPLIES).
+    - Monthly post budget (X_MONTHLY_POST_BUDGET, default 8000): 80% → one
+      warning push; 100% → cache-only with banner. X_BUDGET_OVERRIDE=true
+      bypasses in emergencies.
     - Cost persistence: each call recorded to SQLite (survives redeploy).
-    - Proactive alert: if 7d-trailing projection exceeds $5/mo, one Telegram
-      message per 24h.
-    - Target projected cost at 4h cadence, 211-member list: ≈$1.20/month.
 """
 from __future__ import annotations
 
@@ -43,7 +44,6 @@ from modules.intel_memory import (
     load_x_timeline_payload,
     record_x_api_call,
     save_x_timeline_payload,
-    should_send_75pct_alert,
     should_send_cost_alert,
     x_api_cost_projection,
     x_cache_hit_rate,
@@ -65,25 +65,29 @@ X_LIST_ID = os.getenv("X_LIST_ID", "").strip()
 #   - X_RATE_LIMIT_HOURS / X_DAILY_CAP added as canonical names matching the
 #     hotfix spec; legacy names kept as aliases for back-compat with existing
 #     Railway vars.
-FETCH_COOLDOWN_HOURS = float(
-    os.getenv("X_RATE_LIMIT_HOURS", os.getenv("X_API_COOLDOWN_HOURS", "2"))
-)
+# R-COST-V2 (2026-07-23): the 2h cooldown gate is REMOVED. With the since_id
+# incremental fetch (modules.x_store) a second /reporte only pays for tweets
+# posted in between, so blocking it with a cooldown no longer saves money —
+# it only stales the report. Cost is bounded by the monthly post budget.
 DAILY_CALL_CAP = int(
     os.getenv("X_DAILY_CAP", os.getenv("X_API_DAILY_CAP", "15"))
 )
-MAX_PAGES_PER_FETCH = int(os.getenv("X_API_MAX_PAGES", "2"))
 COST_ALERT_THRESHOLD_USD = float(os.getenv("X_API_ALERT_THRESHOLD_USD", "5"))
-# Round 15: master kill switch — when false, the bot NEVER calls X live,
-# regardless of cooldown/cap state. Cache-only mode for emergencies.
+# Round 15: master kill switch — when false, the bot NEVER calls X live.
+# Cache-only mode for emergencies.
 X_LIVE_ENABLED = os.getenv("X_LIVE_ENABLED", "true").strip().lower() not in (
     "false", "0", "no", "off"
 )
-# Round 15: scheduler is opt-in. When ENABLE_ALERTS=true the bot still adds
-# alert + intel-processor jobs, but the X timeline cache job is gated on this
-# var. Default false → no automatic X API calls; only /reporte triggers fetch.
-X_SCHEDULER_ENABLED = os.getenv("X_SCHEDULER_ENABLED", "false").strip().lower() in (
-    "true", "1", "yes", "on"
+# R-COST-V2: exclude retweets + replies at the API QUERY level — they
+# dominated paid volume and the report's analysis only cites original posts.
+# Flip to false in Railway if BCD ever wants RTs back. This does NOT filter
+# accounts, only tweet types.
+X_EXCLUDE_RT_REPLIES = os.getenv("X_EXCLUDE_RT_REPLIES", "true").strip().lower() not in (
+    "false", "0", "no", "off"
 )
+# R-COST-V2: the scheduled X timeline refresh is DEAD. X reads happen
+# EXCLUSIVELY inside /reporte (+ manual /xrefresh), exactly like Gmail.
+# X_SCHEDULER_ENABLED removed — no env var can re-enable a background job.
 LIST_ENDPOINT_KEY = "lists/tweets"
 USER_TIMELINE_ENDPOINT_KEY = "users/tweets"
 
@@ -91,7 +95,7 @@ USER_TIMELINE_ENDPOINT_KEY = "users/tweets"
 # `X_EXTRA_HANDLES` is a comma-separated list of usernames to pull via the
 # per-user timeline endpoint AS A SUPPLEMENT to the canonical list. Lets
 # BCD add a handle to the bot without going through the X UI; respects
-# the same DAILY_CALL_CAP + FETCH_COOLDOWN_HOURS gates and is capped to
+# the same DAILY_CALL_CAP gate and is capped to
 # X_EXTRA_HANDLES_MAX entries so a typo can't blow the cap.
 # When the list call has already consumed the cap, extras are skipped.
 #
@@ -342,7 +346,6 @@ def get_api_stats() -> dict[str, Any]:
         "monthly_projection_str": f"${proj['monthly_projection_usd']:.2f}",
         "calls_24h": calls_24h,
         "daily_cap": DAILY_CALL_CAP,
-        "cooldown_hours": FETCH_COOLDOWN_HOURS,
         "last_success_ts": last_ok.isoformat() if last_ok else None,
     }
 
@@ -389,10 +392,6 @@ def _diag_for_status(status: int) -> str:
     return mapping.get(status, f"HTTP {status} — {_DIAG_UNKNOWN}")
 
 
-_DIAG_INTERNAL_COOLDOWN = (
-    "Internal cooldown active (1 live fetch per {cool}h). "
-    "Using cache — next fetch allowed: {next_allowed}."
-)
 _DIAG_INTERNAL_DAILY_CAP = (
     "Internal daily cap hit ({used}/{cap} calls hoy UTC). "
     "Fallback a cache hasta UTC midnight."
@@ -401,16 +400,6 @@ _DIAG_KILL_SWITCH = (
     "X_LIVE_ENABLED=false — modo cache-only forzado. "
     "Para reactivar: Railway Variables → X_LIVE_ENABLED=true."
 )
-
-
-def _within_cooldown() -> tuple[bool, datetime | None]:
-    """Return (in_cooldown, next_allowed_ts)."""
-    last_ok = last_successful_x_call_ts(LIST_ENDPOINT_KEY)
-    if last_ok is None:
-        return False, None
-    now = datetime.now(timezone.utc)
-    next_allowed = last_ok + timedelta(hours=FETCH_COOLDOWN_HOURS)
-    return now < next_allowed, next_allowed
 
 
 def _daily_cap_exceeded() -> tuple[bool, int]:
@@ -427,29 +416,29 @@ async def fetch_timeline_via_list(
     max_tweets: int = 1200,
     caller: str = "",
     bypass_cooldown: bool = False,
+    since_id: str | None = None,
 ) -> tuple[list[dict] | None, str | None]:
     """Read the private X list — adaptive to user changes.
 
-    Round 12 hardening:
-        - Enforces FETCH_COOLDOWN_HOURS at code level (not just scheduler).
-          Any caller inside the window gets (None, cooldown_diag) — they
-          should fall back to cache.
-        - Caps pagination at LIST_MAX_PAGES (covers the full window for the
-          185-member list; the loop breaks early on the time cutoff).
-        - Records every call (success/fail) to SQLite for cost projection.
-        - Fires a Telegram-bound cost alert when 7d projection > $5/mo.
-    `bypass_cooldown=True` is only for /debug_x test-in-vivo (max_tweets=5).
+    R-COST-V2 (2026-07-23) — NEVER PAY TWICE:
+        - ``since_id``: when provided, the API returns ONLY tweets newer than
+          that id. The caller (fetch_x_intel) persists everything to
+          modules.x_store and assembles the 48h view locally.
+        - The 2h cooldown gate is REMOVED — an incremental fetch is cheap by
+          construction, and a second /reporte must see the delta.
+        - Retweets + replies excluded at query level (X_EXCLUDE_RT_REPLIES,
+          default true) — they dominated paid volume. Graceful retry without
+          the param if the endpoint rejects it.
+        - Records every call (success/fail) to SQLite for cost tracking.
 
     R-XLIST-CANONICAL (2026-06-19): the bulk list read is the SINGLE SOURCE OF
-    TRUTH and is NO LONGER gated by DAILY_CALL_CAP — coverage of all 185
-    members must never be suppressed by the per-day call budget. The cooldown
-    (cache fallback) + kill switch still bound cost. The daily cap continues to
+    TRUTH and is NOT gated by DAILY_CALL_CAP — coverage of the full
+    owner-curated list must never be suppressed. The daily cap continues to
     gate ONLY the optional per-user supplement (fetch_extra_handles_supplement).
 
     Returns (tweets, error_diagnostic).
-      On success: (list[tweet_dicts], None)
-      On cooldown/cap: (None, diagnostic) — caller should use cache
-      On failure: (None, diagnostic)
+      On success: (list[tweet_dicts], None)  — may be [] when since_id has no news
+      On kill switch / failure: (None, diagnostic) — caller should use store
     """
     if not X_LIST_ID:
         log.error("X_LIST_ID not configured")
@@ -459,35 +448,28 @@ async def fetch_timeline_via_list(
         return None, _DIAG_NO_BEARER
 
     # ── Gate 0: kill switch (Round 15) ──────────────────────────────────
-    # Bypassed only by /debug_x probe (bypass_cooldown=True) so BCD can still
-    # diagnose connectivity even with X_LIVE_ENABLED=false.
     if not X_LIVE_ENABLED and not bypass_cooldown:
         log.info("[X_API_COST] kill switch active — caller=%s", caller)
         return None, _DIAG_KILL_SWITCH
 
-    # ── Gate 1: cooldown ─────────────────────────────────────────────────
-    if not bypass_cooldown:
-        in_cd, next_allowed = _within_cooldown()
-        if in_cd:
-            na = next_allowed.isoformat() if next_allowed else "—"
-            log.info("[X_API_COST] cooldown active — caller=%s next_allowed=%s", caller, na)
-            return None, _DIAG_INTERNAL_COOLDOWN.format(cool=FETCH_COOLDOWN_HOURS, next_allowed=na)
-
-    # ── Gate 2 REMOVED (R-XLIST-CANONICAL) ───────────────────────────────
-    # The bulk list pull is the single source of truth and is intentionally
-    # NOT gated by DAILY_CALL_CAP — suppressing it would blind the report to
-    # the 185-member set. Cost stays bounded by the cooldown (cache fallback)
-    # + kill switch above. We still log today's count for observability.
     _, used = _daily_cap_exceeded()
-    log.info("[X_API_COST] list bulk pull (uncapped) — calls_today=%d caller=%s", used, caller)
+    log.info(
+        "[X_API_COST] list pull — calls_today=%d caller=%s since_id=%s",
+        used, caller, since_id or "—(backfill)",
+    )
 
     url = f"https://api.x.com/2/lists/{X_LIST_ID}/tweets"
     params: dict[str, Any] = {
         "max_results": 100,
-        "tweet.fields": "created_at,author_id,text,public_metrics",
+        "tweet.fields": "created_at,author_id,text,public_metrics,referenced_tweets",
         "expansions": "author_id",
         "user.fields": "username,name,verified",
     }
+    if since_id:
+        params["since_id"] = str(since_id)
+    exclude_active = X_EXCLUDE_RT_REPLIES
+    if exclude_active:
+        params["exclude"] = "retweets,replies"
     headers = {"Authorization": f"Bearer {X_API_BEARER_TOKEN}"}
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
 
@@ -536,6 +518,17 @@ async def fetch_timeline_via_list(
                 last_error_diag = _DIAG_429
                 break
 
+            if resp.status_code == 400 and exclude_active and "exclude" in (resp.text or "").lower():
+                # R-COST-V2 graceful fallback: this endpoint/plan rejects the
+                # `exclude` param — retry without it (client-side filter below
+                # still drops RTs/replies from what we store/show).
+                log.warning("[X_API_COST] exclude param rejected by API — retrying without it")
+                exclude_active = False
+                params.pop("exclude", None)
+                record_x_api_call(LIST_ENDPOINT_KEY, 400, pages=pages_consumed,
+                                  tweets_returned=0, caller=f"{caller}:exclude_retry")
+                continue
+
             if resp.status_code != 200:
                 body_snip = resp.text[:300]
                 log.error("X API %d: %s", resp.status_code, body_snip)
@@ -580,8 +573,18 @@ async def fetch_timeline_via_list(
                 if created < cutoff:
                     reached_cutoff = True
                     break
+                # R-COST-V2 belt+braces: even if the API-level `exclude` param
+                # was applied (or rejected), drop RTs/replies client-side so
+                # they never enter the store. Quote-tweets are kept (original
+                # commentary). This filters tweet TYPES, never accounts.
+                if X_EXCLUDE_RT_REPLIES:
+                    refs = t.get("referenced_tweets") or []
+                    ref_types = {r.get("type") for r in refs if isinstance(r, dict)}
+                    if "retweeted" in ref_types or "replied_to" in ref_types:
+                        continue
                 user = users_map.get(t["author_id"], {})
                 all_tweets.append({
+                    "id": str(t.get("id") or ""),
                     "username": user.get("username", "unknown"),
                     "name": _sanitize_untrusted(user.get("name", "")),
                     "verified": user.get("verified", False),
@@ -600,9 +603,9 @@ async def fetch_timeline_via_list(
 
     unique_accounts = len(set(t["username"] for t in all_tweets))
 
-    # Round 12: record the aggregate call for cost tracking if we got a 200
-    # and haven't already recorded a status >= 400 for this fetch.
-    if last_status == 200 and tweets_returned_by_api > 0:
+    # Record the aggregate call for cost tracking on 200 — INCLUDING 0-tweet
+    # incremental fetches (R-COST-V2: they're free but we want the audit trail).
+    if last_status == 200:
         record_x_api_call(
             LIST_ENDPOINT_KEY,
             200,
@@ -610,20 +613,19 @@ async def fetch_timeline_via_list(
             tweets_returned=tweets_returned_by_api,
             caller=caller,
         )
-        # Structured cost log line
-        est_cost = (tweets_returned_by_api / 1000.0) * 0.25
+        # Structured cost log line — real measured rate $0.005/post
+        est_cost = tweets_returned_by_api * 0.005
         calls_24h = count_x_calls_since(24)
         calls_today = count_x_calls_today_calendar()
         proj = x_api_cost_projection()
         log.info(
             "[X_API_COST] caller=%s pages=%d tweets=%d est_cost=$%.4f "
-            "calls_today=%d/%d (cap), calls_24h=%d, 7d=$%.2f mo_proj=$%.2f",
+            "calls_today=%d calls_24h=%d, 7d=$%.2f mo_proj=$%.2f",
             caller or "?",
             pages_consumed,
             tweets_returned_by_api,
             est_cost,
             calls_today,
-            DAILY_CALL_CAP,
             calls_24h,
             proj["cost_7d"],
             proj["monthly_projection_usd"],
@@ -823,91 +825,22 @@ async def maybe_send_cost_alert(app=None) -> None:
             log.exception("maybe_send_cost_alert send failed (non-fatal)")
 
 
-async def maybe_send_75pct_alert(app=None) -> None:
-    """Round 15: notify BCD when daily cap reaches 75%.
-
-    Throttled once per UTC calendar day. Fires immediately after a successful
-    live fetch (in fetch_x_intel) so BCD knows to slow down before hitting cap.
-    """
-    used = count_x_calls_today_calendar()
-    if not should_send_75pct_alert(used, DAILY_CALL_CAP):
-        return
-    msg = (
-        f"⚠️ X API daily cap 75%\n\n"
-        f"We have {used}/{DAILY_CALL_CAP} fetches today (UTC). "
-        f"Once the cap is reached, /reporte will use cache until UTC midnight.\n\n"
-        f"To force cache-only now: Railway Variables → X_LIVE_ENABLED=false."
-    )
-    log.warning("[X_API_COST] 75pct ALERT: %s", msg.replace("\n", " | "))
-    if app is not None:
-        try:
-            from config import TELEGRAM_CHAT_ID
-            if TELEGRAM_CHAT_ID:
-                from utils.telegram import send_bot_message  # R20: auto-stamp timestamp
-                await send_bot_message(app.bot, int(TELEGRAM_CHAT_ID), msg)
-        except Exception:
-            log.exception("maybe_send_75pct_alert send failed (non-fatal)")
-
-
 # ─── Public API (consumed by bot.py, analysis.py, etc.) ────────────────────
-async def fetch_x_intel(
-    hours: int = 48,
-    caller: str = "fetch_x_intel",
-    app=None,
+
+def _build_payload(
+    tweets: list[dict[str, Any]],
+    hours: int,
+    extras_added: int = 0,
+    extras_diag: str | None = None,
+    extras_inactive: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Fetch X intel from the private list. Returns standard status dict.
+    """Assemble the standard payload dict from a tweet list (store or live).
 
-    `caller` is stamped on every recorded X API call (see intel_memory) so
-    that /debug_x and the cost-audit queries can attribute spend by source.
-    `app` (Telegram Application) lets us push the 75% daily-cap alert when
-    relevant; pass None for headless calls.
-
-    Round 15: on success the payload is mirrored to SQLite via
-    save_x_timeline_payload so it survives Railway redeploys (the in-memory
-    _cached_timeline used to be wiped on every restart).
+    Keeps every legacy key (data/by_user, accounts_scanned, canonical_*) so
+    templates/timeline.py, intel_slim and the LLM path are untouched.
     """
-    tweets, diag = await fetch_timeline_via_list(hours=hours, caller=caller)
-
-    if tweets is None:
-        return {
-            "status": "error",
-            "error": diag or "X API list fetch failed — check X_LIST_ID + X_API_BEARER_TOKEN",
-            "source": "x_api_list",
-            "tweets": [],
-        }
-
-    # R-BOT-FEEDS-EXPAND Task 2 — supplement with per-user extra handles
-    # (e.g. @intheassembly). Skipped when disabled / cap-exhausted; failures
-    # are non-fatal — list tweets still flow through.
-    extras_added = 0
-    extras_diag: str | None = None
-    extras_inactive: list[str] = []
-    if tweets is not None:
-        try:
-            extras, extras_diag, extras_inactive = await fetch_extra_handles_supplement(
-                handles=X_EXTRA_HANDLES, hours=hours, caller=f"{caller}:extras",
-            )
-            if extras:
-                # Dedup by tweet URL (per-user pull and list pull can both
-                # surface the same tweet if a handle is in both).
-                seen_urls = {t.get("url") for t in tweets if isinstance(t, dict)}
-                for et in extras:
-                    if et.get("url") in seen_urls:
-                        continue
-                    tweets.append(et)
-                    extras_added += 1
-                log.info(
-                    "[X_EXTRA] added %d tweets from %d handle(s) (window=%dh)",
-                    extras_added, len(X_EXTRA_HANDLES), hours,
-                )
-        except Exception:  # noqa: BLE001
-            log.exception("fetch_extra_handles_supplement failed (non-fatal)")
-
-    # R-XLIST-CANONICAL (2026-06-19): surface every canonical handle that
-    # produced NO tweet in the window (invalid / suspended / renamed / private /
-    # simply quiet). Such handles are NEVER silently dropped — they are kept in
-    # x_accounts.txt and reported here so BCD can spot typos. We merge in any
-    # supplement-inactive handles (the supplement is empty by default).
+    # R-XLIST-CANONICAL: surface every canonical handle with NO tweet in the
+    # window (invalid / suspended / renamed / quiet). Never silently dropped.
     seen_usernames = {
         str(t.get("username", "")).lower() for t in tweets if isinstance(t, dict)
     }
@@ -922,11 +855,6 @@ async def fetch_x_intel(
     active_in_window = len(CANONICAL_HANDLES) - len(
         [h for h in CANONICAL_HANDLES if h.lower() not in seen_usernames]
     )
-    if CANONICAL_HANDLES:
-        log.info(
-            "[X_CANONICAL] %d/%d canonical handles active in %dh window; %d inactive (no data)",
-            active_in_window, len(CANONICAL_HANDLES), hours, len(inactive_handles),
-        )
 
     if not tweets:
         return {
@@ -937,14 +865,12 @@ async def fetch_x_intel(
             "total": 0,
             "hours": hours,
             "note": "No tweets in time window",
-            # Aliases for templates/timeline.py legacy formatter:
             "data": {},
             "accounts_scanned": 0,
             "total_tweets": 0,
             "extra_handles": list(X_EXTRA_HANDLES),
             "extras_added": extras_added,
             "extras_diag": extras_diag,
-            # R-XLIST-CANONICAL: full canonical set is inactive when 0 tweets.
             "extras_inactive": inactive_handles,
             "canonical_total": len(CANONICAL_HANDLES),
             "canonical_active": 0,
@@ -962,56 +888,198 @@ async def fetch_x_intel(
     tweets.sort(key=lambda t: t["_engagement"], reverse=True)
 
     unique_accounts = len(set(t["username"] for t in tweets))
-
-    # Group by username for legacy formatter (templates/timeline.py expects
-    # data: {username: [tweets...]}, accounts_scanned, total_tweets)
     by_user: dict[str, list[dict[str, Any]]] = {}
     for t in tweets:
         by_user.setdefault(t["username"], []).append(t)
 
-    payload = {
+    return {
         "status": "ok",
         "source": "x_api_list",
         "tweets": tweets,
         "accounts": unique_accounts,
         "total": len(tweets),
         "hours": hours,
-        # Aliases for templates/timeline.py legacy formatter:
         "data": by_user,
         "accounts_scanned": unique_accounts,
         "total_tweets": len(tweets),
-        # R-BOT-FEEDS-EXPAND Task 2 — supplement attribution.
         "extra_handles": list(X_EXTRA_HANDLES),
         "extras_added": extras_added,
         "extras_diag": extras_diag,
-        # R-XLIST-CANONICAL: canonical handles with no data in window (kept,
-        # never dropped) + active/inactive tallies across the 185-member set.
         "extras_inactive": inactive_handles,
         "canonical_total": len(CANONICAL_HANDLES),
         "canonical_active": active_in_window,
         "canonical_inactive": len(inactive_handles),
     }
 
-    # Round 15: persist to SQLite so the cache survives Railway redeploys.
-    # Pre-Round 15 the only cache was the module-global _cached_timeline.
+
+def get_store_timeline_payload(hours: int = 48) -> dict[str, Any]:
+    """R-COST-V2: assemble the timeline payload from the LOCAL store only.
+
+    ZERO X API calls. Used by /timeline, /intel_sources and every fallback
+    path — the store IS the cache (48h window inside 72h retention).
+    """
+    from modules import x_store
+    stored = x_store.get_window(hours)
+    payload = _build_payload(stored, hours)
+    payload["from_store"] = True
+    st = x_store.store_stats()
+    payload["store_age_hours"] = st.get("newest_age_hours")
+    payload["store_last_fetch"] = st.get("last_fetch")
+    payload["budget"] = x_store.budget_state()
+    return payload
+
+
+async def _send_budget_warning(app, budget: dict[str, Any]) -> None:
+    """80% monthly-budget warning — one push per calendar month (critical-ops)."""
+    msg = (
+        f"⚠️ X API budget 80%\n\n"
+        f"Posts fetched this month: {budget['used']:,}/{budget['budget']:,} "
+        f"({budget['pct']:.0f}%).\n"
+        f"MTD cost ≈ ${budget['mtd_cost_usd']:.2f} @ $0.005/post.\n"
+        f"Projected month-end: {budget['projected_month_posts']:,} posts "
+        f"≈ ${budget['projected_month_cost_usd']:.2f}.\n\n"
+        f"At 100% /reporte switches to cached timeline until month rollover.\n"
+        f"Emergency override: Railway → X_BUDGET_OVERRIDE=true."
+    )
+    log.warning("[X_BUDGET] 80%% ALERT: %s", msg.replace("\n", " | "))
+    if app is not None:
+        try:
+            from config import TELEGRAM_CHAT_ID
+            if TELEGRAM_CHAT_ID:
+                from utils.telegram import send_bot_message
+                await send_bot_message(app.bot, int(TELEGRAM_CHAT_ID), msg)
+        except Exception:
+            log.exception("_send_budget_warning send failed (non-fatal)")
+
+
+async def fetch_x_intel(
+    hours: int = 48,
+    caller: str = "fetch_x_intel",
+    app=None,
+) -> dict[str, Any]:
+    """R-COST-V2 incremental fetch: NEVER PAY TWICE.
+
+    Flow:
+      1. Kill switch / monthly budget exhausted → serve the 48h window from
+         the local store (flagged, so /reporte can banner it). Zero API calls.
+      2. Otherwise fetch ONLY tweets newer than the persisted since_id
+         (first run after deploy = one bounded backfill of the 48h window).
+      3. Persist new tweets to the store, advance since_id, prune >72h.
+      4. Assemble the FULL 48h view from the store (new + previously stored).
+      5. At 80% of X_MONTHLY_POST_BUDGET fire one warning push per month.
+
+    On live failure the store window is served with `live_error` set, so
+    /reporte degrades to cache instead of losing the timeline section.
+    """
+    from modules import x_store
+
+    def _from_store(**flags) -> dict[str, Any]:
+        payload = get_store_timeline_payload(hours)
+        payload.update(flags)
+        return payload
+
+    # Gate A: kill switch → cache-only.
+    if not X_LIVE_ENABLED:
+        return _from_store(from_cache=True, cache_reason="kill_switch",
+                           live_error=_DIAG_KILL_SWITCH)
+
+    # Gate B: monthly post budget (CHANGE 4).
+    budget = x_store.budget_state()
+    if budget["exhausted"]:
+        log.warning(
+            "[X_BUDGET] EXHAUSTED %d/%d posts this month — serving cache (caller=%s)",
+            budget["used"], budget["budget"], caller,
+        )
+        return _from_store(from_cache=True, budget_exhausted=True,
+                           cache_reason="budget_exhausted")
+
+    # Incremental fetch: only tweets newer than the stored high-water mark.
+    since_id = x_store.get_since_id()
+    tweets, diag = await fetch_timeline_via_list(
+        hours=hours, caller=caller, since_id=since_id,
+    )
+
+    if tweets is None:
+        # Live failed → degrade to store window when it has data.
+        stored_payload = _from_store(from_cache=True, live_error=diag,
+                                     cache_reason="live_failed")
+        if stored_payload.get("total"):
+            return stored_payload
+        return {
+            "status": "error",
+            "error": diag or "X API list fetch failed — check X_LIST_ID + X_API_BEARER_TOKEN",
+            "source": "x_api_list",
+            "tweets": [],
+        }
+
+    fetched_new = len(tweets)
+
+    # R-BOT-FEEDS-EXPAND Task 2 — dormant per-user supplement (empty default).
+    extras_added = 0
+    extras_diag: str | None = None
+    extras_inactive: list[str] = []
+    try:
+        extras, extras_diag, extras_inactive = await fetch_extra_handles_supplement(
+            handles=X_EXTRA_HANDLES, hours=hours, caller=f"{caller}:extras",
+        )
+        if extras:
+            seen_urls = {t.get("url") for t in tweets if isinstance(t, dict)}
+            for et in extras:
+                if et.get("url") in seen_urls:
+                    continue
+                tweets.append(et)
+                extras_added += 1
+    except Exception:  # noqa: BLE001
+        log.exception("fetch_extra_handles_supplement failed (non-fatal)")
+
+    # CHANGE 2: persist + advance since_id + prune. The store is the truth.
+    try:
+        new_rows = x_store.upsert_tweets(tweets)
+        ids = [int(t["id"]) for t in tweets if str(t.get("id") or "").isdigit()]
+        if ids:
+            x_store.set_since_id(str(max(ids)))
+        x_store.prune_old()
+        log.info(
+            "[X_STORE] caller=%s fetched_new=%d stored_new=%d since_id=%s",
+            caller, fetched_new, new_rows, x_store.get_since_id(),
+        )
+    except Exception:
+        log.exception("[X_STORE] persist failed (non-fatal)")
+
+    # CHANGE 4: 80% budget warning (one push per calendar month).
+    try:
+        budget = x_store.budget_state()
+        if x_store.should_send_budget_warning(budget["pct"]):
+            await _send_budget_warning(app, budget)
+    except Exception:
+        log.exception("budget warning dispatch failed (non-fatal)")
+
+    # Assemble the FULL window from the store (new fetch + prior tweets).
+    stored = x_store.get_window(hours)
+    payload = _build_payload(stored, hours, extras_added, extras_diag, extras_inactive)
+    payload["fetched_new"] = fetched_new
+    payload["from_store"] = True
+    payload["budget"] = budget
+
+    if CANONICAL_HANDLES:
+        log.info(
+            "[X_CANONICAL] %d/%d canonical handles active in %dh window",
+            payload.get("canonical_active", 0), len(CANONICAL_HANDLES), hours,
+        )
+
+    # Legacy payload mirror (survives redeploys; feeds cache_banner/state).
     try:
         save_x_timeline_payload(payload)
         global _cached_timeline
         _cached_timeline = payload
         _cache_state["last_success_at"] = datetime.now(timezone.utc).isoformat()
         _cache_state["last_attempt_at"] = _cache_state["last_success_at"]
-        _cache_state["last_tweet_count"] = len(tweets)
-        _cache_state["last_account_count"] = unique_accounts
+        _cache_state["last_tweet_count"] = payload.get("total", 0)
+        _cache_state["last_account_count"] = payload.get("accounts", 0)
         _cache_state["last_error"] = None
         _cache_state["successive_failures"] = 0
     except Exception:
         log.exception("[X_CACHE] persist after fetch_x_intel failed (non-fatal)")
-
-    # Round 15: fire 75% daily-cap alert if applicable.
-    try:
-        await maybe_send_75pct_alert(app)
-    except Exception:
-        log.exception("75pct alert dispatch failed (non-fatal)")
 
     return payload
 
@@ -1037,63 +1105,60 @@ async def debug_x_status() -> str:
     lines.append(f"  List bulk pull: UNGATED by daily cap (pages≤{LIST_MAX_PAGES})")
     lines.append("")
 
-    # API stats (Round 12 — realistic cost model, SQLite-persisted)
+    # API stats (R-COST-V2 — real cost model, SQLite-persisted)
     stats = get_api_stats()
     lines.append("📊 X API Cost (persisted in SQLite):")
     lines.append(f"  7d: {stats['cost_7d_str']} in {stats['calls_7d']} calls, {stats['tweets_7d']} tweets")
     lines.append(f"  Monthly projection: {stats['monthly_projection_str']}")
-    lines.append(f"  24h calls: {stats['calls_24h']}/{stats['daily_cap']} (internal cap)")
-    lines.append(f"  Cooldown: {stats['cooldown_hours']}h between fetches")
+    lines.append(f"  24h calls: {stats['calls_24h']}/{stats['daily_cap']} (extras cap)")
     last_ok = stats["last_success_ts"] or "— never"
     lines.append(f"  Last successful fetch: {last_ok}")
     lines.append("")
 
-    # Cache state (scheduler)
-    cs = get_cache_state()
-    lines.append(f"💾 Cache scheduler (every {int(FETCH_COOLDOWN_HOURS)}h):")
-    lines.append(f"  Last success: {cs.get('last_success_at') or '— never'}")
-    lines.append(f"  Last attempt: {cs.get('last_attempt_at') or '— never'}")
-    tc = cs.get("last_tweet_count", 0)
-    ac = cs.get("last_account_count", 0)
-    lines.append(f"  Last cache content: {tc} tweets from {ac} accounts")
-    succ_fail = cs.get("successive_failures", 0)
-    if succ_fail > 0:
-        lines.append(f"  ⚠️ {succ_fail} consecutive failures")
-    if cs.get("last_error"):
-        lines.append(f"  Last error: {cs['last_error'][:300]}")
-    lines.append("")
-
-    # Live test — bypass cooldown so /debug_x always probes real state
-    # (max_tweets=5 keeps cost floor at ≈$0.00125 per probe)
-    if X_LIST_ID and X_API_BEARER_TOKEN:
-        lines.append("🧪 Live test (bypass cooldown, 5 tweets max)...")
-        tweets, diag = await fetch_timeline_via_list(
-            hours=1, max_tweets=5, caller="debug_x", bypass_cooldown=True
+    # R-COST-V2: local tweet store (incremental fetch)
+    try:
+        ss = x_store.store_stats()
+        budget = x_store.budget_state()
+        lines.append("💾 Local tweet store (incremental since_id):")
+        lines.append(f"  Tweets stored: {ss['total_tweets']} (retention {ss['retention_hours']}h)")
+        lines.append(f"  Newest: {ss['newest_created_at'] or '— empty'}")
+        lines.append(f"  Oldest: {ss['oldest_created_at'] or '— empty'}")
+        lines.append(f"  since_id: {ss['since_id'] or '— first fetch pending'}")
+        lines.append(f"  Last fetch: {ss['last_fetch_ts'] or '— never'}")
+        lines.append("")
+        lines.append("💰 Monthly budget:")
+        lines.append(
+            f"  Posts MTD: {budget['used']}/{budget['budget']} ({budget['pct']:.0f}%)"
+            + (" 🛑 EXHAUSTED" if budget["exhausted"] else "")
         )
-        if tweets is not None:
-            lines.append(f"  ✅ Connected — {len(tweets)} tweets last hour")
-            if tweets:
-                usernames = set(t["username"] for t in tweets)
-                lines.append(f"  Active accounts: {', '.join(sorted(usernames)[:5])}...")
-        else:
-            lines.append(f"  ❌ Fetch failed: {diag}")
-    else:
-        lines.append("⚠️ Cannot test — missing env vars")
+        lines.append(f"  Projected month-end: {budget['projected_month_posts']} posts ≈ ${budget['projected_month_cost_usd']:.2f}")
+        if budget.get("override"):
+            lines.append("  ⚠️ X_BUDGET_OVERRIDE active — guard bypassed")
+    except Exception as exc:
+        lines.append(f"💾 Store stats unavailable: {exc}")
 
     lines.append("")
+    lines.append("ℹ️ R-COST-V2: /debug_x makes ZERO live API calls. X reads only via /reporte and /xrefresh.")
     lines.append("💡 To add/remove accounts, edit the list from the X app.")
 
     return "\n".join(lines)
 
 
 async def format_intel_sources(hours: int = 24, max_tweets: int = 500) -> str:
-    """Format active sources for /intel_sources command."""
-    tweets, diag = await fetch_timeline_via_list(
-        hours=hours, max_tweets=max_tweets, caller="intel_sources"
-    )
+    """Format active sources for /intel_sources command.
+
+    R-COST-V2: reads EXCLUSIVELY from the local tweet store — zero API calls.
+    Run /reporte (or /xrefresh) first to populate/refresh the store.
+    """
+    tweets = x_store.get_window(hours)
 
     if not tweets:
-        return f"❌ Could not read the list.\nDiag: {diag or 'no diagnostic'}"
+        last = x_store.last_fetch_ts()
+        return (
+            f"❌ No tweets in local store for the last {hours}h.\n"
+            f"Last fetch: {last or '— never'}\n"
+            "💡 Run /reporte or /xrefresh to populate the store (zero API calls happen here)."
+        )
 
     by_user = Counter(t["username"] for t in tweets)
     top = by_user.most_common(20)
@@ -1121,61 +1186,21 @@ _cache_state: dict[str, Any] = {
 }
 
 
-async def poll_and_cache_timeline(app=None) -> None:
-    """Scheduler job: fetch timeline and cache it for quick access.
-
-    Round 12: passes caller="scheduler" for cost attribution and invokes
-    maybe_send_cost_alert(app) post-refresh so BCD receives a Telegram
-    warning if the 7d-trailing cost extrapolates above threshold.
-
-    Never re-raises — the scheduler must keep running. All failures
-    populate _cache_state["last_error"] with a diagnostic string.
-    """
-    global _cached_timeline
-    log.info("[X_CACHE] Starting scheduled refresh")
-    _cache_state["last_attempt_at"] = datetime.now(timezone.utc).isoformat()
-    try:
-        result = await fetch_x_intel(hours=48, caller="scheduler")
-        if result.get("status") == "ok":
-            _cached_timeline = result
-            _cache_state["last_success_at"] = datetime.now(timezone.utc).isoformat()
-            _cache_state["last_error"] = None
-            _cache_state["last_tweet_count"] = result.get("total", 0)
-            _cache_state["last_account_count"] = result.get("accounts", 0)
-            _cache_state["successive_failures"] = 0
-            log.info(
-                "[X_CACHE] Success: %d tweets from %d accounts",
-                result.get("total", 0),
-                result.get("accounts", 0),
-            )
-        else:
-            err = result.get("error", "unknown")
-            _cache_state["last_error"] = err
-            _cache_state["successive_failures"] += 1
-            log.warning(
-                "[X_CACHE] FAILED (%d consecutive): %s",
-                _cache_state["successive_failures"], err,
-            )
-    except Exception as e:
-        err = f"{type(e).__name__}: {str(e)[:200]}"
-        _cache_state["last_error"] = err
-        _cache_state["successive_failures"] += 1
-        log.exception("[X_CACHE] Exception (%d consecutive)", _cache_state["successive_failures"])
-
-    # Fire cost alert if applicable (always attempted, even on failure)
-    try:
-        await maybe_send_cost_alert(app)
-    except Exception:
-        log.exception("[X_CACHE] cost alert invocation failed (non-fatal)")
-
-
 def get_cached_timeline() -> dict[str, Any] | None:
-    """Return the last cached timeline, or None.
+    """Return the freshest cached timeline WITHOUT any API call.
 
-    Round 15: prefer the in-memory cache (fast path), but fall back to SQLite
-    when it's empty — this happens immediately after a Railway redeploy.
+    R-COST-V2: prefer the local tweet store (survives redeploys, always
+    prunable/assemblable at 72h retention > 48h window). Fall back to the
+    legacy SQLite payload mirror, then the in-memory copy.
     """
     global _cached_timeline
+    try:
+        if x_store.store_stats()["total_tweets"] > 0:
+            payload = get_store_timeline_payload(hours=48)
+            _cached_timeline = payload
+            return payload
+    except Exception:
+        log.exception("[X_CACHE] store-backed cache read failed; using legacy mirror")
     if _cached_timeline is not None:
         return _cached_timeline
     payload, saved_at = load_x_timeline_payload()
@@ -1230,6 +1255,12 @@ def cache_banner_for_report() -> str:
     """Return the one-liner banner shown at the top of /reporte's timeline
     section telling BCD whether the X timeline is live or cached.
     """
+    try:
+        last = x_store.last_fetch_ts()
+        if last:
+            return f"📡 X Timeline: local store — last fetch {last}"
+    except Exception:
+        pass
     cs = get_cache_state()
     iso = cs.get("last_success_at")
     age = cache_age_text()
@@ -1241,6 +1272,63 @@ def cache_banner_for_report() -> str:
     )
 
 
+def budget_banner_for_report() -> str:
+    """CHANGE 4: banner rendered in /reporte when the monthly budget is
+    exhausted and the timeline section falls back to the local store."""
+    try:
+        budget = x_store.budget_state()
+        ss = x_store.store_stats()
+        age = "?"
+        if ss.get("last_fetch_ts"):
+            try:
+                ts = datetime.fromisoformat(ss["last_fetch_ts"])
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                age = f"{(datetime.now(timezone.utc) - ts).total_seconds() / 3600:.1f}"
+            except Exception:
+                pass
+        return (
+            f"🛑 X budget exhausted ({budget['used']}/{budget['budget']} posts this month) "
+            f"— showing cached timeline (age: {age}h). Override: X_BUDGET_OVERRIDE=true"
+        )
+    except Exception:
+        return "🛑 X budget exhausted — showing cached timeline"
+
+
+async def format_x_costs() -> str:
+    """Output for the new /costs command (CHANGE 5 — cost visibility)."""
+    budget = x_store.budget_state()
+    ss = x_store.store_stats()
+
+    bar_pct = min(budget["pct"], 100.0)
+    filled = int(bar_pct // 10)
+    bar = "█" * filled + "░" * (10 - filled)
+
+    lines: list[str] = []
+    lines.append("💰 X API COSTS — R-COST-V2")
+    lines.append("─" * 32)
+    lines.append("")
+    lines.append(f"📅 Posts today (UTC): {budget['today']} (${budget['today'] * x_store.COST_PER_POST_USD:.2f})")
+    lines.append(f"📅 Posts MTD: {budget['used']} (${budget['mtd_cost_usd']:.2f})")
+    lines.append("")
+    lines.append(f"🎯 Monthly budget: {budget['used']}/{budget['budget']} ({budget['pct']:.0f}%)")
+    lines.append(f"   [{bar}]" + (" 🛑 EXHAUSTED — cache-only" if budget["exhausted"] else ""))
+    if budget.get("override"):
+        lines.append("   ⚠️ X_BUDGET_OVERRIDE=true — guard bypassed")
+    lines.append("")
+    lines.append(f"📈 Projection month-end: {budget['projected_month_posts']} posts ≈ ${budget['projected_month_cost_usd']:.2f}")
+    lines.append(f"   (cost model: ${x_store.COST_PER_POST_USD:.3f}/post — real Console rate)")
+    lines.append("")
+    lines.append("💾 Local store:")
+    lines.append(f"   Tweets: {ss['total_tweets']} | retention: {ss['retention_hours']}h")
+    lines.append(f"   since_id: {ss['since_id'] or '— first fetch pending'}")
+    lines.append(f"   Last fetch: {ss['last_fetch_ts'] or '— never'}")
+    lines.append(f"   Window: {ss['oldest_created_at'] or '—'} → {ss['newest_created_at'] or '—'}")
+    lines.append("")
+    lines.append("ℹ️ X reads ONLY inside /reporte + /xrefresh (incremental since_id).")
+    return "\n".join(lines)
+
+
 async def format_x_status() -> str:
     """Output for /x_status command."""
     cs = get_cache_state()
@@ -1248,28 +1336,35 @@ async def format_x_status() -> str:
     used_today = count_x_calls_today_calendar()
     successful_today = count_x_calls_today_live_only()
     last_ok = last_successful_x_call_ts(LIST_ENDPOINT_KEY)
-    next_allowed = None
-    if last_ok:
-        next_allowed = last_ok + timedelta(hours=FETCH_COOLDOWN_HOURS)
+    budget = x_store.budget_state()
+    ss = x_store.store_stats()
 
     lines: list[str] = []
-    lines.append("🛰  X API STATUS — Round 15 on-demand mode")
+    lines.append("🛰  X API STATUS — R-COST-V2 on-demand + incremental")
     lines.append("─" * 32)
     lines.append("")
     lines.append("⚙️ Configuration:")
     lines.append(f"  X_LIVE_ENABLED: {'✅ true' if X_LIVE_ENABLED else '🛑 false (cache-only)'}")
-    lines.append(f"  X_RATE_LIMIT_HOURS: {FETCH_COOLDOWN_HOURS:.1f}h")
-    lines.append(f"  X_DAILY_CAP: {DAILY_CALL_CAP}/day (UTC)")
-    lines.append(f"  X_SCHEDULER_ENABLED: {'✅ on' if X_SCHEDULER_ENABLED else '🛑 off (Round 15 default)'}")
+    lines.append(f"  X_EXCLUDE_RT_REPLIES: {'✅ on' if X_EXCLUDE_RT_REPLIES else 'off'}")
+    lines.append(f"  X_MONTHLY_POST_BUDGET: {budget['budget']} posts")
+    lines.append(f"  X_DAILY_CAP (extras only): {DAILY_CALL_CAP}/day (UTC)")
+    lines.append("  Scheduler: 🛑 NONE — X reads only inside /reporte and /xrefresh")
     lines.append("")
     lines.append("📊 Usage today (UTC calendar day):")
-    lines.append(f"  Fetches used: {used_today}/{DAILY_CALL_CAP}")
-    lines.append(f"  Successful (200): {successful_today}")
+    lines.append(f"  API calls: {used_today} ({successful_today} successful)")
+    lines.append(f"  Posts fetched today: {budget['today']}")
     lines.append(f"  Last fetch OK: {last_ok.isoformat() if last_ok else '— never'}")
-    if next_allowed:
-        lines.append(f"  Next fetch allowed: {next_allowed.isoformat()}")
-    else:
-        lines.append("  Next fetch allowed: — no active cooldown")
+    lines.append("")
+    lines.append("💰 Monthly budget:")
+    lines.append(
+        f"  Posts MTD: {budget['used']}/{budget['budget']} ({budget['pct']:.0f}%)"
+        + (" 🛑 EXHAUSTED — cache-only" if budget["exhausted"] else "")
+    )
+    lines.append(f"  MTD cost: ${budget['mtd_cost_usd']:.2f} | Projection: {budget['projected_month_posts']} posts ≈ ${budget['projected_month_cost_usd']:.2f}")
+    lines.append("")
+    lines.append("💾 Local store (since_id incremental):")
+    lines.append(f"  Tweets: {ss['total_tweets']} | since_id: {ss['since_id'] or '—'}")
+    lines.append(f"  Last fetch: {ss['last_fetch_ts'] or '— never'}")
     lines.append("")
     lines.append("💰 Cost (persisted SQLite):")
     lines.append(f"  Last 7d: ${proj['cost_7d']:.2f} ({proj['calls_7d']} calls, {proj['tweets_7d']} tweets)")
@@ -1282,8 +1377,8 @@ async def format_x_status() -> str:
     if cs.get("last_error"):
         lines.append(f"  Last error: {str(cs.get('last_error'))[:200]}")
     lines.append("")
-    lines.append("ℹ️ Round 15: live fetches only on-demand via /reporte/timeline. "
-                 "Automatic scheduler off by default.")
+    lines.append("ℹ️ R-COST-V2: live fetches ONLY inside /reporte and /xrefresh. "
+                 "Everything else reads the local store.")
     return "\n".join(lines)
 
 
@@ -1329,7 +1424,7 @@ async def format_x_costos() -> str:
                 f"calls={row['calls']} tw={row['tweets']}"
             )
         lines.append("")
-    lines.append("ℹ️ Cost model X API: $0.25 / 1,000 tweets returned")
-    lines.append(f"ℹ️ Cooldown {FETCH_COOLDOWN_HOURS:.1f}h, cap {DAILY_CALL_CAP}/day")
+    lines.append(f"ℹ️ Cost model X API: ${x_store.COST_PER_POST_USD:.3f} / post read (real Console rate)")
+    lines.append("ℹ️ No cooldown — incremental since_id fetch means repeats only pay the delta")
     lines.append("ℹ️ To force cache-only: Railway → X_LIVE_ENABLED=false")
     return "\n".join(lines)

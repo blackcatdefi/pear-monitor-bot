@@ -47,7 +47,9 @@ COMMANDS: List[BotCommand] = [
     BotCommand("compounding_history", "Compounding events last 30d (R18)", "trading", "cmd_compounding_history"),
 
     # ─── INTEL ───
-    BotCommand("timeline", "X Timeline 48h (your X list)", "intel", "cmd_timeline"),
+    BotCommand("timeline", "X Timeline 48h (local store, $0)", "intel", "cmd_timeline"),
+    BotCommand("xrefresh", "Refresh X store (incremental, paga solo el delta)", "intel", "cmd_xrefresh"),
+    BotCommand("costs", "X API costs: today/MTD/budget/projection", "intel", "cmd_costs"),
     BotCommand("intel", "Intel memory summary (last 24h)", "intel", "cmd_intel"),
     BotCommand("intel_sources", "Top 20 active accounts on X (24h)", "intel", "cmd_intel_sources"),
     BotCommand("intel_search", "Search keyword in intel_memory <kw>", "intel", "cmd_intel_search"),

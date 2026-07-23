@@ -109,12 +109,12 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 
-# ─── Round 12: X API call tracking + rate limiting ─────────────────────────
+# ─── Round 12 → R-COST-V2: X API call tracking ──────────────────────────────
 # Pricing reference (Pay-Per-Use, Owned Reads): X bills per TWEET RETURNED,
-# not per request. Historical audit (Apr 15–22, 2026) showed $20.48 spent for
-# ~82K tweets returned across list fetches + pre-R9 per-user timeline calls.
-# That implies an effective rate of ≈$0.25 / 1,000 tweets.
-X_API_COST_PER_1K_TWEETS = 0.25
+# not per request. R-COST-V2 (2026-07-23): the real Developer Console invoice
+# showed $106.21 for 21,240 posts (Jun 23–Jul 23) → $0.005/post, i.e.
+# $5.00 / 1,000 tweets. The old 0.25 figure under-estimated cost by 20x.
+X_API_COST_PER_1K_TWEETS = float(os.getenv("X_API_COST_PER_1K_TWEETS", "5.0"))
 
 
 def record_x_api_call(

@@ -75,16 +75,17 @@ from modules.bounce_tech import detect_closes as bt_detect_closes, fetch_bounce_
 from modules.gmail_intel import scan_gmail_unread
 from modules.version_info import format_version_block
 from modules.x_intel import (
+    budget_banner_for_report,
     cache_banner_for_report,
     debug_x_status,
     fetch_x_intel,
     format_intel_sources,
     format_x_costos,
+    format_x_costs,
     format_x_status,
     get_cache_state,
     get_cached_timeline,
-    poll_and_cache_timeline,
-    X_SCHEDULER_ENABLED,
+    get_store_timeline_payload,
 )
 from modules.cryexc_intel import (
     fetch_cryexc,
@@ -424,14 +425,18 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 live_err = str(x_intel.get("error") or "")[:200]
             x_intel_fallback_note = (
                 f"\u26a0\ufe0f Live API failed: {live_err}\n"
-                f"Showing scheduler cache (last success UTC: {last_ok}).\n"
+                f"Showing local store cache (last success UTC: {last_ok}).\n"
             )
             x_intel = cached
             x_intel_ok = True
 
     if x_intel_ok:
         timeline_text = format_timeline(x_intel, top_n=40)
-        banner = cache_banner_for_report()
+        # R-COST-V2 CHANGE 4: budget-exhausted banner (cache-only render)
+        if isinstance(x_intel, dict) and x_intel.get("budget_exhausted"):
+            banner = budget_banner_for_report()
+        else:
+            banner = cache_banner_for_report()
         header = (
             "\U0001f4e1 X TIMELINE \u2014 48H\n"
             + ("\u2500" * 30) + "\n"
@@ -707,25 +712,56 @@ async def cmd_tesis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 @authorized
 @with_error_logging
 async def cmd_timeline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-COST-V2: /timeline reads EXCLUSIVELY from the local store — $0.
+    To refresh with new tweets, run /reporte or /xrefresh."""
+    x_intel = get_store_timeline_payload(hours=48)
+    banner = cache_banner_for_report()
+    if not x_intel or not x_intel.get("total"):
+        await update.message.reply_text(
+            "\U0001f4ed Local X store empty — run /reporte or /xrefresh first "
+            "(that's the only place the X API is called).",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    text = banner + "\n" + ("\u2500" * 30) + "\n\n" + format_timeline(x_intel, top_n=40)
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_xrefresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-COST-V2: explicit manual X refresh — the ONLY live call site
+    besides /reporte. Incremental via since_id (pays only the delta)."""
     await update.message.reply_text(
-        "\u23f3 Reading last 48h of your X list...",
+        "\u23f3 Refreshing X list (incremental since_id)...",
         reply_markup=MAIN_KEYBOARD,
     )
-    x_intel = await fetch_x_intel(hours=48, caller="timeline", app=context.application)
-    banner = cache_banner_for_report()
-    if isinstance(x_intel, dict) and x_intel.get("status") != "ok":
-        cached = get_cached_timeline()
-        if cached and cached.get("status") == "ok":
-            prefix = (
-                f"\u26a0\ufe0f Live failed: {x_intel.get('error','')[:200]}\n"
-                f"{banner}\n"
-                + ("\u2500" * 30) + "\n\n"
-            )
-            text = prefix + format_timeline(cached, top_n=40)
-        else:
-            text = format_timeline(x_intel, top_n=40)
-    else:
-        text = banner + "\n" + ("\u2500" * 30) + "\n\n" + format_timeline(x_intel, top_n=40)
+    x_intel = await fetch_x_intel(hours=48, caller="xrefresh", app=context.application)
+    if isinstance(x_intel, dict) and x_intel.get("budget_exhausted"):
+        from modules.x_intel import budget_banner_for_report as _bb
+        await update.message.reply_text(_bb(), reply_markup=MAIN_KEYBOARD)
+        return
+    if not isinstance(x_intel, dict) or x_intel.get("status") != "ok":
+        err = str((x_intel or {}).get("error") or "")[:200] if isinstance(x_intel, dict) else ""
+        await update.message.reply_text(
+            f"\u274c Refresh failed: {err or 'unknown'}", reply_markup=MAIN_KEYBOARD
+        )
+        return
+    fetched = x_intel.get("fetched_new", 0)
+    total = x_intel.get("total", 0)
+    await update.message.reply_text(
+        f"\u2705 X store refreshed: +{fetched} new posts fetched "
+        f"(\u2248${fetched * 0.005:.2f}) \u2014 {total} tweets in 48h window.\n"
+        "Use /timeline to view it.",
+        reply_markup=MAIN_KEYBOARD,
+    )
+
+
+@authorized
+@with_error_logging
+async def cmd_costs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-COST-V2 CHANGE 5: X cost visibility dashboard."""
+    text = await format_x_costs()
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
@@ -776,10 +812,7 @@ async def cmd_costos_x(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 @authorized
 @with_error_logging
 async def cmd_intel_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "\u23f3 Reading X list \u2014 top 20 accounts last 24h...",
-        reply_markup=MAIN_KEYBOARD,
-    )
+    # R-COST-V2: store-only read — zero API calls.
     text = await format_intel_sources(hours=24)
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
@@ -1971,17 +2004,8 @@ async def _intel_processor_job() -> None:
         log.exception("Intel processor job failed")
 
 
-async def _x_timeline_cache_job(application: Application | None = None) -> None:
-    try:
-        from modules.cron_state import intel_autopull_enabled
-        if not intel_autopull_enabled():
-            return
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        await poll_and_cache_timeline(app=application)
-    except Exception:  # noqa: BLE001
-        log.exception("X timeline cache job failed")
+# R-COST-V2: _x_timeline_cache_job REMOVED. No scheduled/cron/interval path
+# may call the X API — reads happen ONLY inside /reporte and /xrefresh.
 
 
 async def _backup_job() -> None:
@@ -3313,27 +3337,9 @@ async def post_init(application: Application) -> None:
             max_instances=1,
             coalesce=True,
         )
-        if X_SCHEDULER_ENABLED:
-            x_cache_hours = float(os.getenv("X_CACHE_INTERVAL_HOURS", "6"))
-            scheduler.add_job(
-                _x_timeline_cache_job,
-                "interval",
-                hours=x_cache_hours,
-                args=[application],
-                id="x_timeline_cache",
-                max_instances=1,
-                coalesce=True,
-                next_run_time=datetime.now(timezone.utc) + timedelta(seconds=30),
-            )
-            log.info(
-                "X timeline cache scheduler ENABLED — every %.1fh (X_SCHEDULER_ENABLED=true)",
-                x_cache_hours,
-            )
-        else:
-            log.info(
-                "X timeline cache scheduler DISABLED (Round 15 default). "
-                "Set X_SCHEDULER_ENABLED=true to re-enable."
-            )
+        # R-COST-V2: X timeline scheduler PERMANENTLY REMOVED. X API reads
+        # happen ONLY inside /reporte and /xrefresh (incremental since_id).
+        log.info("X timeline scheduler: REMOVED (R-COST-V2) — X reads only via /reporte + /xrefresh")
 
         # Round 16: nightly SQLite backup at 03:00 UTC
         scheduler.add_job(
@@ -3787,11 +3793,10 @@ async def post_init(application: Application) -> None:
         scheduler.start()
         application.bot_data["scheduler"] = scheduler
         log.info(
-            "Scheduler started: alerts %dmin, intel 30min, X %s, backup 03:00 UTC, cleanup Sun 04:00 UTC. "
+            "Scheduler started: alerts %dmin, intel 30min, X REMOVED (R-COST-V2), backup 03:00 UTC, cleanup Sun 04:00 UTC. "
             "R17: macro_cal 1min, reconcile 15min, kill 5min, rates 30min, weekly_summary Sun 18:00 UTC. "
             "R-PERFECT: selftest 4x/day, backup_volume 04:00 UTC, cost_alert hourly.",
             POLL_INTERVAL_MIN,
-            "ON" if X_SCHEDULER_ENABLED else "OFF",
         )
 
     # Cleanup old intel memory entries (7+ days old)
@@ -3837,6 +3842,9 @@ HANDLER_MAP = {
     "reporte": cmd_reporte,
     "tesis": cmd_tesis,
     "timeline": cmd_timeline,
+    # R-COST-V2: manual incremental refresh + cost dashboard
+    "xrefresh": cmd_xrefresh,
+    "costs": cmd_costs,
     "alertas": cmd_alertas,
     "intel": cmd_intel,
     "debug_x": cmd_debug_x,

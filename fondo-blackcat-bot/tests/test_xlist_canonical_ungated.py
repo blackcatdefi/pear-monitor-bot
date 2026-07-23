@@ -5,7 +5,7 @@ Prior to R-XLIST-CANONICAL, ``fetch_timeline_via_list`` returned a cap
 diagnostic (and the report fell back to cache) once the per-day call budget was
 exhausted. That would blind the /reporte X TIMELINE to the 185-member set. These
 tests lock in that the cap no longer suppresses the bulk read, while the kill
-switch and cooldown still bound cost.
+switch and the R-COST-V2 monthly budget still bound cost.
 """
 from __future__ import annotations
 
@@ -62,7 +62,6 @@ async def test_bulk_list_pull_not_gated_by_daily_cap(monkeypatch):
     # Cap reported EXHAUSTED — under the old design this would short-circuit.
     monkeypatch.setattr(_xi, "_daily_cap_exceeded", lambda: (True, 999))
     # Neutralize cost/cooldown/recording side effects.
-    monkeypatch.setattr(_xi, "_within_cooldown", lambda: (False, None))
     monkeypatch.setattr(_xi, "_track_call", lambda *a, **k: None)
     monkeypatch.setattr(_xi, "record_x_api_call", lambda *a, **k: None)
     monkeypatch.setattr(_xi.httpx, "AsyncClient", _FakeClient)
@@ -114,7 +113,6 @@ async def test_list_path_sanitizes_injection_in_text_and_name(monkeypatch):
             })
 
     monkeypatch.setattr(_xi, "_daily_cap_exceeded", lambda: (False, 0))
-    monkeypatch.setattr(_xi, "_within_cooldown", lambda: (False, None))
     monkeypatch.setattr(_xi, "_track_call", lambda *a, **k: None)
     monkeypatch.setattr(_xi, "record_x_api_call", lambda *a, **k: None)
     monkeypatch.setattr(_xi.httpx, "AsyncClient", _InjClient)
