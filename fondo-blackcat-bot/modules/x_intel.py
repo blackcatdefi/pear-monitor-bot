@@ -1088,6 +1088,9 @@ async def fetch_x_intel(
     stored = x_store.get_window(hours)
     payload = _build_payload(stored, hours, extras_added, extras_diag, extras_inactive)
     payload["fetched_new"] = fetched_new
+    # R-XSTORE-FIX: raw posts the API charged for this fetch (pre RT/reply
+    # filter + boundary trim) — the honest number for the /xrefresh cost line.
+    payload["posts_paid"] = _last_fetch_meta.get("returned", fetched_new)
     payload["from_store"] = True
     payload["usage"] = x_store.usage_state()
 
@@ -1141,6 +1144,7 @@ def render_xrefresh_result(payload: dict[str, Any] | None) -> str:
         err = str(payload.get("error") or "unknown")[:300]
         return f"\u274c X fetch error: {err}"
     fetched = int(payload.get("fetched_new") or 0)
+    paid = int(payload.get("posts_paid") or fetched)
     total = payload.get("total", 0)
     if fetched == 0:
         return (
@@ -1151,7 +1155,8 @@ def render_xrefresh_result(payload: dict[str, Any] | None) -> str:
         )
     return (
         f"\u2705 X store refreshed: +{fetched} new posts fetched "
-        f"(\u2248${fetched * 0.005:.2f}) \u2014 {total} tweets in 48h window.\n"
+        f"({paid} posts pagados \u2248 ${paid * 0.005:.2f}) \u2014 "
+        f"{total} tweets in 48h window.\n"
         "Use /timeline to view it."
     )
 
