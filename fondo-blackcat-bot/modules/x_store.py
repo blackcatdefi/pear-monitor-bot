@@ -92,6 +92,21 @@ def _get_conn() -> sqlite3.Connection:
             payload TEXT
         )
     """)
+    # R-XSTORE-FIX (2026-07-27): persistent per-fetch audit log so the next
+    # "store frozen" incident is diagnosable from /debug_x or Railway logs
+    # without guesswork. One row per fetch ATTEMPT (success or error).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS x_fetch_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            caller TEXT DEFAULT '',
+            since_id_sent TEXT,
+            pages INTEGER DEFAULT 0,
+            posts_returned INTEGER DEFAULT 0,
+            new_stored INTEGER DEFAULT 0,
+            error TEXT
+        )
+    """)
     conn.commit()
     return conn
 
@@ -123,7 +138,8 @@ def set_since_id(tweet_id: str) -> None:
                 if int(tweet_id) <= int(cur):
                     return  # never move backwards
             except (TypeError, ValueError):
-                pass
+                log.warning("set_since_id: non-numeric compare %r vs %r "
+                            "— storing new value", tweet_id, cur)
         conn = _get_conn()
         conn.execute(
             "INSERT OR REPLACE INTO x_fetch_state (key, value, updated_at) "
@@ -150,6 +166,56 @@ def last_fetch_ts() -> datetime | None:
         return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
     except Exception:
         return None
+
+
+# ─── R-XSTORE-FIX: persistent fetch audit log ───────────────────────────────
+
+def log_fetch(
+    caller: str,
+    since_id_sent: str | None,
+    pages: int,
+    posts_returned: int,
+    new_stored: int,
+    error: str | None = None,
+) -> None:
+    """Persist one fetch-attempt row (timestamp, boundary sent, pages walked,
+    posts returned, rows stored, error if any). NEVER raises."""
+    try:
+        conn = _get_conn()
+        conn.execute(
+            "INSERT INTO x_fetch_log (ts, caller, since_id_sent, pages, "
+            "posts_returned, new_stored, error) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                datetime.now(timezone.utc).isoformat(),
+                caller or "",
+                str(since_id_sent) if since_id_sent else None,
+                int(pages), int(posts_returned), int(new_stored),
+                (error or None),
+            ),
+        )
+        # keep the log bounded (last 200 attempts is plenty of forensics)
+        conn.execute(
+            "DELETE FROM x_fetch_log WHERE id NOT IN "
+            "(SELECT id FROM x_fetch_log ORDER BY id DESC LIMIT 200)"
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        log.exception("x_store.log_fetch failed")
+
+
+def recent_fetch_log(n: int = 5) -> list[dict[str, Any]]:
+    """Last N fetch attempts, newest first — for /debug_x forensics."""
+    try:
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT * FROM x_fetch_log ORDER BY id DESC LIMIT ?", (int(n),)
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        log.exception("x_store.recent_fetch_log failed")
+        return []
 
 
 # ─── Tweet persistence ──────────────────────────────────────────────────────

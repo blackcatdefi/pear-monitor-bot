@@ -2,8 +2,9 @@
 
 Locks in the contract points of the X cost optimization:
 
-1. INCREMENTAL: fetch_x_intel passes the persisted since_id to the API and
-   never re-ingests an already-stored tweet id (INSERT OR IGNORE).
+1. INCREMENTAL: fetch_x_intel passes the persisted since_id as a CLIENT-SIDE
+   pagination boundary (R-XSTORE-FIX: the list endpoint 400-rejects a
+   since_id query param) and never re-ingests a stored id (INSERT OR IGNORE).
 2. PRUNE: tweets older than 72h are removed from the local store.
 3. NO LIMIT (R-COST-V2-FIX, owner override): the fetch proceeds normally at
    ANY consumption level — no budget guard, no warning push, no cache
@@ -201,10 +202,14 @@ def test_x_intel_module_has_no_scheduled_entrypoints():
     assert "def _within_cooldown" not in src
 
 
-# ─── RT/reply exclusion at query level ──────────────────────────────────────
+# ─── R-XSTORE-FIX: unsupported params NEVER sent to the list endpoint ───────
+# Live probe 2026-07-27: /2/lists/{id}/tweets 400-rejects `since_id` and
+# `exclude` ("not one of [id,max_results,pagination_token,post.fields]").
+# Sending them froze the store after the Jul-23 backfill. since_id is now a
+# CLIENT-SIDE boundary; RT/reply filtering is client-side only.
 
 @pytest.mark.asyncio
-async def test_exclude_rt_replies_param_sent(fresh_store, monkeypatch):
+async def test_since_id_and_exclude_never_sent_as_params(fresh_store, monkeypatch):
     from modules import x_intel as _xi
     monkeypatch.setattr(_xi, "X_LIVE_ENABLED", True)
     monkeypatch.setattr(_xi, "X_EXCLUDE_RT_REPLIES", True)
@@ -231,6 +236,9 @@ async def test_exclude_rt_replies_param_sent(fresh_store, monkeypatch):
 
     monkeypatch.setattr(_xi.httpx, "AsyncClient", _Client)
 
-    await _xi.fetch_timeline_via_list(hours=48, caller="test", since_id="555")
-    assert captured["params"].get("exclude") == "retweets,replies"
-    assert captured["params"].get("since_id") == "555"
+    tweets, diag = await _xi.fetch_timeline_via_list(
+        hours=48, caller="test", since_id="555"
+    )
+    assert "exclude" not in captured["params"]
+    assert "since_id" not in captured["params"]
+    assert diag is None

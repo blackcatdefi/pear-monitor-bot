@@ -93,6 +93,10 @@ X_EXCLUDE_RT_REPLIES = os.getenv("X_EXCLUDE_RT_REPLIES", "true").strip().lower()
 LIST_ENDPOINT_KEY = "lists/tweets"
 USER_TIMELINE_ENDPOINT_KEY = "users/tweets"
 
+# R-XSTORE-FIX: telemetry of the most recent list fetch (pages walked, raw
+# posts returned) — consumed by fetch_x_intel for the persistent x_fetch_log.
+_last_fetch_meta: dict[str, int] = {"pages": 0, "returned": 0}
+
 # R-BOT-FEEDS-EXPAND (2026-05-07) — Task 2.
 # `X_EXTRA_HANDLES` is a comma-separated list of usernames to pull via the
 # per-user timeline endpoint AS A SUPPLEMENT to the canonical list. Lets
@@ -422,15 +426,26 @@ async def fetch_timeline_via_list(
 ) -> tuple[list[dict] | None, str | None]:
     """Read the private X list — adaptive to user changes.
 
+    R-XSTORE-FIX (2026-07-27) — ROOT CAUSE of the frozen-store incident:
+        The /2/lists/{id}/tweets endpoint does NOT support ``since_id`` nor
+        ``exclude`` — live probe returned HTTP 400: "The query parameter
+        [since_id] is not one of [id,max_results,pagination_token,post.fields]".
+        Every incremental fetch after the Jul-23 backfill 400'd and was
+        silently rendered as "+0 new". Therefore:
+        - ``since_id`` is now a CLIENT-SIDE boundary: pages are walked newest→
+          oldest and pagination stops the moment a tweet id ≤ since_id (or
+          older than the window cutoff) is seen. We pay only for the delta
+          pages — same cost model as a server-side since_id.
+        - ``exclude=retweets,replies`` is NEVER sent (endpoint rejects it);
+          RT/reply filtering is purely client-side (X_EXCLUDE_RT_REPLIES).
+        - since_id stays a STRING end-to-end (ids exceed 2^53 — any float/JSON
+          number round-trip corrupts them); comparisons use Python int().
+
     R-COST-V2 (2026-07-23) — NEVER PAY TWICE:
-        - ``since_id``: when provided, the API returns ONLY tweets newer than
-          that id. The caller (fetch_x_intel) persists everything to
-          modules.x_store and assembles the 48h view locally.
+        - The caller (fetch_x_intel) persists everything to modules.x_store
+          and assembles the 48h view locally.
         - The 2h cooldown gate is REMOVED — an incremental fetch is cheap by
           construction, and a second /reporte must see the delta.
-        - Retweets + replies excluded at query level (X_EXCLUDE_RT_REPLIES,
-          default true) — they dominated paid volume. Graceful retry without
-          the param if the endpoint rejects it.
         - Records every call (success/fail) to SQLite for cost tracking.
 
     R-XLIST-CANONICAL (2026-06-19): the bulk list read is the SINGLE SOURCE OF
@@ -461,17 +476,22 @@ async def fetch_timeline_via_list(
     )
 
     url = f"https://api.x.com/2/lists/{X_LIST_ID}/tweets"
+    # R-XSTORE-FIX: ONLY params this endpoint accepts. `since_id`/`exclude`
+    # are 400-rejected by the list endpoint — NEVER add them back here.
     params: dict[str, Any] = {
         "max_results": 100,
         "tweet.fields": "created_at,author_id,text,public_metrics,referenced_tweets",
         "expansions": "author_id",
         "user.fields": "username,name,verified",
     }
+    # Client-side incremental boundary (string id → exact int, ids > 2^53).
+    since_id_int: int | None = None
     if since_id:
-        params["since_id"] = str(since_id)
-    exclude_active = X_EXCLUDE_RT_REPLIES
-    if exclude_active:
-        params["exclude"] = "retweets,replies"
+        try:
+            since_id_int = int(str(since_id))
+        except (TypeError, ValueError):
+            log.warning("[X_STORE] invalid since_id %r — full-window fetch", since_id)
+            since_id_int = None
     headers = {"Authorization": f"Bearer {X_API_BEARER_TOKEN}"}
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
 
@@ -481,6 +501,8 @@ async def fetch_timeline_via_list(
     pages_consumed = 0
     tweets_returned_by_api = 0  # raw count from X before time-filter (for cost)
     last_status = 0
+    _last_fetch_meta["pages"] = 0
+    _last_fetch_meta["returned"] = 0
 
     # R-XLIST-CANONICAL: page enough to cover the full window for 185 members.
     # The loop still breaks the moment a tweet older than `cutoff` is seen, so
@@ -520,17 +542,6 @@ async def fetch_timeline_via_list(
                 last_error_diag = _DIAG_429
                 break
 
-            if resp.status_code == 400 and exclude_active and "exclude" in (resp.text or "").lower():
-                # R-COST-V2 graceful fallback: this endpoint/plan rejects the
-                # `exclude` param — retry without it (client-side filter below
-                # still drops RTs/replies from what we store/show).
-                log.warning("[X_API_COST] exclude param rejected by API — retrying without it")
-                exclude_active = False
-                params.pop("exclude", None)
-                record_x_api_call(LIST_ENDPOINT_KEY, 400, pages=pages_consumed,
-                                  tweets_returned=0, caller=f"{caller}:exclude_retry")
-                continue
-
             if resp.status_code != 200:
                 body_snip = resp.text[:300]
                 log.error("X API %d: %s", resp.status_code, body_snip)
@@ -562,6 +573,14 @@ async def fetch_timeline_via_list(
             data = resp.json()
             batch = data.get("data", [])
             tweets_returned_by_api += len(batch)
+            log.info(
+                "[X_STORE] page=%d batch=%d meta=%s boundary_since_id=%s",
+                pages_consumed, len(batch),
+                {k: v for k, v in (data.get("meta") or {}).items() if k != "next_token"} | (
+                    {"next_token": "…"} if (data.get("meta") or {}).get("next_token") else {}
+                ),
+                since_id or "—(backfill)",
+            )
             users_map = {
                 u["id"]: u
                 for u in data.get("includes", {}).get("users", [])
@@ -575,6 +594,22 @@ async def fetch_timeline_via_list(
                 if created < cutoff:
                     reached_cutoff = True
                     break
+                # R-XSTORE-FIX client-side since_id boundary: list pages are
+                # newest→oldest, so the first tweet at/below the persisted
+                # high-water mark means everything further is already stored.
+                if since_id_int is not None:
+                    try:
+                        if int(str(t.get("id"))) <= since_id_int:
+                            reached_cutoff = True
+                            log.info(
+                                "[X_STORE] since_id boundary hit at id=%s "
+                                "(boundary=%s) — stopping pagination",
+                                t.get("id"), since_id,
+                            )
+                            break
+                    except (TypeError, ValueError):
+                        log.warning("[X_STORE] non-numeric tweet id %r "
+                                    "— cannot boundary-compare", t.get("id"))
                 # R-COST-V2 belt+braces: even if the API-level `exclude` param
                 # was applied (or rejected), drop RTs/replies client-side so
                 # they never enter the store. Quote-tweets are kept (original
@@ -602,6 +637,9 @@ async def fetch_timeline_via_list(
             next_token = data.get("meta", {}).get("next_token")
             if not next_token:
                 break
+
+    _last_fetch_meta["pages"] = pages_consumed
+    _last_fetch_meta["returned"] = tweets_returned_by_api
 
     unique_accounts = len(set(t["username"] for t in all_tweets))
 
@@ -974,14 +1012,29 @@ async def fetch_x_intel(
 
     if tweets is None:
         # Live failed → degrade to store window when it has data.
-        stored_payload = _from_store(from_cache=True, live_error=diag,
+        # R-XSTORE-FIX: the failure is LOGGED PERSISTENTLY and carried in the
+        # payload (`live_error`) so /xrefresh and /reporte render
+        # "fetch error: <reason>" — NEVER a silent "+0 new".
+        err = diag or "X API list fetch failed — check X_LIST_ID + X_API_BEARER_TOKEN"
+        try:
+            x_store.log_fetch(
+                caller, since_id,
+                _last_fetch_meta.get("pages", 0),
+                _last_fetch_meta.get("returned", 0),
+                0, error=err,
+            )
+            x_store.prune_old()  # window stays honest even when live fails
+        except Exception:
+            log.exception("[X_STORE] failure-path log/prune failed (non-fatal)")
+        stored_payload = _from_store(from_cache=True, live_error=err,
                                      cache_reason="live_failed")
         if stored_payload.get("total"):
             return stored_payload
         return {
             "status": "error",
-            "error": diag or "X API list fetch failed — check X_LIST_ID + X_API_BEARER_TOKEN",
+            "error": err,
             "source": "x_api_list",
+            "live_error": err,
             "tweets": [],
         }
 
@@ -1006,6 +1059,9 @@ async def fetch_x_intel(
         log.exception("fetch_extra_handles_supplement failed (non-fatal)")
 
     # CHANGE 2: persist + advance since_id + prune. The store is the truth.
+    # R-XSTORE-FIX: since_id round-trips as STRING (ids > 2^53); max is taken
+    # over exact Python ints and re-stringified — never a float/JSON number.
+    new_rows = 0
     try:
         new_rows = x_store.upsert_tweets(tweets)
         ids = [int(t["id"]) for t in tweets if str(t.get("id") or "").isdigit()]
@@ -1018,6 +1074,15 @@ async def fetch_x_intel(
         )
     except Exception:
         log.exception("[X_STORE] persist failed (non-fatal)")
+    try:
+        x_store.log_fetch(
+            caller, since_id,
+            _last_fetch_meta.get("pages", 0),
+            _last_fetch_meta.get("returned", fetched_new),
+            new_rows, error=None,
+        )
+    except Exception:
+        log.exception("[X_STORE] fetch-log write failed (non-fatal)")
 
     # Assemble the FULL window from the store (new fetch + prior tweets).
     stored = x_store.get_window(hours)
@@ -1047,6 +1112,48 @@ async def fetch_x_intel(
         log.exception("[X_CACHE] persist after fetch_x_intel failed (non-fatal)")
 
     return payload
+
+
+def render_xrefresh_result(payload: dict[str, Any] | None) -> str:
+    """R-XSTORE-FIX: single source of truth for the /xrefresh reply.
+
+    Three DISTINCT states — an error can never masquerade as "+0 new":
+      1. live_error set → "❌ X fetch error: <reason>" + cache facts.
+      2. fetch OK, 0 new → explicit "0 nuevos — fetch OK".
+      3. fetch OK, N new → success line with real cost.
+    """
+    if not isinstance(payload, dict):
+        return "\u274c X fetch error: no payload returned (internal)"
+    live_error = payload.get("live_error")
+    if live_error:
+        total = payload.get("total", 0)
+        from modules import x_store
+        ss = x_store.store_stats()
+        age = ss.get("newest_age_hours")
+        age_txt = f"{age:.1f}h" if isinstance(age, (int, float)) else "n/d"
+        return (
+            f"\u274c X fetch error: {str(live_error)[:300]}\n"
+            f"Store SIN cambios — {total} tweets en ventana 48h "
+            f"(último tweet hace {age_txt}).\n"
+            f"since_id: {ss.get('since_id') or '—'}"
+        )
+    if payload.get("status") != "ok":
+        err = str(payload.get("error") or "unknown")[:300]
+        return f"\u274c X fetch error: {err}"
+    fetched = int(payload.get("fetched_new") or 0)
+    total = payload.get("total", 0)
+    if fetched == 0:
+        return (
+            f"\u2705 X fetch OK \u2014 0 posts nuevos desde el último fetch "
+            f"(estado normal si el fetch anterior fue reciente). "
+            f"{total} tweets en ventana 48h.\n"
+            "Use /timeline to view it."
+        )
+    return (
+        f"\u2705 X store refreshed: +{fetched} new posts fetched "
+        f"(\u2248${fetched * 0.005:.2f}) \u2014 {total} tweets in 48h window.\n"
+        "Use /timeline to view it."
+    )
 
 
 async def debug_x_status() -> str:
@@ -1094,6 +1201,21 @@ async def debug_x_status() -> str:
         lines.append("💰 Usage (informational — no limit, R-COST-V2-FIX):")
         lines.append(f"  Posts MTD: {usage['used']} (${usage['mtd_cost_usd']:.2f})")
         lines.append(f"  Projected month-end: {usage['projected_month_posts']} posts ≈ ${usage['projected_month_cost_usd']:.2f}")
+        # R-XSTORE-FIX: persistent per-fetch forensics — diagnosable from TG.
+        from modules import x_store as _xs
+        flog = _xs.recent_fetch_log(5)
+        if flog:
+            lines.append("")
+            lines.append("🧾 Últimos fetches (x_fetch_log):")
+            for f in flog:
+                st = f"❌ {str(f.get('error'))[:80]}" if f.get("error") else (
+                    f"✅ {f.get('posts_returned', 0)} posts / {f.get('new_stored', 0)} nuevos"
+                )
+                lines.append(
+                    f"  {str(f.get('ts'))[:19]} [{f.get('caller') or '?'}] "
+                    f"since_id={f.get('since_id_sent') or '—'} "
+                    f"pages={f.get('pages', 0)} → {st}"
+                )
     except Exception as exc:
         lines.append(f"💾 Store stats unavailable: {exc}")
 
@@ -1220,7 +1342,7 @@ def cache_banner_for_report() -> str:
         if last:
             return f"📡 X Timeline: local store — last fetch {last}"
     except Exception:
-        pass
+        log.exception("cache_banner_for_report: store read failed")
     cs = get_cache_state()
     iso = cs.get("last_success_at")
     age = cache_age_text()

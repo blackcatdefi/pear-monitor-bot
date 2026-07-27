@@ -85,6 +85,7 @@ from modules.x_intel import (
     get_cache_state,
     get_cached_timeline,
     get_store_timeline_payload,
+    render_xrefresh_result,
 )
 from modules.cryexc_intel import (
     fetch_cryexc,
@@ -414,6 +415,14 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     x_intel_ok = isinstance(x_intel, dict) and x_intel.get("status") == "ok"
     x_intel_fallback_note = ""
 
+    # R-XSTORE-FIX: a degraded fetch returns a store payload with status="ok"
+    # AND live_error set — surface the error, never render it as fresh/quiet.
+    if x_intel_ok and x_intel.get("live_error"):
+        x_intel_fallback_note = (
+            f"\u26a0\ufe0f X fetch error: {str(x_intel.get('live_error'))[:200]}\n"
+            "Showing local store cache (no new posts ingested this run).\n"
+        )
+
     if not x_intel_ok:
         cached = get_cached_timeline()
         if cached and cached.get("status") == "ok":
@@ -733,19 +742,10 @@ async def cmd_xrefresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         reply_markup=MAIN_KEYBOARD,
     )
     x_intel = await fetch_x_intel(hours=48, caller="xrefresh", app=context.application)
-    if not isinstance(x_intel, dict) or x_intel.get("status") != "ok":
-        err = str((x_intel or {}).get("error") or "")[:200] if isinstance(x_intel, dict) else ""
-        await update.message.reply_text(
-            f"\u274c Refresh failed: {err or 'unknown'}", reply_markup=MAIN_KEYBOARD
-        )
-        return
-    fetched = x_intel.get("fetched_new", 0)
-    total = x_intel.get("total", 0)
+    # R-XSTORE-FIX: three distinct states (error / 0-new-OK / N-new) — a live
+    # failure can NEVER render as "+0 new". Single source: render_xrefresh_result.
     await update.message.reply_text(
-        f"\u2705 X store refreshed: +{fetched} new posts fetched "
-        f"(\u2248${fetched * 0.005:.2f}) \u2014 {total} tweets in 48h window.\n"
-        "Use /timeline to view it.",
-        reply_markup=MAIN_KEYBOARD,
+        render_xrefresh_result(x_intel), reply_markup=MAIN_KEYBOARD
     )
 
 

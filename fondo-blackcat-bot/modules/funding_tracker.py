@@ -129,10 +129,12 @@ def funding_verdict(
             defaults to ``FUNDING_EXPENSIVE_BPS_8H`` (1.5).
         coin: optional, for log context only.
 
-    Sanity check (realized cashflow is ground truth over the instantaneous rate):
-        if the rate-derived direction is PAYS/RECEIVES but the realized carry
-        sign says the opposite, TRUST THE CARRY SIGN and log a warning. A
-        negative carry means net PAID ⇒ direction PAYS.
+    Direction precedence (R-XSTORE-FIX BUG-2, 2026-07-27):
+        LIVE RATE is authoritative for the CURRENT direction. The cumulative
+        carry sign is used ONLY as fallback when no live rate exists — its
+        LEVEL encodes position history, not the present cashflow (RSR SHORT
+        incident: rate −2.86 bp/8h paying, cum carry still +$0.29 from earlier
+        received funding → old carry-override mislabeled it "RECIBE").
     """
     s = (side or "").upper()
     threshold = threshold_bps if threshold_bps is not None else _expensive_threshold_bps()
@@ -165,19 +167,29 @@ def funding_verdict(
     if c is not None and abs(c) >= 0.01:  # ≥ 1¢ realized → a clear sign
         carry_dir = RECEIVES if c > 0 else PAYS
 
-    # ── reconcile (realized cashflow wins over instantaneous rate) ──
+    # ── reconcile ──
+    # R-XSTORE-FIX BUG-2 (2026-07-27): the LIVE RATE is authoritative for the
+    # CURRENT direction. The old "realized carry wins" override was wrong: the
+    # CUMULATIVE carry sign reflects the whole position history, not the
+    # present cashflow. Real incident: RSR SHORT @ −2.86 bp/8h (PAYING now)
+    # still had cum carry +$0.29 (net-received earlier, but DROPPING
+    # $1.11→$0.29 — i.e. paying) → the override rendered "RECIBE funding
+    # (favorable)" on a position bleeding carry. Cumulative LEVEL ≠ current
+    # DIRECTION; only the carry DELTA could confirm direction, and we don't
+    # track deltas here. Carry sign remains ONLY the fallback when no live
+    # rate exists; a disagreement is logged as info (expected after any
+    # funding-sign flip mid-position), never an override.
     direction = rate_dir
     if direction is None:
-        # No live rate → fall back to realized carry sign (ground truth).
+        # No live rate → fall back to realized carry sign (best remaining signal).
         direction = carry_dir if carry_dir is not None else NA_VERDICT
     elif direction in (PAYS, RECEIVES) and carry_dir is not None and carry_dir != direction:
-        log.warning(
-            "funding_verdict sign disagreement coin=%s side=%s rate→%s carry=%.4f→%s "
-            "— trusting realized carry sign (ground truth)",
-            coin, s, direction, c, carry_dir,
+        log.info(
+            "funding_verdict: cum-carry sign (%s, %.4f) differs from live-rate "
+            "direction (%s) coin=%s side=%s — normal after a funding flip; "
+            "live rate wins",
+            carry_dir, c, direction, coin, s,
         )
-        direction = carry_dir
-        paying_bps = None  # rate magnitude no longer trustworthy
 
     # ── expensive-carry: ONLY when PAYS and the paid magnitude clears threshold ──
     is_expensive = bool(

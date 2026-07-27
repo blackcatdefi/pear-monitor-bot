@@ -22,6 +22,8 @@ The expensive-carry flag fires ONLY when the position PAYS beyond the threshold.
 """
 from __future__ import annotations
 
+import pytest
+
 from modules.funding_tracker import (
     funding_verdict,
     build_funding_llm_block,
@@ -74,13 +76,33 @@ def test_zero_rate_is_neutral_not_expensive():
     assert "PAGA" not in v.display_string and "RECIBE" not in v.display_string
 
 
-# ── FIX 1: carry-sign disagreement — realized cashflow wins ──────────────────
-def test_carry_sign_disagreement_trusts_realized_carry():
-    # Rate sign says a LONG with rate<0 RECEIVES, but the realized carry is
-    # NEGATIVE (net PAID). Realized cashflow is ground truth → verdict = PAYS.
-    v = funding_verdict("LONG", NEG_2, carry_accrued=-50.0, coin="BTC")
+# ── R-XSTORE-FIX BUG-2: LIVE RATE wins over cumulative-carry sign ────────────
+# The pre-fix "realized carry wins" override was WRONG: cumulative carry LEVEL
+# encodes position history, not the present cashflow. Real incident (2026-07):
+# RSR SHORT @ −2.86 bp/8h was PAYING (carry dropping $1.11→$0.29) but its cum
+# carry was still positive → the override rendered "RECIBE funding (favorable)".
+def test_rsr_short_negative_rate_pays_despite_positive_cum_carry():
+    # The exact production incident fixture: side=SHORT, rate<0, cum carry>0.
+    v = funding_verdict("SHORT", -2.86, carry_accrued=+0.29, coin="RSR")
     assert v.direction == PAYS
     assert "PAGA" in v.display_string
+    assert "RECIBE" not in v.display_string
+    assert v.paying_bps == pytest.approx(2.86)
+    assert v.is_expensive_carry is True  # 2.86 ≥ 1.5 threshold
+
+
+def test_carry_sign_never_overrides_live_rate():
+    # LONG with rate<0 RECEIVES right now, even if historical cum carry is
+    # negative (it paid earlier in its life). Live rate is authoritative.
+    v = funding_verdict("LONG", NEG_2, carry_accrued=-50.0, coin="BTC")
+    assert v.direction == RECEIVES
+    assert "RECIBE" in v.display_string
+
+
+def test_carry_sign_still_fallback_when_no_rate():
+    # No live rate → carry sign remains the fallback signal.
+    assert funding_verdict("SHORT", None, carry_accrued=-5.0).direction == PAYS
+    assert funding_verdict("SHORT", None, carry_accrued=+5.0).direction == RECEIVES
 
 
 def test_agreement_no_override():
