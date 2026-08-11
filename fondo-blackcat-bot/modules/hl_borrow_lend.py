@@ -2,13 +2,15 @@
 
 WHY THIS EXISTS
 ---------------
-The Portfolio Margin liquidation price depends on each collateral asset's
-maintenance threshold, which is derived from its borrow LTV
-(``liq_threshold = 0.5 + 0.5 × ltv``). Those LTVs are NOT constants the bot
-should hardcode — HyperLiquid can re-risk a reserve. The ``borrowLendReserveState``
-info endpoint is keyless and read-only and reports each reserve's live ``ltv``,
-so we pull it best-effort and fall back to the conservative default
-(``PM_HYPE_LTV`` = 0.50) only when the API is unreachable.
+The Portfolio Margin borrow capacity depends on each collateral asset's live
+max-borrow LTV. R-LTV65-QUIET: the MAINTENANCE threshold is a SEPARATE
+parameter (``PM_MAINT_LTV`` = 0.75) and is NO LONGER derived from the borrow
+LTV — HL raised HYPE max-borrow 0.50 → 0.65 (2026-08-11) WITHOUT changing
+maint. LTVs are NOT constants the bot should hardcode — HyperLiquid can
+re-risk a reserve. The ``borrowLendReserveState`` info endpoint is keyless and
+read-only and reports each reserve's live ``ltv``, so we pull it best-effort
+and fall back to the config default (``PM_MAX_BORROW_LTV`` = 0.65) only when
+the API is unreachable.
 
 Contract
 --------
@@ -140,3 +142,98 @@ def get_collateral_ltv_map(force: bool = False) -> dict[str, float]:
     except Exception as e:  # noqa: BLE001 — robustness contract
         log.warning("hl_borrow_lend.get_collateral_ltv_map failed: %s", e)
         return dict(_cache["ltv"])
+
+
+# ------------------------------------------------------------------------
+# R-LTV65-QUIET — maintenance-LTV live verification (best-effort).
+# ------------------------------------------------------------------------
+_maint_cache: dict[str, Any] = {"ts": 0.0, "maint": {}}
+
+
+def _extract_maint_map(data: Any) -> dict[str, float]:
+    """Parse maintenance/liquidation LTV per reserve, if the payload carries it.
+
+    Looks for ``maintenanceLtv``/``maintLtv``/``liquidationLtv``/
+    ``liqThreshold`` (top-level or nested under ``state``). NEVER raises.
+    """
+    out: dict[str, float] = {}
+    rows: list[Any] = []
+    if isinstance(data, list):
+        rows = data
+    elif isinstance(data, dict):
+        for key in ("reserves", "tokens", "reserveStates", "data"):
+            v = data.get(key)
+            if isinstance(v, list):
+                rows = v
+                break
+    keys = ("maintenanceLtv", "maintLtv", "liquidationLtv", "liqThreshold",
+            "maintenanceLTV", "liquidationThreshold")
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(
+            row.get("coin") or row.get("name") or row.get("token")
+            or row.get("symbol") or ""
+        ).upper().strip()
+        if not name:
+            continue
+        m = None
+        for k in keys:
+            m = _safe_float(row.get(k))
+            if m is not None:
+                break
+        if m is None and isinstance(row.get("state"), dict):
+            for k in keys:
+                m = _safe_float(row["state"].get(k))
+                if m is not None:
+                    break
+        if m is not None and 0.0 < m < 1.0:
+            out[name] = m
+    return out
+
+
+def get_maintenance_ltv_map(force: bool = False) -> dict[str, float]:
+    """Return ``{COIN: maintenance_ltv}`` from HL, or ``{}`` if unverifiable.
+
+    Keyless, cached 5 min, NEVER raises. When empty, callers keep the
+    configured ``PM_MAINT_LTV`` default (0.75) and /health surfaces a WARNING
+    that live maint verification is unavailable.
+    """
+    now = time.time()
+    if (
+        not force
+        and _maint_cache["maint"]
+        and (now - _maint_cache["ts"]) < _CACHE_TTL_SEC
+    ):
+        return dict(_maint_cache["maint"])
+    try:
+        data = _post({"type": "borrowLendReserveState"})
+        out = _extract_maint_map(data)
+        if out:
+            _maint_cache.update(ts=now, maint=out)
+            return dict(out)
+        return dict(_maint_cache["maint"])
+    except Exception as e:  # noqa: BLE001 — robustness contract
+        log.warning("hl_borrow_lend.get_maintenance_ltv_map failed: %s", e)
+        return dict(_maint_cache["maint"])
+
+
+def maint_ltv_verification_status() -> dict[str, Any]:
+    """Status blob for /health: was live maint LTV verifiable for HYPE?
+
+    ``{"verified": bool, "live_maint": float|None, "config_maint": float}``.
+    NEVER raises.
+    """
+    try:
+        from config import PM_MAINT_LTV as _cfg_maint
+    except Exception:  # noqa: BLE001
+        _cfg_maint = 0.75
+    try:
+        live = get_maintenance_ltv_map().get("HYPE")
+    except Exception:  # noqa: BLE001
+        live = None
+    return {
+        "verified": live is not None,
+        "live_maint": live,
+        "config_maint": float(_cfg_maint),
+    }

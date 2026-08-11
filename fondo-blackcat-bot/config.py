@@ -79,9 +79,22 @@ PM_PRIMARY_WALLET = os.getenv(
     "0xc7ae23316b47f7e75f455f53ad37873a18351505",
 ).strip().lower()
 
-# Portfolio Margin: HYPE LTV = 0.50 → capacidad de borrow = 0.5 × colateral.
-# El activo borrowable en PM es SOLO USDC/USDH (NO existe borrow de UETH).
-PM_HYPE_LTV = float(os.getenv("PM_HYPE_LTV", "0.50") or 0.50)
+# R-LTV65-QUIET (2026-08-11): HyperLiquid subió el max-borrow LTV de HYPE bajo
+# Portfolio Margin de 0.50 → 0.65. Capacidad de borrow = PM_MAX_BORROW_LTV ×
+# colateral. El activo borrowable en PM es SOLO USDC/USDH (NO borrow de UETH).
+# ``PM_HYPE_LTV`` queda como ALIAS legacy (mismo valor); el env legacy
+# PM_HYPE_LTV sigue respetado como fallback si PM_MAX_BORROW_LTV no está.
+PM_MAX_BORROW_LTV = float(
+    os.getenv("PM_MAX_BORROW_LTV", os.getenv("PM_HYPE_LTV", "0.65") or "0.65")
+    or 0.65
+)
+PM_HYPE_LTV = PM_MAX_BORROW_LTV  # legacy alias — NO renombrar (imports vivos)
+# SEPARACIÓN CRÍTICA (R-LTV65-QUIET): la liquidación NO usa el max-borrow LTV.
+# LIQ REAL = debt / (PM_MAINT_LTV × 0.95 × tokens) — maintenance LTV 0.75 ×
+# trigger ratio 0.95 = 0.7125 efectivo. El bump de borrow LTV a 0.65 NO cambia
+# el maintenance (verificación live best-effort vía hl_borrow_lend; si el API
+# no reporta maint, se mantiene 0.75 y /health lo marca como no verificado).
+PM_MAINT_LTV = float(os.getenv("PM_MAINT_LTV", "0.75") or 0.75)
 # Margin ratio = deuda / capacidad-de-borrow. Umbrales (utilización de la
 # capacidad): WARN 0.40, STRESS 0.70, CRÍTICO/pre-liq 0.85, LIQUIDACIÓN 0.95.
 PM_WARN_RATIO = float(os.getenv("PM_WARN_RATIO", "0.40") or 0.40)

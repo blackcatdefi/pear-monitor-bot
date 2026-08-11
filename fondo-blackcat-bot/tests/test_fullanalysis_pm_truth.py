@@ -23,7 +23,7 @@ T3  real-risk language IS permitted when the HF is low
 T4  SYSTEM_PROMPT no longer demonstrates the old capacity/debt HF or
     debt/(qty×0.50) liq-price worked example, and carries the no-recompute rule
 T5  panel ↔ narrative parity: same HF and liq price in both surfaces
-T6  liq_threshold stays param-driven (0.5 + 0.5×ltv); no hardcoded 0.75
+T6  liq_threshold stays param-driven (PM_MAINT_LTV, decoupled from ltv)
 T7  prior required prompt substrings intact + default-prompt HF prohibitions hold
 """
 from __future__ import annotations
@@ -165,7 +165,7 @@ def test_t4_forbidden_formula_not_in_prompt():
     low = SYSTEM_PROMPT.lower()
     assert "prohibido recalcular" in low
     assert "verbatim" in low
-    assert "0.5+0.5×ltv" in SYSTEM_PROMPT or "0.5 + 0.5×ltv" in SYSTEM_PROMPT
+    assert "PM_MAINT_LTV" in SYSTEM_PROMPT  # R-LTV65-QUIET: maint decoupled
 
 
 # ── T5 ──────────────────────────────────────────────────────────────────────
@@ -186,8 +186,8 @@ def test_t5_panel_narrative_parity():
 
 # ── T6 ──────────────────────────────────────────────────────────────────────
 def test_t6_param_driven_threshold_preserved():
-    """liq_threshold tracks 0.5 + 0.5×ltv for any ltv; no hardcoded 0.75."""
-    for ltv in (0.40, 0.50, 0.60):
+    """R-LTV65-QUIET: liq_threshold = PM_MAINT_LTV for ANY borrow ltv."""
+    for ltv in (0.40, 0.50, 0.65):
         pm = compute_pm_state(
             [{"coin": "HYPE", "total": 1000.0},
              {"coin": "USDC", "total": -20000.0, "borrowed": 20000.0}],
@@ -197,7 +197,7 @@ def test_t6_param_driven_threshold_preserved():
             ltv_map={"HYPE": ltv},
             perp_cross_mm=0.0,
         )
-        expected = 0.5 + 0.5 * ltv
+        expected = 0.75  # PM_MAINT_LTV default — decoupled from borrow ltv
         assert abs(pm.liq_threshold - expected) < 1e-9, (ltv, pm.liq_threshold)
         block = build_pm_llm_block(pm)
         # The block reports the same data-derived threshold.

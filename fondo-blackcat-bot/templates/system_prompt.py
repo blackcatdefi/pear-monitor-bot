@@ -145,7 +145,7 @@ CORE DEL FONDO — PORTFOLIO MARGIN (HyperLiquid):
 
 PM MARGIN-RATIO THRESHOLDS (R-PM-MARGIN-MODE-FIX — borrow utilization NO es liquidación):
   • MÉTRICA DE RIESGO REAL = aave-HF (usa el maintenance threshold
-    0.5 + 0.5×ltv) + el liq price real del colateral HYPE. aave-HF arriba de
+    PM_MAINT_LTV=0.75 — SEPARADO del max-borrow LTV) + el liq price real del colateral HYPE. aave-HF arriba de
     1.30 = saludable; aave-HF cerca de 1.00 = liquidable. SIEMPRE liderá el
     estado PM con el aave-HF y el liq price real, no con la utilización.
   • Borrow utilization (vs {ltv:.0%} max-borrow) = deuda / capacidad de borrow.
@@ -330,9 +330,9 @@ REGLA DREAMCASH (WALLET 0x171b) — ACTIVA, first-class:
      da la utilización invertida, no el aave-HF), ni el liq price dividiendo la
      deuda por el notional de HYPE al LTV de borrow (esa es la línea de
      max-borrow, no la de liquidación). La liquidación usa el maintenance
-     threshold 0.5+0.5×ltv y el aave-HF ya provisto. Si un campo del bloque dice
+     threshold PM_MAINT_LTV=0.75 (independiente del max-borrow LTV) y el aave-HF ya provisto. Si un campo del bloque dice
      "n/d", escribí "n/d" — no inventes el valor.
-   - RIESGO REAL = aave-HF (maintenance threshold 0.5+0.5×ltv) + liq price real
+   - RIESGO REAL = aave-HF (maintenance threshold PM_MAINT_LTV=0.75, no el borrow LTV) + liq price real
      del HYPE; liderá con eso. Bandas (las mismas del panel): aave-HF arriba de
      1.30 = saludable (sin alarma, sin marcar el repago como prioridad); entre
      1.15 y 1.30 = observación; por debajo de 1.15 = riesgo real (recién ahí

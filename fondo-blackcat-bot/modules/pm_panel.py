@@ -7,7 +7,7 @@ CRÍTICO 85% LIQ 95%)`` while the SAME panel correctly showed aave-HF 1.48 🟢
 and liq price $40.32. The 101% is borrow-capacity UTILIZATION = debt /
 (collateral × max_ltv); the 0.50 LTV only gates whether you can DRAW MORE
 debt. Forced liquidation uses a SEPARATE maintenance threshold
-(``0.5 + 0.5×ltv`` = 0.75) and only triggers at portfolio_margin_ratio > 0.95.
+(``PM_MAINT_LTV`` = 0.75, SEPARATE from the borrow LTV) and only triggers at portfolio_margin_ratio > 0.95.
 Crossing 100% of the 0.50 cap means "over-drawn / cannot borrow more", NOT
 "near liquidation". The red 101% was alarmist and self-contradictory.
 
@@ -22,7 +22,7 @@ The fix
   portfolio_margin_ratio approaching 0.95), never to utilization > 100%.
 
 All LTV/threshold values are PARAMETERS read from data (per-token ltv from the
-spot row; liq_threshold = 0.5 + 0.5×ltv). Nothing is hardcoded. NEVER raises.
+spot row; liq_threshold = PM_MAINT_LTV). Nothing is hardcoded. NEVER raises.
 """
 from __future__ import annotations
 

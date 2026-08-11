@@ -163,6 +163,38 @@ def _cron_state_safe() -> dict:
         return {"_error": "cron_state unavailable"}
 
 
+def _pm_ltv_status() -> dict:
+    """R-LTV65-QUIET — PM LTV parameters + live maint verification status.
+
+    WARNING surfaced when the HL API does not let us verify the maintenance
+    LTV programmatically (borrowLendReserveState rejected / no maint field):
+    liq math then runs on the configured PM_MAINT_LTV default.
+    """
+    try:
+        from config import PM_MAX_BORROW_LTV, PM_MAINT_LTV
+    except Exception:  # noqa: BLE001
+        PM_MAX_BORROW_LTV, PM_MAINT_LTV = 0.65, 0.75
+    out = {
+        "max_borrow_ltv": float(PM_MAX_BORROW_LTV),
+        "maint_ltv": float(PM_MAINT_LTV),
+    }
+    try:
+        from modules.hl_borrow_lend import maint_ltv_verification_status
+        st = maint_ltv_verification_status()
+        out["maint_verified_live"] = bool(st.get("verified"))
+        if st.get("live_maint") is not None:
+            out["maint_live_value"] = st["live_maint"]
+        if not st.get("verified"):
+            out["warning"] = (
+                "maint LTV NOT verificable live (HL API); usando default "
+                f"PM_MAINT_LTV={float(PM_MAINT_LTV):.2f}"
+            )
+    except Exception:  # noqa: BLE001
+        out["maint_verified_live"] = False
+        out["warning"] = "maint LTV verification unavailable"
+    return out
+
+
 def health_payload(commands_count: int) -> dict:
     """JSON payload for /health endpoint (Railway probe)."""
     return {
@@ -184,4 +216,6 @@ def health_payload(commands_count: int) -> dict:
         "cron_state": _cron_state_safe(),
         # R-PAT-RENEW (2026-05-20): GitHub PAT expiry telemetry.
         "pat_status": _pat_status_safe(),
+        # R-LTV65-QUIET (2026-08-11): PM LTV params + maint verification.
+        "pm_ltv": _pm_ltv_status(),
     }

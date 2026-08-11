@@ -78,38 +78,91 @@ def _conn() -> sqlite3.Connection:
 
 
 def should_alert(coin: str, sl_px: float, liq_px: float) -> bool:
-    """One-time per position per condition. Re-arms when SL/liq move >0.5%."""
+    """R-LTV65-QUIET 2.2 — fire ONCE per position; re-fire ONLY on MATERIAL
+    change.
+
+    Kills the 15+/48h re-fire storm for a static position: the old 0.5% wiggle
+    re-arm treated normal liq-price drift (funding) as "new condition".
+
+    Material change (any → re-fire):
+      * new position (no stored state),
+      * SL modified (>0.1% move — a placed order does not drift),
+      * leg margin changed (liq px moved >2% — margin add/remove moves liq far
+        more than funding drift), or
+      * the SL–liq gap COMPRESSED >10% vs the last alerted gap (danger grew).
+    Otherwise silent — the condition still shows as a compact line in the
+    /reporte POSITIONS block and in the once-per-day digest.
+    """
     try:
+        c = (coin or "?").upper()
         conn = _conn()
         try:
             cur = conn.execute(
                 "SELECT sl_px, liq_px, alerted FROM sl_unreachable_state WHERE coin=?",
-                ((coin or "?").upper(),),
+                (c,),
             )
             row = cur.fetchone()
-            changed = True
-            if row is not None and row[0] and row[1]:
+            material = True
+            if row is not None and row[0] and row[1] and row[2]:
                 try:
-                    changed = (
-                        abs(float(row[0]) - sl_px) / max(sl_px, 1e-9) > 0.005
-                        or abs(float(row[1]) - liq_px) / max(liq_px, 1e-9) > 0.005
+                    old_sl, old_liq = float(row[0]), float(row[1])
+                    sl_moved = abs(old_sl - sl_px) / max(abs(old_sl), 1e-9) > 0.001
+                    liq_moved = abs(old_liq - liq_px) / max(abs(old_liq), 1e-9) > 0.02
+                    old_gap = abs(old_sl - old_liq)
+                    new_gap = abs(float(sl_px) - float(liq_px))
+                    gap_compressed = (
+                        old_gap > 1e-9 and new_gap < old_gap * 0.90
                     )
+                    material = sl_moved or liq_moved or gap_compressed
                 except (TypeError, ValueError, ZeroDivisionError):
-                    changed = True
-            already = bool(row and row[2]) and not changed
-            conn.execute(
-                "INSERT INTO sl_unreachable_state (coin, sl_px, liq_px, alerted) "
-                "VALUES (?, ?, ?, 1) "
-                "ON CONFLICT(coin) DO UPDATE SET sl_px=excluded.sl_px, "
-                "liq_px=excluded.liq_px, alerted=1",
-                ((coin or "?").upper(), float(sl_px), float(liq_px)),
-            )
-            conn.commit()
-            return not already
+                    material = True
+            if material:
+                # Store the NEW baseline only when (re)alerting, so drift
+                # accumulates against the last ALERTED snapshot.
+                conn.execute(
+                    "INSERT INTO sl_unreachable_state (coin, sl_px, liq_px, alerted) "
+                    "VALUES (?, ?, ?, 1) "
+                    "ON CONFLICT(coin) DO UPDATE SET sl_px=excluded.sl_px, "
+                    "liq_px=excluded.liq_px, alerted=1",
+                    (c, float(sl_px), float(liq_px)),
+                )
+                conn.commit()
+            return material
         finally:
             conn.close()
     except Exception:  # noqa: BLE001
         log.exception("sl_validator should_alert failed for %s", coin)
+        return False
+
+
+_DIGEST_KEY = "__DIGEST_TS__"
+
+
+def _digest_due(now: float | None = None) -> bool:
+    """True max once per 24h (persisted). Marks sent when returning True."""
+    import time as _time
+    t = _time.time() if now is None else float(now)
+    try:
+        conn = _conn()
+        try:
+            row = conn.execute(
+                "SELECT sl_px FROM sl_unreachable_state WHERE coin=?",
+                (_DIGEST_KEY,),
+            ).fetchone()
+            last = float(row[0]) if row and row[0] else 0.0
+            if (t - last) < 24 * 3600.0:
+                return False
+            conn.execute(
+                "INSERT INTO sl_unreachable_state (coin, sl_px, liq_px, alerted) "
+                "VALUES (?, ?, 0, 1) "
+                "ON CONFLICT(coin) DO UPDATE SET sl_px=excluded.sl_px",
+                (_DIGEST_KEY, t),
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -177,6 +230,7 @@ async def run_sl_reachability_alerts(
     if not TELEGRAM_CHAT_ID:
         return 0
     try:
+        unchanged: list[dict[str, Any]] = []
         for f in find_unreachable(wallets, market):
             if should_alert(f["coin"], f["sl_px"], f["liq_px"]):
                 msg = (
@@ -192,6 +246,25 @@ async def run_sl_reachability_alerts(
                     sent += 1
                 except Exception:  # noqa: BLE001
                     log.exception("SL-unreachable alert send failed")
+            else:
+                unchanged.append(f)
+        # R-LTV65-QUIET 2.2 — unchanged conditions: ONE compact digest line,
+        # max once per day (the condition stays visible in /reporte anyway).
+        if unchanged and _digest_due():
+            items = " · ".join(
+                f"{f['side']} {f['coin']} (SL ${f['sl_px']:,.2f} vs liq "
+                f"${f['liq_px']:,.2f})"
+                for f in unchanged
+            )
+            digest = (
+                f"🚫 SL UNREACHABLE (digest diario, sin cambios): {items}. "
+                "Detalle en /reporte."
+            )
+            try:
+                await send_bot_message(bot, TELEGRAM_CHAT_ID, digest)
+                sent += 1
+            except Exception:  # noqa: BLE001
+                log.exception("SL-unreachable digest send failed")
     except Exception:  # noqa: BLE001
         log.exception("run_sl_reachability_alerts failed")
     return sent

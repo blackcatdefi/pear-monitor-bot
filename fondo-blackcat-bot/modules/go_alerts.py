@@ -39,6 +39,21 @@ GROUP_THRESHOLD = int(os.getenv("GO_ALERT_GROUP_THRESHOLD", "5"))
 FAILURE_PUSH_AFTER = 3  # consecutive failures before ONE error push
 
 
+def batch_hours() -> float:
+    """R-LTV65-QUIET 2.3 — GO digest window (hours). Read at CALL time.
+
+    ``GO_ALERT_BATCH_HOURS=0`` restores the pre-round per-run behavior EXACTLY.
+    Default 3: new 5/5 GO entrants accumulate and go out as ONE digest per
+    window (rate-limiter: the first entrant after a quiet window sends
+    immediately; the rest of the window accumulates). REGIME FLIP (>
+    GROUP_THRESHOLD in one run) always sends immediately — a flip is urgent.
+    R-SIGNAL watchlist alerts are a separate channel and stay individual."""
+    try:
+        return max(0.0, float(os.getenv("GO_ALERT_BATCH_HOURS", "3") or 3))
+    except (TypeError, ValueError):
+        return 3.0
+
+
 # ─── state ───────────────────────────────────────────────────────────────────
 
 def _load_state() -> dict[str, Any]:
@@ -220,15 +235,82 @@ async def run_go_alert_cycle(bot) -> int:
     now = time.time()
     to_alert, new_state = diff_go_set(current, state, now)
     new_state["consecutive_failures"] = 0  # success resets the strike counter
-    _save_state(new_state)
 
+    # R-LTV65-QUIET 2.3 — carry over batching fields (diff_go_set is pure and
+    # only knows seeded/tokens/failures).
+    new_state["pending"] = dict(state.get("pending", {}))
+    new_state["last_batch_send"] = float(state.get("last_batch_send", 0.0) or 0.0)
+
+    bh = batch_hours()
     log.info(
-        "go_alerts OK — go_set=%d new_entrants=%d seeded=%s",
-        len(current), len(to_alert), bool(state.get("seeded")),
+        "go_alerts OK — go_set=%d new_entrants=%d seeded=%s batch_hours=%.1f "
+        "pending=%d",
+        len(current), len(to_alert), bool(state.get("seeded")), bh,
+        len(new_state["pending"]),
     )
-    if not to_alert:
+
+    # env=0 → EXACT pre-round behavior (per-run push, no accumulation).
+    if bh <= 0:
+        _save_state(new_state)
+        if not to_alert:
+            return 0
+        msg = await render_alert_message(to_alert, rows)
+        if TELEGRAM_CHAT_ID:
+            await send_bot_message(bot, TELEGRAM_CHAT_ID, msg)
+        return 1
+
+    # REGIME FLIP (> GROUP_THRESHOLD entrants in ONE run) bypasses the batch —
+    # it is a market-structure event, not routine entrant noise.
+    if len(to_alert) > GROUP_THRESHOLD:
+        _save_state(new_state)
+        msg = await render_alert_message(to_alert, rows)
+        if TELEGRAM_CHAT_ID:
+            await send_bot_message(bot, TELEGRAM_CHAT_ID, msg)
+        return 1
+
+    # Accumulate this run's entrants (snapshot z/hurst so a token that leaves
+    # the GO set before the flush still renders with its entry telemetry).
+    for k in to_alert:
+        row = rows.get(k)
+        g = getattr(row, "gate", None) if row is not None else None
+        new_state["pending"][k] = {
+            "ts": now,
+            "z": getattr(g, "z", None) if g else None,
+            "hurst": getattr(g, "hurst", None) if g else None,
+        }
+
+    pending = new_state["pending"]
+    window_open = (now - new_state["last_batch_send"]) >= bh * 3600.0
+    if not pending or not window_open:
+        _save_state(new_state)
         return 0
-    msg = await render_alert_message(to_alert, rows)
-    if TELEGRAM_CHAT_ID:
+
+    # Flush: ONE digest for every entrant accumulated this window.
+    keys = sorted(pending.keys())
+    live = [k for k in keys if k in rows]
+    departed = [k for k in keys if k not in rows]
+    msg = await render_alert_message(live, rows) if live else ""
+    if departed:
+        dep_lines = ["", "Salieron del set durante la ventana:"]
+        for k in departed:
+            side, _, ticker = k.partition(":")
+            p = pending[k]
+            z = p.get("z")
+            h = p.get("hurst")
+            z_s = f"z={z:+.2f}" if isinstance(z, (int, float)) else "z=n/d"
+            h_s = f"H={h:.2f}" if isinstance(h, (int, float)) else "H=n/d"
+            dep_lines.append(
+                f"  {'🔴' if side == 'SHORT' else '🟢'} {side} {ticker} · "
+                f"{z_s} · {h_s} (al entrar)"
+            )
+        msg = (msg + "\n".join(dep_lines)) if msg else "\n".join(
+            [f"\U0001f3af GO DIGEST (ventana {bh:.0f}h)"] + dep_lines
+        )
+    header = f"\U0001f4e6 GO DIGEST — ventana {bh:.0f}h · {len(keys)} entrante(s)\n"
+    msg = header + msg
+    new_state["pending"] = {}
+    new_state["last_batch_send"] = now
+    _save_state(new_state)
+    if TELEGRAM_CHAT_ID and msg.strip():
         await send_bot_message(bot, TELEGRAM_CHAT_ID, msg)
     return 1

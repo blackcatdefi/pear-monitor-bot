@@ -37,7 +37,7 @@ def _spot(debt=DEBT, hype=HYPE_QTY):
 
 # ── T1. over-cap, NOT liquidation: green headline, no red, no LIQ-RISK ────────
 def test_t1_over_cap_not_liq():
-    pm = compute_pm_state(_spot(), [], {"HYPE": PX})
+    pm = compute_pm_state(_spot(), [], {"HYPE": PX}, ltv_map={"HYPE": 0.50})
     block = format_pm_state_telegram(pm)
     # Sanity on the live numbers.
     assert pm.ratio * 100 == pytest.approx(101.1, abs=1.0)   # ~101% utilization
@@ -59,7 +59,7 @@ def test_t1_over_cap_not_liq():
 # ── T2. real-liq-approach: HF drives a RED headline, independent of util ──────
 def test_t2_real_liq_approach_red_headline():
     # Drop the oracle until aave_HF < 1.10.
-    pm = compute_pm_state(_spot(), [], {"HYPE": 44.0})
+    pm = compute_pm_state(_spot(), [], {"HYPE": 44.0}, ltv_map={"HYPE": 0.50})
     assert pm.aave_hf < 1.10
     assert headline_color(pm.aave_hf, has_debt=True) == "🔴"
     # Utilization is even HIGHER here (>130%) but that is NOT what makes it red.
@@ -71,7 +71,7 @@ def test_t2_real_liq_approach_red_headline():
 
 # ── T3. healthy with headroom: green headline + "borrow headroom OK" ──────────
 def test_t3_healthy_with_headroom():
-    pm = compute_pm_state(_spot(debt=10_000.0), [], {"HYPE": PX})
+    pm = compute_pm_state(_spot(debt=10_000.0), [], {"HYPE": PX}, ltv_map={"HYPE": 0.50})
     assert pm.ratio * 100 < 90
     block = format_pm_state_telegram(pm)
     assert headline_color(pm.aave_hf, has_debt=True) == "🟢"
@@ -81,14 +81,14 @@ def test_t3_healthy_with_headroom():
 
 # ── T4. liq-price math: debt / (hype × 0.75) ≈ $40.30 ────────────────────────
 def test_t4_liq_price_math():
-    pm = compute_pm_state(_spot(), [], {"HYPE": PX})
+    pm = compute_pm_state(_spot(), [], {"HYPE": PX}, ltv_map={"HYPE": 0.50})
     expected = DEBT / (HYPE_QTY * 0.75)
     assert expected == pytest.approx(40.3, abs=0.2)
     assert pm.liq_price == pytest.approx(expected, abs=0.2)
 
 
-# ── T5. param-driven thresholds: liq_threshold = 0.5 + 0.5×ltv follows ───────
-def test_t5_param_driven_thresholds():
+# ── T5. R-LTV65-QUIET: maint DECOUPLED — the borrow LTV moves capacity only ──
+def test_t5_maint_decoupled_from_borrow_ltv():
     breakdown = {"HYPE": 100_000.0}
     m50 = compute_pm_risk_metrics(
         breakdown, debt=40_000.0, hype_qty=1000.0, hype_px=100.0,
@@ -98,13 +98,15 @@ def test_t5_param_driven_thresholds():
         breakdown, debt=40_000.0, hype_qty=1000.0, hype_px=100.0,
         ltv_map={"HYPE": 0.70},
     )
-    assert m50["liq_threshold"] == pytest.approx(0.75)        # 0.5 + 0.5×0.50
-    assert m70["liq_threshold"] == pytest.approx(0.85)        # 0.5 + 0.5×0.70
+    # Maint stays PM_MAINT_LTV (0.75) no matter the borrow LTV.
+    assert m50["liq_threshold"] == pytest.approx(0.75)
+    assert m70["liq_threshold"] == pytest.approx(0.75)        # NOT 0.85
     assert m50["max_ltv"] == pytest.approx(0.50)
     assert m70["max_ltv"] == pytest.approx(0.70)
-    # Downstream aave_HF follows the threshold (no hardcoded 0.75/0.50).
-    assert m70["aave_hf"] > m50["aave_hf"]
-    assert m70["liq_price"] < m50["liq_price"]
+    # Borrow LTV moves CAPACITY (hf_app) only; liq math is untouched.
+    assert m70["hf_app"] > m50["hf_app"]
+    assert m70["aave_hf"] == pytest.approx(m50["aave_hf"])
+    assert m70["liq_price"] == pytest.approx(m50["liq_price"])
 
 
 # ── T6. label-guard: utilization status never "LIQ" / never red ──────────────

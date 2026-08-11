@@ -18,7 +18,7 @@ The bot has TWO places that talk about Portfolio Margin health:
          → that is borrow utilisation INVERTED, NOT the health factor. The
          real aave-HF uses the maintenance/liquidation threshold:
          ``aave_HF = Σ(value × liq_threshold) / debt`` with
-         ``liq_threshold = 0.5 + 0.5 × ltv`` (0.75 for a 0.5-LTV HYPE) → ~1.58.
+         ``liq_threshold = PM_MAINT_LTV`` (0.75; SEPARATE from borrow LTV) → ~1.58.
        * "Liq price HYPE: deuda / (qty × LTV 0.50) = $59.89" → that is the
          max-borrow line, NOT liquidation. Real liq uses 0.75 → ~$40.79.
      The narrative then screamed "ZONA DE RIESGO REAL / PRIORIDAD #1 repagar"
@@ -33,7 +33,7 @@ VERBATIM and never recompute. Single source of truth → the panel and the
 narrative always carry identical numbers.
 
 Everything here is PARAM-DRIVEN from the PMState (``liq_threshold`` is the
-data-derived ``0.5 + 0.5×ltv``; the max-borrow LTV is ``pm.max_ltv``). Nothing
+``PM_MAINT_LTV`` (0.75, decoupled from borrow LTV); the max-borrow LTV is ``pm.max_ltv``). Nothing
 is hardcoded. NEVER raises — a failure returns "" so /reporte is never broken.
 """
 from __future__ import annotations
@@ -221,7 +221,7 @@ def build_pm_llm_block(pm) -> str:
     if has_debt:
         lines.append(
             f"• aave-HF (riesgo real, liq-threshold {pm.liq_threshold:.2f} = "
-            f"0.5 + 0.5×ltv): {pm.aave_hf:.2f} {pm.risk_emoji} {pm.risk_label}"
+            f"maint, indep. del borrow LTV): {pm.aave_hf:.2f} {pm.risk_emoji} {pm.risk_label}"
         )
         if pm.liq_price > 0:
             buf = (

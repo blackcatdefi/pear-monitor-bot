@@ -10,7 +10,8 @@ derives the live PM state from the wallet's spot balances + perp positions:
                           at the live HL oracle price.
 * ``debt_usd``         — USDC/USDH/USDT0 ACTUALLY borrowed (negative spot
                           balance). This is a real liability, NOT capacity.
-* ``capacity_usd``     — borrow capacity = ``PM_HYPE_LTV × collateral`` (0.5×).
+* ``capacity_usd``     — borrow capacity = ``max-borrow LTV × collateral``
+  (R-LTV65-QUIET: PM_MAX_BORROW_LTV, default 0.65; liq math uses PM_MAINT_LTV).
 * ``available_usd``    — capacity − debt (head-room still borrowable).
 * ``ratio``            — debt / capacity (utilisation of borrow capacity).
                           Thresholds: WARN 0.40, STRESS 0.70, LIQ 0.95.
@@ -31,6 +32,7 @@ from typing import Any
 try:
     from config import (
         PM_HYPE_LTV,
+        PM_MAINT_LTV,
         PM_WARN_RATIO,
         PM_STRESS_RATIO,
         PM_CRITICAL_RATIO,
@@ -38,7 +40,8 @@ try:
         PM_COLLATERAL_ASSETS,
     )
 except Exception:  # noqa: BLE001 — importable in isolated tests
-    PM_HYPE_LTV = 0.50
+    PM_HYPE_LTV = 0.65      # R-LTV65-QUIET: HL max-borrow LTV HYPE 0.50 → 0.65
+    PM_MAINT_LTV = 0.75     # maintenance LTV — DECOUPLED from the borrow LTV
     PM_WARN_RATIO = 0.40
     PM_STRESS_RATIO = 0.70
     PM_CRITICAL_RATIO = 0.85
@@ -159,20 +162,33 @@ def _classify(ratio: float) -> str:
     return "CALM"
 
 
-def _liq_threshold_for_ltv(ltv: float) -> float:
-    """HL Portfolio Margin maintenance threshold for a collateral asset.
+def _liq_threshold_for_ltv(
+    ltv: float, maint_override: float | None = None
+) -> float:
+    """HL Portfolio Margin MAINTENANCE threshold for a collateral asset.
 
-    The borrow LTV (e.g. 0.50 for HYPE) is the cap at which you can no longer
-    borrow MORE; liquidation happens later, at the maintenance threshold
-    ``0.5 + 0.5 × ltv`` (0.75 for a 0.5-LTV asset). NEVER raises.
+    R-LTV65-QUIET (2026-08-11): the maintenance LTV is DECOUPLED from the
+    borrow LTV. The legacy derivation ``0.5 + 0.5 × ltv`` was only ever a
+    coincidence of the 0.50-borrow-LTV era (→ 0.75); when HL raised the HYPE
+    max-borrow LTV to 0.65 the maintenance threshold did NOT move with it.
+    Liquidation math therefore reads ``PM_MAINT_LTV`` (env, default 0.75) —
+    optionally overridden per-asset by a LIVE maintenance value from the HL
+    borrow-lend API (``maint_override``) when the API reports one. The
+    ``ltv`` argument is retained for signature compatibility and is IGNORED.
+    NEVER raises.
     """
     try:
-        lv = float(ltv)
+        if maint_override is not None:
+            mo = float(maint_override)
+            if 0.0 < mo < 1.0:
+                return mo
     except (TypeError, ValueError):
-        lv = PM_HYPE_LTV
-    if lv <= 0:
-        lv = PM_HYPE_LTV
-    return 0.5 + 0.5 * lv
+        pass
+    try:
+        m = float(PM_MAINT_LTV)
+    except (TypeError, ValueError):
+        m = 0.75
+    return m if 0.0 < m < 1.0 else 0.75
 
 
 # R-PM-LIQ aave-style health bands (DRIVEN BY aave_HF, not the borrow ratio):
@@ -458,20 +474,15 @@ def compute_pm_state(
     else:
         effective_cross_mm = _f(perp_cross_mm)
 
-    capacity = PM_HYPE_LTV * collateral
-    available = capacity - debt
-    ratio = (debt / capacity) if capacity > 0 else 0.0
-    status = _classify(ratio)
     naked_long = debt > 1.0 and shorts_notional < 1.0
     committed_usd, committed_n = _committed_resting_notional(open_orders)
-
-    # R-WALLET-FIX: HF_app (borrow utilisation) = capacity / debt = the HL app's
-    # "Health Factor %". KEPT as ``health_factor`` for backward compatibility.
-    health_factor = (capacity / debt) if debt > 0 else 0.0
     _hype_px = float(prices.get("HYPE") or 0.0)
 
-    # R-PM-LIQ: the REAL liquidation price uses the MAINTENANCE threshold
-    # (0.5 + 0.5×ltv), not the borrow LTV. aave_HF drives the risk band.
+    # R-LTV65-QUIET: capacity comes from the ltv-map-aware borrow_capacity
+    # (Σ value × max-borrow LTV, per-coin live map with PM_MAX_BORROW_LTV
+    # fallback). Liquidation math is SEPARATE — it uses PM_MAINT_LTV (0.75),
+    # never the borrow LTV. Metrics are computed FIRST so capacity/headroom/
+    # utilization all derive from the same LTV basis.
     metrics = compute_pm_risk_metrics(
         breakdown,
         debt,
@@ -481,6 +492,14 @@ def compute_pm_state(
         perp_cross_mm=effective_cross_mm,
         min_borrow_offset=min_borrow_offset,
     )
+    capacity = metrics.get("borrow_capacity", 0.0) or (PM_HYPE_LTV * collateral)
+    available = capacity - debt
+    ratio = (debt / capacity) if capacity > 0 else 0.0
+    status = _classify(ratio)
+
+    # R-WALLET-FIX: HF_app (borrow utilisation) = capacity / debt = the HL app's
+    # "Health Factor %". KEPT as ``health_factor`` for backward compatibility.
+    health_factor = (capacity / debt) if debt > 0 else 0.0
     liq_price = metrics["liq_price"]
     aave_hf = metrics["aave_hf"]
     current_ltv = metrics["current_ltv"]
@@ -593,7 +612,7 @@ def format_pm_state_telegram(
     lines.append(hype_line)
     lines.append(f"├─ Deuda (USDC/USDH borrowed): {_fmt_usd(pm.debt_usd)}")
     lines.append(
-        f"├─ Capacidad borrow (LTV {PM_HYPE_LTV:.2f}): {_fmt_usd(pm.capacity_usd)}"
+        f"├─ Capacidad borrow (LTV {(pm.max_ltv or PM_HYPE_LTV):.2f}): {_fmt_usd(pm.capacity_usd)}"
         f"  | head-room borrow: {_fmt_usd(pm.available_usd)}"
     )
     # P1.5: resting limit orders reserve capital — never present head-room as
@@ -615,7 +634,7 @@ def format_pm_state_telegram(
         f"{util_pct:.1f}%  — {util_label}"
     )
     # R-PM-LIQ: the RISK metric is the aave-style Health factor (uses the
-    # MAINTENANCE liq threshold 0.5+0.5×ltv), NOT the borrow utilisation. Surface
+    # MAINTENANCE liq threshold PM_MAINT_LTV=0.75, NOT the borrow LTV). Surface
     # both framings unambiguously, plus the real liquidation price + buffer.
     if pm.debt_usd > 1.0:
         lines.append(

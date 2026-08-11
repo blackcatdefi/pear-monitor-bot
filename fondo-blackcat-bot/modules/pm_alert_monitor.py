@@ -275,7 +275,8 @@ def _detail_lines(pm: Any) -> list[str]:
         f"🔴CRÍTICO {critical_ratio()*100:.0f}% · LIQ {liq_ratio()*100:.0f}%)",
         f"• Colateral HYPE: {coll}",
         f"• Deuda (USDC/USDH borrowed): {_fmt_usd(getattr(pm, 'debt_usd', 0.0))}",
-        f"• Capacidad borrow (LTV {_envf('PM_HYPE_LTV', 0.50):.2f}): "
+        f"• Capacidad borrow (LTV "
+        f"{_envf('PM_MAX_BORROW_LTV', _envf('PM_HYPE_LTV', 0.65)):.2f}): "
         f"{_fmt_usd(getattr(pm, 'capacity_usd', 0.0))}  | disponible: "
         f"{_fmt_usd(getattr(pm, 'available_usd', 0.0))}",
         f"• Hedge (shorts basket): {shorts}",

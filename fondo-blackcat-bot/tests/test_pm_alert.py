@@ -188,7 +188,7 @@ def test_rpmcore_classify_still_liq_at_095():
 def test_rpmcore_pmstate_status_unchanged():
     from modules.portfolio_margin import compute_pm_state
     bal = [{"coin": "HYPE", "total": 1000.0}, {"coin": "USDC", "total": -35_000}]
-    pm = compute_pm_state(bal, [], {"HYPE": 100.0})
+    pm = compute_pm_state(bal, [], {"HYPE": 100.0}, ltv_map={"HYPE": 0.50})
     assert pm.status == "STRESS"         # ratio 0.70 → STRESS (R-PMCORE classifier)
     assert pma.classify_alert_level(pm.ratio) == pma.STRESS
 
@@ -200,7 +200,7 @@ def test_display_block_shows_borrow_utilization_not_liq_risk():
     # renamed utilization line with a non-liquidation status and must NEVER
     # carry "LIQ-RISK" nor the WARN/STRESS/CRÍTICO/LIQ scale on that line.
     bal = [{"coin": "HYPE", "total": 1000.0}, {"coin": "USDC", "total": -45_000}]
-    pm = compute_pm_state(bal, [], {"HYPE": 100.0})
+    pm = compute_pm_state(bal, [], {"HYPE": 100.0}, ltv_map={"HYPE": 0.50})
     block = format_pm_state_telegram(pm)
     assert "Borrow utilization (vs 50% max-borrow)" in block
     assert "NEAR MAX-BORROW" in block    # 90% of the cap → near, not liquidating
@@ -215,7 +215,7 @@ def test_display_naked_long_line_preserved():
     # whenever naked_long is True (the structure stays visible, never hidden).
     from modules.portfolio_margin import compute_pm_state, format_pm_state_telegram
     bal = [{"coin": "HYPE", "total": 1000.0}, {"coin": "USDC", "total": -10_000}]
-    pm = compute_pm_state(bal, [], {"HYPE": 100.0})
+    pm = compute_pm_state(bal, [], {"HYPE": 100.0}, ltv_map={"HYPE": 0.50})
     block = format_pm_state_telegram(pm)
     assert pm.naked_long is True
     assert "Estructura: long apalancado sin hedge activo (decisión del owner)" in block

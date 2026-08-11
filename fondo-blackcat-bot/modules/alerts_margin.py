@@ -335,26 +335,92 @@ def _hf_band(aave_hf: float) -> int:
     return 0
 
 
+def _hyst_params() -> tuple[float, float, float]:
+    """(rearm_band, cooldown_info_sec, cooldown_critical_sec) — read at CALL
+    time so tests/env changes apply without re-import."""
+    try:
+        band = float(os.getenv("ALERT_HYSTERESIS_REARM_BAND", "0.03") or 0.03)
+    except (TypeError, ValueError):
+        band = 0.03
+    try:
+        cdi = float(os.getenv("ALERT_COOLDOWN_HOURS_INFO", "6") or 6) * 3600.0
+    except (TypeError, ValueError):
+        cdi = 6 * 3600.0
+    try:
+        cdc = float(os.getenv("ALERT_COOLDOWN_HOURS_CRITICAL", "1") or 1) * 3600.0
+    except (TypeError, ValueError):
+        cdc = 3600.0
+    return band, cdi, cdc
+
+
 def evaluate_pm_hf(aave_hf: float, *, now: float | None = None) -> tuple[bool, str]:
-    """Real-risk alert on aave-HF crossing DOWN 1.30/1.20/1.10. NEVER raises."""
+    """R-LTV65-QUIET 2.1 — per-threshold HYSTERESIS machine for aave-HF.
+
+    Kills the RIESGO PM REAL flap-spam (old logic: ``cooled or band >
+    last_band`` neutered the cooldown AND re-armed instantly on any recovery,
+    so HF oscillating around 1.30 paged on every wobble).
+
+    Per threshold T in (1.30 info, 1.20 observación, 1.10 acción):
+      * Crossing DOWN through T fires ONCE (subject to per-threshold cooldown:
+        ``ALERT_COOLDOWN_HOURS_INFO`` for 1.30/1.20, ``_CRITICAL`` for 1.10).
+      * While below and already fired → SILENT, except the 1.10 critical zone,
+        which is NEVER fully silenced: it re-fires every critical cooldown.
+      * Re-arms ONLY when HF recovers above T + ``ALERT_HYSTERESIS_REARM_BAND``
+        (default 0.03) sustained for 2 CONSECUTIVE checks. Inside the band the
+        recovery counter resets — a wobble does not re-arm.
+    State per threshold in SQLite (``pm_hf_thr:{T}``: band=fired flag,
+    value=recovery streak, sent_at=last fire) so restarts never re-fire.
+    When several thresholds fire in one plunge, ONE message for the deepest.
+    NEVER raises.
+    """
     try:
         now = now or time.time()
-        band = _hf_band(aave_hf)
-        last_band, _lv, last_sent = _get_state("pm_hf")
-        if last_band is None:
-            _set_state("pm_hf", band, aave_hf, now if band >= 1 else 0.0)
-            if band >= 1:
-                return True, _hf_message(aave_hf, band)
+        try:
+            h = float(aave_hf)
+        except (TypeError, ValueError):
             return False, ""
-        if band > int(last_band):
-            # Worsened across a threshold — fire (cooldown per band).
-            cooled = (now - float(last_sent or 0.0)) >= COOLDOWN_SEC
-            if cooled or band > int(last_band):
-                _set_state("pm_hf", band, aave_hf, now)
-                return True, _hf_message(aave_hf, band)
-        elif band < int(last_band):
-            # Recovered — re-arm silently.
-            _set_state("pm_hf", band, aave_hf, float(last_sent or 0.0))
+        if h <= 0:
+            return False, ""
+        rearm_band, cd_info, cd_crit = _hyst_params()
+        fired_levels: list[int] = []
+        for i, (thr, _label) in enumerate(HF_THRESHOLDS):
+            key = f"pm_hf_thr:{thr:.2f}"
+            f_flag, streak, last_sent = _get_state(key)
+            fired = int(f_flag or 0)
+            rc = int(streak or 0)
+            ls = float(last_sent or 0.0)
+            critical = thr <= 1.10 + 1e-9
+            cd = cd_crit if critical else cd_info
+            # ls == 0 → never fired: always "cooled" (first cross must page).
+            cooled = ls <= 0.0 or (now - ls) >= cd
+            if h < thr:
+                if fired == 0:
+                    if cooled:
+                        fired_levels.append(i)
+                        _set_state(key, 1, 0.0, now)
+                    else:
+                        # Crossed within cooldown: latch fired, skip the send.
+                        _set_state(key, 1, 0.0, ls)
+                elif critical and cooled:
+                    # Critical zone is never fully silenced.
+                    fired_levels.append(i)
+                    _set_state(key, 1, 0.0, now)
+                elif rc != 0:
+                    _set_state(key, 1, 0.0, ls)  # back below → reset streak
+            elif h >= thr + rearm_band:
+                if fired == 1:
+                    rc += 1
+                    if rc >= 2:
+                        _set_state(key, 0, 0.0, ls)  # re-armed
+                    else:
+                        _set_state(key, 1, float(rc), ls)
+            else:
+                # Hysteresis band [T, T+band): not a sustained recovery.
+                if fired == 1 and rc != 0:
+                    _set_state(key, 1, 0.0, ls)
+        if fired_levels:
+            deepest = max(fired_levels)  # higher index = lower threshold
+            return True, _hf_message(h, deepest + 1)
         return False, ""
     except Exception:  # noqa: BLE001
         log.exception("evaluate_pm_hf failed")

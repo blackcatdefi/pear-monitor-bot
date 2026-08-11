@@ -146,27 +146,27 @@ def test_telegram_block_shows_real_debt_line():
 
 # ─── PM KPI: real debt / HF / non-CALM (replaces "deuda $0 / 0% CALM") ───────
 def test_pm_state_reads_borrowed_field_not_zero():
-    pm = compute_pm_state(SPOT_BALANCES, [], {"HYPE": HYPE_PX})
+    pm = compute_pm_state(SPOT_BALANCES, [], {"HYPE": HYPE_PX}, ltv_map={"HYPE": 0.50})
     assert abs(pm.debt_usd - BORROWED) < 1.0        # ~$39.8K, NOT $0
     assert pm.collateral_usd > 75_000               # gross HYPE collateral
 
 
 def test_pm_state_health_factor_near_096():
-    pm = compute_pm_state(SPOT_BALANCES, [], {"HYPE": HYPE_PX})
+    pm = compute_pm_state(SPOT_BALANCES, [], {"HYPE": HYPE_PX}, ltv_map={"HYPE": 0.50})
     # HF = (collateral × 0.5) / debt ≈ 0.96.
     assert 0.92 <= pm.health_factor <= 1.00
     assert pm.liq_price > 0
 
 
 def test_pm_kpi_not_calm_when_over_capacity():
-    pm = compute_pm_state(SPOT_BALANCES, [], {"HYPE": HYPE_PX})
+    pm = compute_pm_state(SPOT_BALANCES, [], {"HYPE": HYPE_PX}, ltv_map={"HYPE": 0.50})
     assert pm.status != "CALM"                       # the whole point
     assert pm.status in ("STRESS", "LIQ")            # debt > capacity
     assert pm.ratio > 0.95
 
 
 def test_pm_telegram_renders_debt_hf_not_calm():
-    pm = compute_pm_state(SPOT_BALANCES, [], {"HYPE": HYPE_PX})
+    pm = compute_pm_state(SPOT_BALANCES, [], {"HYPE": HYPE_PX}, ltv_map={"HYPE": 0.50})
     block = format_pm_state_telegram(pm)
     assert "Health factor" in block
     # The debt line must NOT read $0.
@@ -178,7 +178,7 @@ def test_pm_debt_zero_path_still_calm():
     """Unleveraged wallet (no borrow) stays CALM with HF 0 — guards against the
     fix accidentally flagging clean positions."""
     bal = [{"coin": "HYPE", "total": 1000.0}, {"coin": "USDC", "total": 0.5}]
-    pm = compute_pm_state(bal, [], {"HYPE": 70.0})
+    pm = compute_pm_state(bal, [], {"HYPE": 70.0}, ltv_map={"HYPE": 0.50})
     assert pm.debt_usd == 0.0
     assert pm.status == "CALM"
     assert pm.health_factor == 0.0

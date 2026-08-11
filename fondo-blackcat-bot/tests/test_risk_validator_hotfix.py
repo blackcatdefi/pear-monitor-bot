@@ -222,9 +222,11 @@ def test_hf_band_transition_and_no_refire_on_restart(am, tmp_path) -> None:
     assert am2.DB_PATH == am.DB_PATH
     assert am2.evaluate_pm_hf(1.05, now=1_600.0)[0] is False
 
-    # Recovery re-arms silently; a NEW crossing fires again after cooldown.
-    assert am2.evaluate_pm_hf(1.50, now=2_000.0)[0] is False
-    cooldown = am2.COOLDOWN_SEC
+    # R-LTV65-QUIET: recovery re-arms ONLY after 2 CONSECUTIVE checks above
+    # threshold + hysteresis band; then a NEW crossing fires after cooldown.
+    assert am2.evaluate_pm_hf(1.50, now=2_000.0)[0] is False  # recovery #1
+    assert am2.evaluate_pm_hf(1.50, now=2_100.0)[0] is False  # recovery #2 → re-armed
+    cooldown = float(__import__("os").getenv("ALERT_COOLDOWN_HOURS_INFO", "6")) * 3600.0
     should, msg = am2.evaluate_pm_hf(1.18, now=2_000.0 + cooldown + 1.0)
     assert should is True and "OBSERVACIÓN" in msg
 

@@ -49,7 +49,7 @@ def test_stablecoins_skipped_when_perp_active():
 def test_pm_state_unleveraged_calm_and_silent():
     from modules.portfolio_margin import compute_pm_state, pm_alert
     bal = [{"coin": "HYPE", "total": 1000.0}, {"coin": "USDC", "total": 0.5}]
-    pm = compute_pm_state(bal, [], {"HYPE": 70.0})
+    pm = compute_pm_state(bal, [], {"HYPE": 70.0}, ltv_map={"HYPE": 0.50})
     assert round(pm.collateral_usd, 0) == 70_000
     assert pm.debt_usd == 0.0
     assert round(pm.capacity_usd, 0) == 35_000  # 0.5 × collateral
@@ -63,18 +63,18 @@ def test_pm_ratio_thresholds():
     from modules.portfolio_margin import compute_pm_state
     # collateral 100k → capacity 50k. debt 20k → ratio 0.40 = WARN.
     bal_warn = [{"coin": "HYPE", "total": 1000.0}, {"coin": "USDC", "total": -20_000}]
-    assert compute_pm_state(bal_warn, [], {"HYPE": 100.0}).status == "WARN"
+    assert compute_pm_state(bal_warn, [], {"HYPE": 100.0}, ltv_map={"HYPE": 0.50}).status == "WARN"
     bal_stress = [{"coin": "HYPE", "total": 1000.0}, {"coin": "USDC", "total": -35_000}]
-    assert compute_pm_state(bal_stress, [], {"HYPE": 100.0}).status == "STRESS"
+    assert compute_pm_state(bal_stress, [], {"HYPE": 100.0}, ltv_map={"HYPE": 0.50}).status == "STRESS"
     bal_liq = [{"coin": "HYPE", "total": 1000.0}, {"coin": "USDC", "total": -48_000}]
-    assert compute_pm_state(bal_liq, [], {"HYPE": 100.0}).status == "LIQ"
+    assert compute_pm_state(bal_liq, [], {"HYPE": 100.0}, ltv_map={"HYPE": 0.50}).status == "LIQ"
 
 
 # ─── 3. Naked-long guard ────────────────────────────────────────────────────
 def test_naked_long_guard_fires_when_debt_no_shorts():
     from modules.portfolio_margin import compute_pm_state, pm_alert, format_pm_state_telegram
     bal = [{"coin": "HYPE", "total": 1000.0}, {"coin": "USDC", "total": -10_000}]
-    pm = compute_pm_state(bal, [], {"HYPE": 100.0})  # no positions = no shorts
+    pm = compute_pm_state(bal, [], {"HYPE": 100.0}, ltv_map={"HYPE": 0.50})  # no positions = no shorts
     assert pm.naked_long is True
     should, msg = pm_alert(pm)
     assert should is True
@@ -88,7 +88,7 @@ def test_naked_long_guard_clears_with_shorts_open():
     from modules.portfolio_margin import compute_pm_state
     bal = [{"coin": "HYPE", "total": 1000.0}, {"coin": "USDC", "total": -10_000}]
     positions = [{"coin": "ENA", "size": -500.0, "notional_usd": 8000.0}]
-    pm = compute_pm_state(bal, positions, {"HYPE": 100.0})
+    pm = compute_pm_state(bal, positions, {"HYPE": 100.0}, ltv_map={"HYPE": 0.50})
     assert pm.shorts_notional == 8000.0
     assert pm.naked_long is False
 

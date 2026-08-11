@@ -38,11 +38,18 @@ PX = 58.07
 
 
 # ─── 1. Maintenance threshold formula ───────────────────────────────────────
-def test_liq_threshold_is_half_plus_half_ltv():
+def test_liq_threshold_decoupled_from_borrow_ltv():
+    """R-LTV65-QUIET: maint is PM_MAINT_LTV (0.75), NEVER derived from the
+    borrow LTV — HL raised HYPE max-borrow to 0.65 WITHOUT touching maint,
+    so the legacy 0.5+0.5×ltv formula would corrupt the liq price (0.825)."""
     assert _liq_threshold_for_ltv(0.50) == pytest.approx(0.75)
-    assert _liq_threshold_for_ltv(0.70) == pytest.approx(0.85)
+    assert _liq_threshold_for_ltv(0.65) == pytest.approx(0.75)  # NOT 0.825
+    assert _liq_threshold_for_ltv(0.70) == pytest.approx(0.75)  # NOT 0.85
     assert _liq_threshold_for_ltv(0.0) == pytest.approx(0.75)   # bad → default
     assert _liq_threshold_for_ltv("x") == pytest.approx(0.75)   # garbage → default
+    # A valid LIVE maint override is honoured; garbage overrides fall back.
+    assert _liq_threshold_for_ltv(0.65, maint_override=0.80) == pytest.approx(0.80)
+    assert _liq_threshold_for_ltv(0.65, maint_override=1.5) == pytest.approx(0.75)
 
 
 # ─── 2. Real liq price uses 0.75, NOT the 0.50 borrow LTV ───────────────────
@@ -51,7 +58,7 @@ def test_liq_price_uses_maintenance_threshold_not_borrow_ltv():
         {"coin": "USDC", "total": -10_740.32, "borrowed": BORROWED},
         {"coin": "HYPE", "total": HYPE_QTY, "supplied": HYPE_QTY, "ltv": 0.5},
     ]
-    pm = compute_pm_state(spot, [], {"HYPE": PX})
+    pm = compute_pm_state(spot, [], {"HYPE": PX}, ltv_map={"HYPE": 0.50})
     # The OLD wrong value was debt/(qty×0.5) ≈ $60.45 — must NOT reappear.
     wrong_old = BORROWED / (HYPE_QTY * 0.5)
     assert abs(wrong_old - 60.45) < 0.5
@@ -68,7 +75,7 @@ def test_aave_hf_and_hf_app_separated():
         {"coin": "USDC", "total": -10_740.32, "borrowed": BORROWED},
         {"coin": "HYPE", "total": HYPE_QTY, "supplied": HYPE_QTY, "ltv": 0.5},
     ]
-    pm = compute_pm_state(spot, [], {"HYPE": PX})
+    pm = compute_pm_state(spot, [], {"HYPE": PX}, ltv_map={"HYPE": 0.50})
     collateral = HYPE_QTY * PX
     # HF_app = capacity/debt = (collateral×0.5)/debt ≈ 0.96.
     assert pm.health_factor == pytest.approx(collateral * 0.5 / BORROWED, abs=1e-3)
@@ -107,7 +114,7 @@ def test_status_ratio_invariant_but_risk_is_green():
         {"coin": "USDC", "total": -10_740.32, "borrowed": BORROWED},
         {"coin": "HYPE", "total": HYPE_QTY, "supplied": HYPE_QTY, "ltv": 0.5},
     ]
-    pm = compute_pm_state(spot, [], {"HYPE": PX})
+    pm = compute_pm_state(spot, [], {"HYPE": PX}, ltv_map={"HYPE": 0.50})
     assert pm.status == "LIQ"          # ratio 1.04 → R-PMCORE classifier
     assert pm.ratio > 0.95
     assert pm.risk_emoji == "🟢"        # but the REAL liq risk is healthy
@@ -119,8 +126,8 @@ def test_cross_perp_mm_raises_liq_and_lowers_aave_hf():
         {"coin": "USDC", "total": -10_740.32, "borrowed": BORROWED},
         {"coin": "HYPE", "total": HYPE_QTY, "supplied": HYPE_QTY, "ltv": 0.5},
     ]
-    base = compute_pm_state(spot, [], {"HYPE": PX})
-    crossed = compute_pm_state(spot, [], {"HYPE": PX}, perp_cross_mm=5_000.0)
+    base = compute_pm_state(spot, [], {"HYPE": PX}, ltv_map={"HYPE": 0.50})
+    crossed = compute_pm_state(spot, [], {"HYPE": PX}, ltv_map={"HYPE": 0.50}, perp_cross_mm=5_000.0)
     # Folding $5K of cross perp maintenance margin into the liability pushes the
     # liquidation price UP and the aave HF DOWN.
     assert crossed.liq_price > base.liq_price
@@ -130,20 +137,21 @@ def test_cross_perp_mm_raises_liq_and_lowers_aave_hf():
 
 # ─── 6. Generic multi-collateral support ────────────────────────────────────
 def test_multi_collateral_metrics():
-    # HYPE (ltv .50 → maint .75) + a hypothetical asset (ltv .70 → maint .85).
+    # R-LTV65-QUIET: maint = PM_MAINT_LTV (0.75) for EVERY asset, decoupled
+    # from each asset's borrow LTV (.50 / .70 only drive capacity).
     breakdown = {"HYPE": 50_000.0, "WBTC": 50_000.0}
     m = compute_pm_risk_metrics(
         breakdown, debt=40_000.0, hype_qty=1000.0, hype_px=50.0,
         ltv_map={"HYPE": 0.50, "WBTC": 0.70},
     )
-    # capacity = 50k×.5 + 50k×.7 = 60k ; liq_weighted = 50k×.75 + 50k×.85 = 80k.
+    # capacity = 50k×.5 + 50k×.7 = 60k ; liq_weighted = 100k×.75 = 75k.
     assert m["borrow_capacity"] == pytest.approx(60_000.0)
-    assert m["liq_weighted"] == pytest.approx(80_000.0)
-    assert m["aave_hf"] == pytest.approx(80_000.0 / 40_000.0)   # 2.0
+    assert m["liq_weighted"] == pytest.approx(75_000.0)
+    assert m["aave_hf"] == pytest.approx(75_000.0 / 40_000.0)   # 1.875
     assert m["hf_app"] == pytest.approx(60_000.0 / 40_000.0)    # 1.5
-    # HYPE liq price holds the WBTC leg (50k×.85 = 42.5k) constant:
-    #   target = (debt+20) - 42_500 = -2_480  → already covered → liq price ~0.
-    assert m["liq_price"] == pytest.approx(0.0)
+    # HYPE liq price holds the WBTC leg (50k×.75 = 37.5k) constant:
+    #   target = (debt+20) - 37_500 = 2_520 → liq = 2_520/(0.75×1000) = 3.36.
+    assert m["liq_price"] == pytest.approx(2_520.0 / (0.75 * 1000.0), abs=0.05)
 
 
 def test_multi_collateral_liq_price_when_hype_dominant():
@@ -152,9 +160,9 @@ def test_multi_collateral_liq_price_when_hype_dominant():
         breakdown, debt=50_000.0, hype_qty=1000.0, hype_px=70.0,
         ltv_map={"HYPE": 0.50, "WBTC": 0.70},
     )
-    # other_liq (WBTC) = 10_000×0.85 = 8_500.
-    # target = (50_000 + 20) - 8_500 = 41_520 ; liq = 41_520/(0.75×1000) = 55.36.
-    assert m["liq_price"] == pytest.approx(41_520.0 / (0.75 * 1000.0), abs=0.05)
+    # other_liq (WBTC) = 10_000×0.75 = 7_500 (maint decoupled from ltv .70).
+    # target = (50_000 + 20) - 7_500 = 42_520 ; liq = 42_520/(0.75×1000) = 56.69.
+    assert m["liq_price"] == pytest.approx(42_520.0 / (0.75 * 1000.0), abs=0.05)
 
 
 # ─── 7. Telegram block: real risk legible, naked-long kept distinct ─────────
@@ -163,7 +171,7 @@ def test_block_renders_real_liq_and_aave_hf():
         {"coin": "USDC", "total": -10_740.32, "borrowed": BORROWED},
         {"coin": "HYPE", "total": HYPE_QTY, "supplied": HYPE_QTY, "ltv": 0.5},
     ]
-    block = format_pm_state_telegram(compute_pm_state(spot, [], {"HYPE": PX}))
+    block = format_pm_state_telegram(compute_pm_state(spot, [], {"HYPE": PX}, ltv_map={"HYPE": 0.50}))
     assert "Health factor (aave" in block
     assert "SALUDABLE" in block and "🟢" in block          # aave-driven headline
     assert "Utilización borrow" in block                   # HF_app relabelled
@@ -191,7 +199,7 @@ def test_second_oracle_case_hf_app_096():
         {"coin": "USDC", "total": -10_740.32, "borrowed": BORROWED},
         {"coin": "HYPE", "total": HYPE_QTY, "supplied": HYPE_QTY, "ltv": 0.5},
     ]
-    pm = compute_pm_state(spot, [], {"HYPE": 58.07})
+    pm = compute_pm_state(spot, [], {"HYPE": 58.07}, ltv_map={"HYPE": 0.50})
     assert pm.health_factor == pytest.approx(0.9606, abs=0.002)
     assert pm.aave_hf == pytest.approx(1.4409, abs=0.003)
 

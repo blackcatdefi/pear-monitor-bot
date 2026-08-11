@@ -97,7 +97,7 @@ FLYWHEEL_NOTE = (
     "El core del fondo es Portfolio Margin nativo en HyperLiquid: el HYPE spot "
     "es colateral cross y se pide prestado SOLO USDC/USDH, cubierto por el short "
     "book (el basket = el hedge). El riesgo real de liquidación se mide con el "
-    "aave-HF (Σ valor×liq_threshold / deuda, liq_threshold=0.5+0.5×ltv), el liq "
+    "aave-HF (Σ valor×liq_threshold / deuda, liq_threshold=PM_MAINT_LTV=0.75, separado del max-borrow LTV), el liq "
     "price del HYPE y la utilización del borrow. Solo alertar si: (a) aave-HF < "
     "1.10 (zona acción), (b) el HYPE se acerca a su liq price, (c) hay deuda "
     "USDC abierta SIN shorts (naked long — viola la regla dura del hedge). NO "
