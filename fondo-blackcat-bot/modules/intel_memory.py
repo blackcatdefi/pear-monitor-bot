@@ -124,8 +124,27 @@ def record_x_api_call(
     tweets_returned: int = 0,
     caller: str = "",
 ) -> None:
-    """Record a single X API call for cost tracking + rate limiting."""
-    est_cost = (tweets_returned / 1000.0) * X_API_COST_PER_1K_TWEETS
+    """Record a single X API call for cost tracking + rate limiting.
+
+    R-UNIFIED-LIQ Phase B: endpoints prefixed ``provider/`` (twitterapi.io)
+    bill by CREDITS — $0.0015 per HTTP call (``pages``) + $0.15/1K tweets —
+    instead of the official Console $5/1K-posts rate.
+    """
+    if endpoint.startswith("provider/"):
+        try:
+            from modules.x_provider import (
+                PROVIDER_COST_PER_CALL_USD,
+                PROVIDER_COST_PER_1K_TWEETS_USD,
+            )
+        except Exception:  # noqa: BLE001
+            PROVIDER_COST_PER_CALL_USD = 0.0015
+            PROVIDER_COST_PER_1K_TWEETS_USD = 0.15
+        est_cost = (
+            max(pages, 1) * PROVIDER_COST_PER_CALL_USD
+            + (tweets_returned / 1000.0) * PROVIDER_COST_PER_1K_TWEETS_USD
+        )
+    else:
+        est_cost = (tweets_returned / 1000.0) * X_API_COST_PER_1K_TWEETS
     try:
         conn = _get_conn()
         conn.execute(

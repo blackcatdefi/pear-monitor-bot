@@ -969,6 +969,34 @@ def get_store_timeline_payload(hours: int = 48) -> dict[str, Any]:
     return payload
 
 
+async def _notify_provider_fallback(app, event: dict[str, Any]) -> None:
+    """ONE deduped Telegram alert when the twitterapi.io list endpoint fails
+    and the member-search fallback serves the timeline. NEVER raises."""
+    try:
+        from modules.alert_dedup import should_emit
+        if not should_emit(
+            "x_provider", "fallback", "active",
+            cooldown_hours=24.0,
+        ):
+            return
+        msg = (
+            "⚠️ X INTEL — fallback activado\n"
+            "El endpoint de lista de twitterapi.io falló; el timeline se "
+            "sirvió via advanced_search sobre los miembros cacheados de la "
+            "lista.\n"
+            f"Motivo: {event.get('reason') or 'n/d'}"
+        )
+        if app is not None:
+            from config import TELEGRAM_CHAT_ID
+            if TELEGRAM_CHAT_ID:
+                await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg)
+        else:
+            log.warning("[X_PROVIDER] fallback active (no app to notify): %s",
+                        event.get("reason"))
+    except Exception:  # noqa: BLE001
+        log.exception("provider fallback notify failed (non-fatal)")
+
+
 async def fetch_x_intel(
     hours: int = 48,
     caller: str = "fetch_x_intel",
@@ -1005,10 +1033,23 @@ async def fetch_x_intel(
     # R-COST-V2-FIX: no budget gate — the fetch ALWAYS proceeds.
 
     # Incremental fetch: only tweets newer than the stored high-water mark.
+    # R-UNIFIED-LIQ Phase B: transport dispatch — twitterapi.io (default once
+    # X_PROVIDER_API_KEY is set) vs the dormant official client. ZERO paid
+    # api.x.com calls happen while the provider is active (pinned by test).
     since_id = x_store.get_since_id()
-    tweets, diag = await fetch_timeline_via_list(
-        hours=hours, caller=caller, since_id=since_id,
-    )
+    from modules import x_provider
+    if x_provider.provider_active():
+        tweets, diag = await x_provider.fetch_timeline(
+            hours=hours, caller=caller, since_id=since_id,
+        )
+        _last_fetch_meta.update(x_provider.last_fetch_meta())
+        fb = x_provider.pop_fallback_event()
+        if fb:
+            await _notify_provider_fallback(app, fb)
+    else:
+        tweets, diag = await fetch_timeline_via_list(
+            hours=hours, caller=caller, since_id=since_id,
+        )
 
     if tweets is None:
         # Live failed → degrade to store window when it has data.
@@ -1365,15 +1406,40 @@ async def format_x_costs() -> str:
     usage = x_store.usage_state()
     ss = x_store.store_stats()
 
+    # R-UNIFIED-LIQ Phase B: pricing follows the ACTIVE transport. Provider
+    # (twitterapi.io) credits: $0.0015/call + $0.15/1K tweets; official
+    # Console rate stays $0.005/post while the provider is inactive.
+    from modules import x_provider
+    _provider = x_provider.provider_active()
+    rate = (
+        x_provider.effective_cost_per_post_usd() if _provider
+        else x_store.COST_PER_POST_USD
+    )
+
     lines: list[str] = []
     lines.append("💰 X API COSTS — R-COST-V2 (informational, no limit)")
     lines.append("─" * 32)
     lines.append("")
-    lines.append(f"📅 Posts today (UTC): {usage['today']} (${usage['today'] * x_store.COST_PER_POST_USD:.2f})")
-    lines.append(f"📅 Posts MTD: {usage['used']} (${usage['mtd_cost_usd']:.2f})")
+    lines.append(
+        f"🛰 Source: {x_provider.backend_name()}"
+        + (
+            f" (${x_provider.PROVIDER_COST_PER_CALL_USD:.4f}/call + "
+            f"${x_provider.PROVIDER_COST_PER_1K_TWEETS_USD:.2f}/1K tweets)"
+            if _provider else " (Console $0.005/post)"
+        )
+    )
+    lines.append(f"📅 Posts today (UTC): {usage['today']} (${usage['today'] * rate:.2f})")
+    lines.append(f"📅 Posts MTD: {usage['used']} (${usage['used'] * rate:.2f})")
     lines.append("")
-    lines.append(f"📈 Projection month-end: {usage['projected_month_posts']} posts ≈ ${usage['projected_month_cost_usd']:.2f}")
-    lines.append(f"   (cost model: ${x_store.COST_PER_POST_USD:.3f}/post — real Console rate)")
+    lines.append(
+        f"📈 Projection month-end: {usage['projected_month_posts']} posts "
+        f"≈ ${usage['projected_month_posts'] * rate:.2f}"
+    )
+    lines.append(
+        f"   (cost model: ${rate:.5f}/post"
+        + (" + $0.0015/call — twitterapi.io credits)" if _provider
+           else " — real Console rate)")
+    )
     lines.append("")
     lines.append("💾 Local store:")
     lines.append(f"   Tweets: {ss['total_tweets']} | retention: {ss['retention_hours']}h")

@@ -211,6 +211,15 @@ def _pm_ltv_status() -> dict:
     return out
 
 
+def _x_source_safe() -> str:
+    """Effective X transport for /health — best effort, never raises."""
+    try:
+        from modules.x_provider import backend_name
+        return backend_name()
+    except Exception:  # noqa: BLE001
+        return "(unavailable)"
+
+
 def health_payload(commands_count: int) -> dict:
     """JSON payload for /health endpoint (Railway probe)."""
     return {
@@ -222,6 +231,8 @@ def health_payload(commands_count: int) -> dict:
         "uptime_seconds": uptime_seconds(),
         "commands_registered": commands_count,
         "x_api": _x_status_short(),
+        # R-UNIFIED-LIQ Phase B: effective X transport (twitterapi_io|official).
+        "x_source": _x_source_safe(),
         "llm": _llm_short(),
         # R-PERFECT Phase 3 §EXIT
         "intel_24h_calls": _intel_24h_calls(),
