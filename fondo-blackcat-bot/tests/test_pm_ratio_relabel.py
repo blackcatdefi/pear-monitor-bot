@@ -98,15 +98,16 @@ def test_t5_maint_decoupled_from_borrow_ltv():
         breakdown, debt=40_000.0, hype_qty=1000.0, hype_px=100.0,
         ltv_map={"HYPE": 0.70},
     )
-    # Maint stays PM_MAINT_LTV (0.75) no matter the borrow LTV.
+    # R-UNIFIED-LIQ: the PARTIAL threshold DERIVES from the borrow LTV via
+    # the official formula LTV + (1−LTV)/2 → 0.75 @ .50 and 0.85 @ .70.
     assert m50["liq_threshold"] == pytest.approx(0.75)
-    assert m70["liq_threshold"] == pytest.approx(0.75)        # NOT 0.85
+    assert m70["liq_threshold"] == pytest.approx(0.85)
     assert m50["max_ltv"] == pytest.approx(0.50)
     assert m70["max_ltv"] == pytest.approx(0.70)
-    # Borrow LTV moves CAPACITY (hf_app) only; liq math is untouched.
+    # A higher borrow LTV moves capacity AND the liq axis together.
     assert m70["hf_app"] > m50["hf_app"]
-    assert m70["aave_hf"] == pytest.approx(m50["aave_hf"])
-    assert m70["liq_price"] == pytest.approx(m50["liq_price"])
+    assert m70["aave_hf"] > m50["aave_hf"]
+    assert m70["liq_price"] < m50["liq_price"]
 
 
 # ── T6. label-guard: utilization status never "LIQ" / never red ──────────────

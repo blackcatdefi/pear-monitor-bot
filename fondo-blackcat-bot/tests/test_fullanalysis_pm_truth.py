@@ -165,7 +165,9 @@ def test_t4_forbidden_formula_not_in_prompt():
     low = SYSTEM_PROMPT.lower()
     assert "prohibido recalcular" in low
     assert "verbatim" in low
-    assert "PM_MAINT_LTV" in SYSTEM_PROMPT  # R-LTV65-QUIET: maint decoupled
+    # R-UNIFIED-LIQ: the prompt teaches the official HL PM formulas.
+    assert "LTV+(1−LTV)/2" in SYSTEM_PROMPT
+    assert "LTV+(1−LTV)×2/3" in SYSTEM_PROMPT
 
 
 # ── T5 ──────────────────────────────────────────────────────────────────────
@@ -186,7 +188,7 @@ def test_t5_panel_narrative_parity():
 
 # ── T6 ──────────────────────────────────────────────────────────────────────
 def test_t6_param_driven_threshold_preserved():
-    """R-LTV65-QUIET: liq_threshold = PM_MAINT_LTV for ANY borrow ltv."""
+    """R-UNIFIED-LIQ: liq_threshold = LTV + (1−LTV)/2 for ANY borrow ltv."""
     for ltv in (0.40, 0.50, 0.65):
         pm = compute_pm_state(
             [{"coin": "HYPE", "total": 1000.0},
@@ -197,11 +199,11 @@ def test_t6_param_driven_threshold_preserved():
             ltv_map={"HYPE": ltv},
             perp_cross_mm=0.0,
         )
-        expected = 0.75  # PM_MAINT_LTV default — decoupled from borrow ltv
+        expected = ltv + (1.0 - ltv) * 0.5  # official partial factor
         assert abs(pm.liq_threshold - expected) < 1e-9, (ltv, pm.liq_threshold)
         block = build_pm_llm_block(pm)
         # The block reports the same data-derived threshold.
-        assert f"{expected:.2f}" in block
+        assert f"{expected:.4f}" in block
 
     # No hardcoded 0.75 *numeric literal* in the new module's code (docstrings
     # / comments may mention it as explanatory prose — only executable code is

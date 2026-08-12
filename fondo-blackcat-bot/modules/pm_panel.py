@@ -96,8 +96,9 @@ def explainer_line(liq_price: float) -> str:
         lp = float(liq_price or 0.0)
     except (TypeError, ValueError):
         lp = 0.0
-    px = f"~${lp:,.2f}" if lp > 0 else "el precio de mantenimiento"
+    px = f"~${lp:,.2f}" if lp > 0 else "el umbral parcial"
     return (
         "ℹ️ Over max-borrow bloquea solo nuevos draws de USDC; "
-        f"la liquidación real es a HYPE {px} (trigger ratio>0.95)."
+        f"la liquidación PARCIAL arranca a HYPE {px} "
+        "(LTV+(1−LTV)/2, repite c/3s hasta sano)."
     )

@@ -61,13 +61,17 @@ def test_no_debt_no_thresholds():
 
 
 def test_panel_prints_threshold_line():
+    """R-UNIFIED-LIQ: the ladder is rebuilt from the PARTIAL price."""
     pm = _state()
     panel = format_pm_state_telegram(pm)
     assert "Umbrales HYPE:" in panel
-    assert f"HF1.20 ${pm.hype_price_at_hf_120:,.2f} (observación)" in panel
-    assert f"HF1.10 ${pm.hype_price_at_hf_110:,.2f} (acción)" in panel
-    # R-BOT-DEFINITIVE-2 T1: the umbrales line cites the REAL liq (ratio>0.95).
-    assert f"liq real ${pm.liq_price_real:,.2f}" in panel
+    assert f"${pm.liq_obs_price:,.2f} (observación, parcial×1.20)" in panel
+    assert f"${pm.liq_action_price:,.2f} (acción, parcial×1.10)" in panel
+    assert (
+        f"${pm.liq_early_price:,.2f} (early-warning conservador, umbral −5%)"
+        in panel
+    )
+    assert f"liq parcial ${pm.liq_price:,.2f}" in panel
 
 
 def test_pm_context_injects_identical_values_and_forbids_derivation():
@@ -76,7 +80,9 @@ def test_pm_context_injects_identical_values_and_forbids_derivation():
     pm = _state()
     block = build_pm_llm_block(pm)
     panel = format_pm_state_telegram(pm)
-    for px in (pm.hype_price_at_hf_120, pm.hype_price_at_hf_110):
+    # R-UNIFIED-LIQ: parity now holds on the partial-derived ladder prices.
+    for px in (pm.liq_obs_price, pm.liq_action_price, pm.liq_early_price,
+               pm.liq_price):
         s = f"${px:,.2f}"
         assert s in block and s in panel
     assert "PROHIBIDO derivar otras zonas" in block

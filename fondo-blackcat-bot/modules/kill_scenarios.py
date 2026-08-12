@@ -66,7 +66,7 @@ async def compute_kill_scenarios() -> str:
             has_pm_debt = True
             hf_text = f"{pm.aave_hf:.3f}"
             if pm.liq_price > 0:
-                liq_text = f"   Liq price HYPE (maint): ${pm.liq_price:,.2f}"
+                liq_text = f"   Liq price HYPE (parcial): ${pm.liq_price:,.2f}"
     except Exception:  # noqa: BLE001
         log.exception("kill_scenarios: PM state unavailable")
 

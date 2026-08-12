@@ -224,10 +224,14 @@ def maint_ltv_verification_status() -> dict[str, Any]:
     ``{"verified": bool, "live_maint": float|None, "config_maint": float}``.
     NEVER raises.
     """
+    # R-UNIFIED-LIQ: the config threshold is now DERIVED from the borrow LTV
+    # (partial factor LTV+(1−LTV)/2) unless PM_MAINT_LTV manually overrides it.
     try:
-        from config import PM_MAINT_LTV as _cfg_maint
+        from config import PM_MAX_BORROW_LTV as _cfg_ltv
+        from modules.portfolio_margin import _liq_threshold_for_ltv
+        _cfg_maint = _liq_threshold_for_ltv(_cfg_ltv)
     except Exception:  # noqa: BLE001
-        _cfg_maint = 0.75
+        _cfg_maint = 0.825
     try:
         live = get_maintenance_ltv_map().get("HYPE")
     except Exception:  # noqa: BLE001

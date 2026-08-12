@@ -41,7 +41,7 @@ try:
     )
 except Exception:  # noqa: BLE001 — importable in isolated tests
     PM_HYPE_LTV = 0.65      # R-LTV65-QUIET: HL max-borrow LTV HYPE 0.50 → 0.65
-    PM_MAINT_LTV = 0.75     # maintenance LTV — DECOUPLED from the borrow LTV
+    PM_MAINT_LTV = None     # R-UNIFIED-LIQ: optional manual override ONLY
     PM_WARN_RATIO = 0.40
     PM_STRESS_RATIO = 0.70
     PM_CRITICAL_RATIO = 0.85
@@ -143,6 +143,20 @@ class PMState:
     liq_price_real: float = 0.0
     price_buffer_real_pct: float = 0.0
     hf_at_real_liq: float = 0.0
+    # R-UNIFIED-LIQ (2026-08-11): official HL PM borrow-liquidation model.
+    #   * ``liq_price``/``liq_price_real`` — PARTIAL liq price (threshold =
+    #     LTV + (1−LTV)/2; fires repeatedly every 3s until healthy).
+    #   * ``liq_price_full``  — FULL liq price (LTV + (1−LTV)×2/3; takes all).
+    #   * ``full_factor``     — the full-liq threshold factor for HYPE.
+    #   * ladder rebuilt from the partial price: observation ×1.20, action
+    #     ×1.10, conservative early-warning = partial/0.95 (5% threshold
+    #     haircut, fires ABOVE the partial price).
+    liq_price_full: float = 0.0
+    price_buffer_full_pct: float = 0.0
+    full_factor: float = 0.0
+    liq_early_price: float = 0.0
+    liq_action_price: float = 0.0
+    liq_obs_price: float = 0.0
 
 
 def _f(v: Any) -> float:
@@ -162,19 +176,55 @@ def _classify(ratio: float) -> str:
     return "CALM"
 
 
+def _clean_ltv(ltv: Any) -> float:
+    """Sanitise a borrow LTV to (0, 1); fall back to PM_HYPE_LTV/0.65."""
+    try:
+        v = float(ltv)
+        if 0.0 < v < 1.0:
+            return v
+    except (TypeError, ValueError):
+        pass
+    try:
+        d = float(PM_HYPE_LTV)
+        return d if 0.0 < d < 1.0 else 0.65
+    except (TypeError, ValueError):
+        return 0.65
+
+
+def borrow_partial_liq_factor(ltv: float) -> float:
+    """R-UNIFIED-LIQ — official HL PM PARTIAL borrow-liquidation factor.
+
+    ``LTV + (1 − LTV) × 1/2``. Partial liquidation fires when
+    ``debt ≥ collateral_value × factor`` and REPEATS every 3s (with slippage)
+    until the account is healthy again. LTV 0.65 → 0.825; LTV 0.50 → 0.75
+    (matches the legacy app value — backward consistency). NEVER raises.
+    """
+    v = _clean_ltv(ltv)
+    return v + (1.0 - v) * 0.5
+
+
+def borrow_full_liq_factor(ltv: float) -> float:
+    """R-UNIFIED-LIQ — official HL PM FULL borrow-liquidation factor.
+
+    ``LTV + (1 − LTV) × 2/3``. Full liquidation takes EVERYTHING.
+    LTV 0.65 → 0.88333; LTV 0.50 → 0.8333. NEVER raises.
+    """
+    v = _clean_ltv(ltv)
+    return v + (1.0 - v) * (2.0 / 3.0)
+
+
 def _liq_threshold_for_ltv(
     ltv: float, maint_override: float | None = None
 ) -> float:
-    """HL Portfolio Margin MAINTENANCE threshold for a collateral asset.
+    """HL Portfolio Margin PARTIAL borrow-liquidation threshold for an asset.
 
-    R-LTV65-QUIET (2026-08-11): the maintenance LTV is DECOUPLED from the
-    borrow LTV. The legacy derivation ``0.5 + 0.5 × ltv`` was only ever a
-    coincidence of the 0.50-borrow-LTV era (→ 0.75); when HL raised the HYPE
-    max-borrow LTV to 0.65 the maintenance threshold did NOT move with it.
-    Liquidation math therefore reads ``PM_MAINT_LTV`` (env, default 0.75) —
-    optionally overridden per-asset by a LIVE maintenance value from the HL
-    borrow-lend API (``maint_override``) when the API reports one. The
-    ``ltv`` argument is retained for signature compatibility and is IGNORED.
+    R-UNIFIED-LIQ (2026-08-11): replaces the flat maint-LTV model. The
+    threshold DERIVES from the borrow LTV via the official HL formula
+    ``LTV + (1 − LTV)/2`` (docs: support/faq/portfolio-margin). Priority:
+      1. ``maint_override`` — a LIVE per-asset maintenance value from the HL
+         borrow-lend API, when the API reports one.
+      2. ``PM_MAINT_LTV`` env — OPTIONAL manual override (None/unset = skip).
+      3. The formula (default path).
     NEVER raises.
     """
     try:
@@ -185,10 +235,56 @@ def _liq_threshold_for_ltv(
     except (TypeError, ValueError):
         pass
     try:
-        m = float(PM_MAINT_LTV)
+        if PM_MAINT_LTV is not None:
+            m = float(PM_MAINT_LTV)
+            if 0.0 < m < 1.0:
+                return m
     except (TypeError, ValueError):
-        m = 0.75
-    return m if 0.0 < m < 1.0 else 0.75
+        pass
+    return borrow_partial_liq_factor(ltv)
+
+
+def compute_borrow_liq_ladder(
+    debt: float,
+    hype_qty: float,
+    ltv: float,
+    *,
+    maint_override: float | None = None,
+) -> dict[str, float]:
+    """Pure single-collateral R-UNIFIED-LIQ price ladder (no offsets).
+
+    From the official HL PM borrow-liquidation model:
+      * ``partial_price``  = debt / (qty × partial_factor) — partial liq starts
+        here and repeats every 3s until healthy.
+      * ``full_price``     = debt / (qty × full_factor) — full liq, takes all.
+      * ``early_price``    = partial_price / 0.95 — CONSERVATIVE early-warning
+        (5% haircut on the partial threshold; fires ABOVE the partial price).
+      * ``action_price``   = partial_price × 1.10.
+      * ``observation_price`` = partial_price × 1.20.
+    Aug-11 snapshot pin (debt 91.6K · 3,006.28 HYPE · LTV 0.65):
+    PARTIAL 36.93 · FULL 34.49 · early 38.87 · action 40.62 · obs 44.32.
+    All 0.0 when inputs are degenerate. NEVER raises.
+    """
+    d = _f(debt)
+    q = _f(hype_qty)
+    pf = _liq_threshold_for_ltv(ltv, maint_override)
+    ff = borrow_full_liq_factor(ltv)
+    if d <= 0 or q <= 0 or pf <= 0 or ff <= 0:
+        return {
+            "partial_factor": pf, "full_factor": ff,
+            "partial_price": 0.0, "full_price": 0.0,
+            "early_price": 0.0, "action_price": 0.0, "observation_price": 0.0,
+        }
+    partial = d / (q * pf)
+    return {
+        "partial_factor": pf,
+        "full_factor": ff,
+        "partial_price": partial,
+        "full_price": d / (q * ff),
+        "early_price": partial / 0.95,
+        "action_price": partial * 1.10,
+        "observation_price": partial * 1.20,
+    }
 
 
 # R-PM-LIQ aave-style health bands (DRIVEN BY aave_HF, not the borrow ratio):
@@ -270,24 +366,41 @@ def compute_pm_risk_metrics(
     if liq_price > 0 and hype_px > 0:
         buffer_pct = max(0.0, (hype_px - liq_price) / hype_px * 100.0)
 
-    # R-BOT-DEFINITIVE-2 T1 — REAL liquidation price. HL PM liquidation fires
-    # when portfolio_margin_ratio = liability / liq_weighted > PM_LIQ_RATIO
-    # (0.95), NOT at ratio = 1.0. Solving liq_weighted(px) × 0.95 = liability
-    # (+ min-borrow offset; other collateral constant) gives, in the single-
-    # collateral case, LIQ_REAL = debt / (0.95 × 0.75 × qty) = debt /
-    # (0.7125 × qty) — ALWAYS above the nominal HF=1.0 price. The aave-HF at
-    # this trigger is 1/0.95 ≈ 1.053.
-    trigger = _f(PM_LIQ_RATIO) or 0.95
-    eff_threshold = hype_liq_threshold * trigger  # 0.7125 for HYPE (0.75 × 0.95)
-    liq_price_real = 0.0
-    if debt > 0 and hype_qty > 0 and eff_threshold > 0:
-        target_real = (liability + _f(min_borrow_offset)) - other_liq * trigger
-        if target_real > 0:
-            liq_price_real = target_real / (eff_threshold * hype_qty)
-    buffer_real_pct = 0.0
-    if liq_price_real > 0 and hype_px > 0:
-        buffer_real_pct = max(0.0, (hype_px - liq_price_real) / hype_px * 100.0)
-    hf_at_real_liq = (1.0 / trigger) if trigger > 0 else 0.0
+    # R-UNIFIED-LIQ (2026-08-11) — official HL PM borrow-liquidation model
+    # replaces the 0.95-trigger heuristic. The PARTIAL threshold (``liq_price``
+    # above, solved on the partial factors) is where liquidation ACTUALLY
+    # starts (repeats every 3s until healthy); the FULL threshold (factor
+    # ``LTV + (1−LTV)×2/3``) is where HL takes everything. ``liq_price_real``
+    # is kept as a backward-compat ALIAS of the partial price (the "real"
+    # liquidation start); the aave-HF at that point is exactly 1.0.
+    full_weighted = 0.0
+    hype_full_factor = borrow_full_liq_factor(ltv_map.get("HYPE", PM_HYPE_LTV))
+    for coin, value in (breakdown or {}).items():
+        v = _f(value)
+        if v <= 0:
+            continue
+        c_ltv = _f(ltv_map.get(coin.upper(), PM_HYPE_LTV)) or PM_HYPE_LTV
+        full_weighted += v * borrow_full_liq_factor(c_ltv)
+    other_full = full_weighted - hype_value_at_oracle * hype_full_factor
+    liq_price_full = 0.0
+    if debt > 0 and hype_qty > 0 and hype_full_factor > 0:
+        target_full = (liability + _f(min_borrow_offset)) - other_full
+        if target_full > 0:
+            liq_price_full = target_full / (hype_full_factor * hype_qty)
+    buffer_full_pct = 0.0
+    if liq_price_full > 0 and hype_px > 0:
+        buffer_full_pct = max(0.0, (hype_px - liq_price_full) / hype_px * 100.0)
+
+    liq_price_real = liq_price
+    buffer_real_pct = buffer_pct
+    hf_at_real_liq = 1.0
+
+    # R-UNIFIED-LIQ ladder rebuilt FROM the partial price: observation ×1.20,
+    # action ×1.10, conservative early-warning = partial threshold with a 5%
+    # haircut (→ price / 0.95, fires ABOVE the partial price).
+    liq_early_price = (liq_price / 0.95) if liq_price > 0 else 0.0
+    liq_action_price = liq_price * 1.10
+    liq_obs_price = liq_price * 1.20
 
     # R-BOT-DEFINITIVE WI-7 — HYPE price at aave-HF thresholds (OUTPUT ONLY,
     # same liability basis as aave_hf: debt + perp cross maint margin; other
@@ -310,7 +423,12 @@ def compute_pm_risk_metrics(
         "liq_price_real": liq_price_real,
         "price_buffer_real_pct": buffer_real_pct,
         "hf_at_real_liq": hf_at_real_liq,
-        "liq_trigger_ratio": trigger,
+        "liq_price_full": liq_price_full,
+        "price_buffer_full_pct": buffer_full_pct,
+        "full_factor": hype_full_factor,
+        "liq_early_price": liq_early_price,
+        "liq_action_price": liq_action_price,
+        "liq_obs_price": liq_obs_price,
         "max_ltv": _f(ltv_map.get("HYPE", PM_HYPE_LTV)) or PM_HYPE_LTV,
         "liq_threshold": hype_liq_threshold,
         "hype_price_at_hf_130": _px_at_hf(1.30),
@@ -544,6 +662,12 @@ def compute_pm_state(
         liq_price_real=metrics.get("liq_price_real", 0.0),
         price_buffer_real_pct=metrics.get("price_buffer_real_pct", 0.0),
         hf_at_real_liq=metrics.get("hf_at_real_liq", 0.0),
+        liq_price_full=metrics.get("liq_price_full", 0.0),
+        price_buffer_full_pct=metrics.get("price_buffer_full_pct", 0.0),
+        full_factor=metrics.get("full_factor", 0.0),
+        liq_early_price=metrics.get("liq_early_price", 0.0),
+        liq_action_price=metrics.get("liq_action_price", 0.0),
+        liq_obs_price=metrics.get("liq_obs_price", 0.0),
     )
 
 
@@ -634,7 +758,7 @@ def format_pm_state_telegram(
         f"{util_pct:.1f}%  — {util_label}"
     )
     # R-PM-LIQ: the RISK metric is the aave-style Health factor (uses the
-    # MAINTENANCE liq threshold PM_MAINT_LTV=0.75, NOT the borrow LTV). Surface
+    # official PARTIAL liq threshold LTV+(1−LTV)/2, NOT the raw borrow LTV). Surface
     # both framings unambiguously, plus the real liquidation price + buffer.
     if pm.debt_usd > 1.0:
         lines.append(
@@ -644,41 +768,43 @@ def format_pm_state_telegram(
         lines.append(
             f"├─ Utilización borrow (Earn, app HF): {pm.health_factor:.4f} "
             f"(LTV actual {pm.current_ltv*100:.1f}% · máx borrow {pm.max_ltv*100:.0f}% · "
-            f"maint {pm.liq_threshold*100:.0f}%)"
+            f"liq parcial {pm.liq_threshold*100:.1f}%)"
         )
         if pm.perp_cross_mm > 0:
             lines.append(
                 f"├─ Perp cross maint-margin (en cuenta PM): {_fmt_usd(pm.perp_cross_mm)}"
             )
+        # R-UNIFIED-LIQ: BOTH official HL PM borrow-liquidation lines, with
+        # buffers. PARTIAL = LTV + (1−LTV)/2 (repeats every 3s until healthy);
+        # FULL = LTV + (1−LTV)×2/3 (takes everything).
         if pm.liq_price > 0:
+            buf_p = (
+                f" · buffer {pm.price_buffer_pct:.1f}%"
+                if pm.price_buffer_pct > 0 else ""
+            )
             lines.append(
-                f"├─ Liq nominal (maint-LTV {pm.liq_threshold:.2f}, HF 1.0): "
+                f"├─ LIQ PARCIAL (factor {pm.liq_threshold:.4f} = LTV+(1−LTV)/2): "
                 f"${pm.liq_price:,.2f}"
+                + (f"  (oracle ${pm.hype_px:,.2f}{buf_p})" if pm.hype_px > 0 else "")
+                + " — repite c/3s hasta sano"
             )
-        # R-BOT-DEFINITIVE-2 T1: HL PM liquidation triggers at ratio > 0.95 —
-        # the REAL liq price uses the effective LTV 0.95 × maint (0.7125) and
-        # is ALWAYS above nominal. The buffer is measured against LIQ REAL.
-        if pm.liq_price_real > 0:
-            eff_ltv = pm.liq_threshold * 0.95 if pm.liq_threshold > 0 else 0.7125
-            buf_real = (
-                f" · buffer {pm.price_buffer_real_pct:.1f}%"
-                if pm.price_buffer_real_pct > 0 else ""
+        if pm.liq_price_full > 0:
+            buf_f = (
+                f" · buffer {pm.price_buffer_full_pct:.1f}%"
+                if pm.price_buffer_full_pct > 0 else ""
             )
             lines.append(
-                f"├─ LIQ REAL ({eff_ltv:.4f}, trigger ratio>0.95): "
-                f"${pm.liq_price_real:,.2f}"
-                + (f"  (oracle ${pm.hype_px:,.2f}{buf_real})" if pm.hype_px > 0 else "")
+                f"├─ LIQ TOTAL (factor {pm.full_factor:.4f} = LTV+(1−LTV)×2/3): "
+                f"${pm.liq_price_full:,.2f}{buf_f} — se lleva TODO"
             )
-            hf_real = pm.hf_at_real_liq if pm.hf_at_real_liq > 0 else 1.0 / 0.95
-            lines.append(f"├─ HF at real liquidation = {hf_real:.3f}")
-        # R-BOT-DEFINITIVE WI-7: aave-HF threshold prices for HYPE — the ONLY
-        # observation/action zones the narrative may cite (panel parity).
-        if pm.hype_price_at_hf_120 > 0 or pm.hype_price_at_hf_110 > 0:
-            _liq_ref = pm.liq_price_real if pm.liq_price_real > 0 else pm.liq_price
+        # R-UNIFIED-LIQ ladder (rebuilt from the PARTIAL price): observation
+        # ×1.20 | action ×1.10 | conservative early-warning (partial/0.95).
+        if pm.liq_obs_price > 0 or pm.liq_action_price > 0:
             lines.append(
-                f"├─ Umbrales HYPE: HF1.20 ${pm.hype_price_at_hf_120:,.2f} (observación) | "
-                f"HF1.10 ${pm.hype_price_at_hf_110:,.2f} (acción) | "
-                f"liq real ${_liq_ref:,.2f}"
+                f"├─ Umbrales HYPE: ${pm.liq_obs_price:,.2f} (observación, parcial×1.20) | "
+                f"${pm.liq_action_price:,.2f} (acción, parcial×1.10) | "
+                f"${pm.liq_early_price:,.2f} (early-warning conservador, umbral −5%) | "
+                f"liq parcial ${pm.liq_price:,.2f}"
             )
         # Clarify that over-max-borrow only blocks NEW draws — liquidation is the
         # real-trigger price (ratio > 0.95), not the 100%-utilization point.

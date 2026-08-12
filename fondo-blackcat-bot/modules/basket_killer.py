@@ -193,11 +193,12 @@ async def _evaluate_pm_hf() -> TriggerResult:
     except Exception as exc:  # noqa: BLE001
         log.warning("pm_hf trigger: PM state unavailable: %s", exc)
 
-    # R-BOT-DEFINITIVE-2 T1: alert copy cites the REAL liquidation price
-    # (effective LTV 0.7125 = 0.75 × trigger ratio 0.95), not the nominal one.
+    # R-UNIFIED-LIQ: alert copy cites the PARTIAL liquidation price (official
+    # HL threshold LTV+(1−LTV)/2 — where liquidation actually starts).
+    # Trigger semantics UNCHANGED (aave-HF edge machine).
     _liq_bit = ""
     if liq_real > 0:
-        _liq_bit = f" · LIQ REAL (0.7125, ratio>0.95) HYPE ${liq_real:,.2f}"
+        _liq_bit = f" · LIQ PARCIAL (LTV+(1−LTV)/2) HYPE ${liq_real:,.2f}"
         if hype_px > 0:
             _liq_bit += f" vs oracle ${hype_px:,.2f}"
 

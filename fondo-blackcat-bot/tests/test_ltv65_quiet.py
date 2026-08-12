@@ -33,7 +33,14 @@ def test_static_env_defaults_locked():
     import config
     assert config.PM_MAX_BORROW_LTV == pytest.approx(0.65)
     assert config.PM_HYPE_LTV == pytest.approx(0.65)      # legacy alias follows
-    assert config.PM_MAINT_LTV == pytest.approx(0.75)
+    # R-UNIFIED-LIQ: PM_MAINT_LTV is now an OPTIONAL manual override — unset
+    # (None) by default; both liq factors derive from the borrow LTV.
+    assert config.PM_MAINT_LTV is None
+    from modules.portfolio_margin import (
+        borrow_partial_liq_factor, borrow_full_liq_factor,
+    )
+    assert borrow_partial_liq_factor(0.65) == pytest.approx(0.825)
+    assert borrow_full_liq_factor(0.65) == pytest.approx(0.65 + 0.35 * 2 / 3)
     # Alert hygiene env defaults (read at call time in their modules).
     from modules.alerts_margin import _hyst_params
     band, cdi, cdc = _hyst_params()
@@ -55,24 +62,40 @@ def test_acceptance_numbers_hype_stack():
     assert pm.capacity_usd == pytest.approx(107_400.0, abs=100.0)   # ≈107.4K
     assert pm.available_usd == pytest.approx(15_800.0, abs=100.0)   # ≈+15.8K
     assert pm.ratio * 100 == pytest.approx(85.3, abs=0.5)           # ≈85%
-    # LIQ REAL UNCHANGED by the borrow-LTV bump: debt/(0.7125×qty) ≈ 42.8.
-    assert pm.liq_price_real == pytest.approx(42.80, abs=0.15)
+    # R-UNIFIED-LIQ: liq_price_real == the PARTIAL liq price (official model):
+    # (debt+20)/(0.825×qty) ≈ 36.94. FULL ≈ 34.50.
+    assert pm.liq_price_real == pytest.approx(36.94, abs=0.05)
+    assert pm.liq_price_full == pytest.approx(34.50, abs=0.05)
     assert pm.max_ltv == pytest.approx(0.65)
-    assert pm.liq_threshold == pytest.approx(0.75)                  # maint intact
+    assert pm.liq_threshold == pytest.approx(0.825)   # partial factor derived
     # util < 100% → NOT flagged OVER MAX-BORROW under the NEW parameter.
     from modules.pm_panel import borrow_utilization_status
     label, _ = borrow_utilization_status(pm.ratio * 100)
     assert "OVER MAX-BORROW" not in label
 
 
-def test_maint_never_derived_from_borrow_ltv():
-    """The killer bug: 0.65 through the legacy formula would give maint 0.825
-    and shift LIQ REAL. Maint must stay 0.75 for ANY borrow ltv."""
+def test_maint_derived_from_borrow_ltv_official_formula():
+    """R-UNIFIED-LIQ: the PARTIAL threshold derives from the borrow LTV via
+    the official HL formula LTV + (1−LTV)/2 for ANY ltv. Legacy consistency:
+    0.50 → 0.75 (the value the app showed in the 0.50 era)."""
     from modules.portfolio_margin import _liq_threshold_for_ltv
     for ltv in (0.40, 0.50, 0.65, 0.70, 0.90):
-        assert _liq_threshold_for_ltv(ltv) == pytest.approx(0.75)
+        assert _liq_threshold_for_ltv(ltv) == pytest.approx(ltv + (1 - ltv) / 2)
     # A valid live maint override IS honoured (future re-risk by HL).
     assert _liq_threshold_for_ltv(0.65, maint_override=0.78) == pytest.approx(0.78)
+    # PM_MAINT_LTV env (manual override) also honoured when set.
+    import importlib, os
+    os.environ["PM_MAINT_LTV"] = "0.80"
+    try:
+        import config as _cfg
+        importlib.reload(_cfg)
+        import modules.portfolio_margin as _pmm
+        importlib.reload(_pmm)
+        assert _pmm._liq_threshold_for_ltv(0.65) == pytest.approx(0.80)
+    finally:
+        del os.environ["PM_MAINT_LTV"]
+        importlib.reload(_cfg)
+        importlib.reload(_pmm)
 
 
 def test_env_override_max_borrow_ltv(monkeypatch):
@@ -82,7 +105,7 @@ def test_env_override_max_borrow_ltv(monkeypatch):
     try:
         assert config.PM_MAX_BORROW_LTV == pytest.approx(0.70)
         assert config.PM_HYPE_LTV == pytest.approx(0.70)
-        assert config.PM_MAINT_LTV == pytest.approx(0.75)  # untouched
+        assert config.PM_MAINT_LTV is None  # override stays unset
     finally:
         monkeypatch.delenv("PM_MAX_BORROW_LTV")
         importlib.reload(config)
@@ -92,11 +115,14 @@ def test_health_payload_reports_pm_ltv_and_warning():
     from modules.version_info import _pm_ltv_status
     st = _pm_ltv_status()
     assert st["max_borrow_ltv"] == pytest.approx(0.65)
-    assert st["maint_ltv"] == pytest.approx(0.75)
+    assert st["liq_model"] == "official_hl_pm_borrow"
+    assert st["partial_liq_factor"] == pytest.approx(0.825)
+    assert st["full_liq_factor"] == pytest.approx(0.65 + 0.35 * 2 / 3)
+    assert st["maint_ltv_override"] is None
     # borrowLendReserveState does not expose maint (verified 2026-08-11) →
     # unverified path must carry the WARNING string.
     if not st.get("maint_verified_live"):
-        assert "warning" in st and "PM_MAINT_LTV" in st["warning"]
+        assert "warning" in st
 
 
 def test_capacity_line_renders_065():
@@ -108,8 +134,8 @@ def test_capacity_line_renders_065():
     block = format_pm_state_telegram(compute_pm_state(spot, [], {"HYPE": 54.96}))
     assert "Capacidad borrow (LTV 0.65)" in block
     assert "Borrow utilization (vs 65% max-borrow)" in block
-    assert "Liq nominal (maint-LTV 0.75" in block
-    assert "LIQ REAL (0.7125" in block
+    assert "LIQ PARCIAL (factor 0.8250 = LTV+(1−LTV)/2)" in block
+    assert "LIQ TOTAL (factor 0.8833 = LTV+(1−LTV)×2/3)" in block
 
 
 # ─────────────────────────────────────────────────────────────────────────────

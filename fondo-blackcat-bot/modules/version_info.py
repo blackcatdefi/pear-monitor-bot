@@ -164,19 +164,35 @@ def _cron_state_safe() -> dict:
 
 
 def _pm_ltv_status() -> dict:
-    """R-LTV65-QUIET — PM LTV parameters + live maint verification status.
+    """R-UNIFIED-LIQ — PM LTV parameters + official liquidation factors.
 
-    WARNING surfaced when the HL API does not let us verify the maintenance
-    LTV programmatically (borrowLendReserveState rejected / no maint field):
-    liq math then runs on the configured PM_MAINT_LTV default.
+    Both liquidation thresholds now DERIVE from the max-borrow LTV
+    (partial = LTV+(1−LTV)/2, full = LTV+(1−LTV)×2/3). PM_MAINT_LTV is an
+    optional manual override of the partial factor (None = formula).
     """
     try:
         from config import PM_MAX_BORROW_LTV, PM_MAINT_LTV
     except Exception:  # noqa: BLE001
-        PM_MAX_BORROW_LTV, PM_MAINT_LTV = 0.65, 0.75
+        PM_MAX_BORROW_LTV, PM_MAINT_LTV = 0.65, None
+    try:
+        from modules.portfolio_margin import (
+            borrow_partial_liq_factor, borrow_full_liq_factor,
+            _liq_threshold_for_ltv,
+        )
+        partial = _liq_threshold_for_ltv(PM_MAX_BORROW_LTV)
+        full = borrow_full_liq_factor(PM_MAX_BORROW_LTV)
+        derived = borrow_partial_liq_factor(PM_MAX_BORROW_LTV)
+    except Exception:  # noqa: BLE001
+        partial = full = derived = 0.0
     out = {
         "max_borrow_ltv": float(PM_MAX_BORROW_LTV),
-        "maint_ltv": float(PM_MAINT_LTV),
+        "liq_model": "official_hl_pm_borrow",
+        "partial_liq_factor": float(partial),
+        "full_liq_factor": float(full),
+        "maint_ltv_override": (
+            float(PM_MAINT_LTV) if PM_MAINT_LTV is not None else None
+        ),
+        "partial_factor_derived": float(derived),
     }
     try:
         from modules.hl_borrow_lend import maint_ltv_verification_status
@@ -186,8 +202,8 @@ def _pm_ltv_status() -> dict:
             out["maint_live_value"] = st["live_maint"]
         if not st.get("verified"):
             out["warning"] = (
-                "maint LTV NOT verificable live (HL API); usando default "
-                f"PM_MAINT_LTV={float(PM_MAINT_LTV):.2f}"
+                "maint LTV NOT verificable live (HL API); liq math derivada "
+                f"de la fórmula oficial (parcial={float(partial):.4f})"
             )
     except Exception:  # noqa: BLE001
         out["maint_verified_live"] = False

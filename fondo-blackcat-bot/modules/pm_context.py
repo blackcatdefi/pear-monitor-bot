@@ -220,32 +220,43 @@ def build_pm_llm_block(pm) -> str:
     # ── Real risk axis (aave-HF + maintenance liq price) ──
     if has_debt:
         lines.append(
-            f"• aave-HF (riesgo real, liq-threshold {pm.liq_threshold:.2f} = "
-            f"maint, indep. del borrow LTV): {pm.aave_hf:.2f} {pm.risk_emoji} {pm.risk_label}"
+            f"• aave-HF (riesgo real, liq-threshold {pm.liq_threshold:.4f} = "
+            f"LTV+(1−LTV)/2 parcial): {pm.aave_hf:.2f} {pm.risk_emoji} {pm.risk_label}"
         )
+        # R-UNIFIED-LIQ: BOTH official HL PM borrow-liquidation prices,
+        # verbatim. PARTIAL = LTV+(1−LTV)/2 (repite c/3s hasta sano);
+        # FULL = LTV+(1−LTV)×2/3 (se lleva todo).
         if pm.liq_price > 0:
             buf = (
-                f" · buffer a liq {pm.price_buffer_pct:.1f}%"
+                f" · buffer {pm.price_buffer_pct:.1f}%"
                 if pm.price_buffer_pct > 0 else ""
             )
             lines.append(
-                f"• Liq. price HYPE (maint-LTV {pm.liq_threshold:.2f}): "
-                f"${pm.liq_price:,.2f}{buf}"
+                f"• LIQ PARCIAL HYPE (factor {pm.liq_threshold:.4f} = "
+                f"LTV+(1−LTV)/2, repite c/3s): ${pm.liq_price:,.2f}{buf}"
             )
         else:
-            lines.append("• Liq. price HYPE (maint-LTV): n/d")
-        # R-BOT-DEFINITIVE WI-7: pre-computed HYPE threshold prices per aave-HF
-        # band — IDENTICAL to the panel line. The model is FORBIDDEN from
-        # deriving its own observation/action zones or mapping HYPE prices to
-        # HF bands by any other arithmetic.
-        _p130 = _f(getattr(pm, "hype_price_at_hf_130", 0.0))
-        _p120 = _f(getattr(pm, "hype_price_at_hf_120", 0.0))
-        _p110 = _f(getattr(pm, "hype_price_at_hf_110", 0.0))
-        if _p120 > 0 or _p110 > 0:
+            lines.append("• LIQ PARCIAL HYPE: n/d")
+        _lpf = _f(getattr(pm, "liq_price_full", 0.0))
+        if _lpf > 0:
+            _buf_f = _f(getattr(pm, "price_buffer_full_pct", 0.0))
+            lines.append(
+                f"• LIQ TOTAL HYPE (factor {_f(getattr(pm, 'full_factor', 0.0)):.4f} = "
+                f"LTV+(1−LTV)×2/3, se lleva todo): ${_lpf:,.2f}"
+                + (f" · buffer {_buf_f:.1f}%" if _buf_f > 0 else "")
+            )
+        # R-UNIFIED-LIQ ladder (rebuilt from the PARTIAL price) — the ONLY
+        # observation/action zones the narrative may cite (panel parity).
+        _obs = _f(getattr(pm, "liq_obs_price", 0.0))
+        _act = _f(getattr(pm, "liq_action_price", 0.0))
+        _early = _f(getattr(pm, "liq_early_price", 0.0))
+        if _obs > 0 or _act > 0:
             lines.append(
                 f"• Umbrales HYPE (pre-calculados, ÚNICOS válidos): "
-                f"HF1.30 ${_p130:,.2f} · HF1.20 ${_p120:,.2f} (observación) · "
-                f"HF1.10 ${_p110:,.2f} (acción) · liq ${pm.liq_price:,.2f}. "
+                f"${_obs:,.2f} (observación, parcial×1.20) · "
+                f"${_act:,.2f} (acción, parcial×1.10) · "
+                f"${_early:,.2f} (early-warning conservador, umbral −5%) · "
+                f"liq parcial ${pm.liq_price:,.2f} · liq total ${_lpf:,.2f}. "
                 "PROHIBIDO derivar otras zonas de observación/acción o mapear "
                 "precios de HYPE a bandas de HF por tu cuenta — usá SOLO estos."
             )

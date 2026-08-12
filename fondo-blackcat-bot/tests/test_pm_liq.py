@@ -39,17 +39,18 @@ PX = 58.07
 
 # ─── 1. Maintenance threshold formula ───────────────────────────────────────
 def test_liq_threshold_decoupled_from_borrow_ltv():
-    """R-LTV65-QUIET: maint is PM_MAINT_LTV (0.75), NEVER derived from the
-    borrow LTV — HL raised HYPE max-borrow to 0.65 WITHOUT touching maint,
-    so the legacy 0.5+0.5×ltv formula would corrupt the liq price (0.825)."""
+    """R-UNIFIED-LIQ: the PARTIAL threshold DERIVES from the borrow LTV via
+    the official HL formula LTV + (1−LTV)/2 (docs support/faq/portfolio-
+    margin). Legacy consistency: 0.50 → 0.75 (the old app value)."""
     assert _liq_threshold_for_ltv(0.50) == pytest.approx(0.75)
-    assert _liq_threshold_for_ltv(0.65) == pytest.approx(0.75)  # NOT 0.825
-    assert _liq_threshold_for_ltv(0.70) == pytest.approx(0.75)  # NOT 0.85
-    assert _liq_threshold_for_ltv(0.0) == pytest.approx(0.75)   # bad → default
-    assert _liq_threshold_for_ltv("x") == pytest.approx(0.75)   # garbage → default
+    assert _liq_threshold_for_ltv(0.65) == pytest.approx(0.825)
+    assert _liq_threshold_for_ltv(0.70) == pytest.approx(0.85)
+    # Bad/garbage LTVs fall back to the default LTV (0.65) → 0.825.
+    assert _liq_threshold_for_ltv(0.0) == pytest.approx(0.825)
+    assert _liq_threshold_for_ltv("x") == pytest.approx(0.825)
     # A valid LIVE maint override is honoured; garbage overrides fall back.
     assert _liq_threshold_for_ltv(0.65, maint_override=0.80) == pytest.approx(0.80)
-    assert _liq_threshold_for_ltv(0.65, maint_override=1.5) == pytest.approx(0.75)
+    assert _liq_threshold_for_ltv(0.65, maint_override=1.5) == pytest.approx(0.825)
 
 
 # ─── 2. Real liq price uses 0.75, NOT the 0.50 borrow LTV ───────────────────
@@ -137,21 +138,21 @@ def test_cross_perp_mm_raises_liq_and_lowers_aave_hf():
 
 # ─── 6. Generic multi-collateral support ────────────────────────────────────
 def test_multi_collateral_metrics():
-    # R-LTV65-QUIET: maint = PM_MAINT_LTV (0.75) for EVERY asset, decoupled
-    # from each asset's borrow LTV (.50 / .70 only drive capacity).
+    # R-UNIFIED-LIQ: each asset's PARTIAL threshold derives from ITS borrow
+    # LTV: .50 → .75 and .70 → .85 (official formula LTV + (1−LTV)/2).
     breakdown = {"HYPE": 50_000.0, "WBTC": 50_000.0}
     m = compute_pm_risk_metrics(
         breakdown, debt=40_000.0, hype_qty=1000.0, hype_px=50.0,
         ltv_map={"HYPE": 0.50, "WBTC": 0.70},
     )
-    # capacity = 50k×.5 + 50k×.7 = 60k ; liq_weighted = 100k×.75 = 75k.
+    # capacity = 50k×.5 + 50k×.7 = 60k ; liq_weighted = 50k×.75 + 50k×.85 = 80k.
     assert m["borrow_capacity"] == pytest.approx(60_000.0)
-    assert m["liq_weighted"] == pytest.approx(75_000.0)
-    assert m["aave_hf"] == pytest.approx(75_000.0 / 40_000.0)   # 1.875
+    assert m["liq_weighted"] == pytest.approx(80_000.0)
+    assert m["aave_hf"] == pytest.approx(80_000.0 / 40_000.0)   # 2.0
     assert m["hf_app"] == pytest.approx(60_000.0 / 40_000.0)    # 1.5
-    # HYPE liq price holds the WBTC leg (50k×.75 = 37.5k) constant:
-    #   target = (debt+20) - 37_500 = 2_520 → liq = 2_520/(0.75×1000) = 3.36.
-    assert m["liq_price"] == pytest.approx(2_520.0 / (0.75 * 1000.0), abs=0.05)
+    # HYPE liq price holds the WBTC leg (50k×.85 = 42.5k) constant:
+    #   target = (debt+20) - 42_500 < 0 → the WBTC leg alone covers → 0.0.
+    assert m["liq_price"] == pytest.approx(0.0)
 
 
 def test_multi_collateral_liq_price_when_hype_dominant():
@@ -160,9 +161,9 @@ def test_multi_collateral_liq_price_when_hype_dominant():
         breakdown, debt=50_000.0, hype_qty=1000.0, hype_px=70.0,
         ltv_map={"HYPE": 0.50, "WBTC": 0.70},
     )
-    # other_liq (WBTC) = 10_000×0.75 = 7_500 (maint decoupled from ltv .70).
-    # target = (50_000 + 20) - 7_500 = 42_520 ; liq = 42_520/(0.75×1000) = 56.69.
-    assert m["liq_price"] == pytest.approx(42_520.0 / (0.75 * 1000.0), abs=0.05)
+    # other_liq (WBTC) = 10_000×0.85 = 8_500 (partial factor of ltv .70).
+    # target = (50_000 + 20) - 8_500 = 41_520 ; liq = 41_520/(0.75×1000) = 55.36.
+    assert m["liq_price"] == pytest.approx(41_520.0 / (0.75 * 1000.0), abs=0.05)
 
 
 # ─── 7. Telegram block: real risk legible, naked-long kept distinct ─────────
@@ -175,11 +176,12 @@ def test_block_renders_real_liq_and_aave_hf():
     assert "Health factor (aave" in block
     assert "SALUDABLE" in block and "🟢" in block          # aave-driven headline
     assert "Utilización borrow" in block                   # HF_app relabelled
-    # R-BOT-DEFINITIVE-2 T1: BOTH liq framings render — nominal (0.75, HF 1.0)
-    # and REAL (0.7125, trigger ratio>0.95, always above nominal).
-    assert "Liq nominal (maint-LTV 0.75, HF 1.0)" in block and "$40.3" in block
-    assert "LIQ REAL (0.7125, trigger ratio>0.95)" in block
-    assert "HF at real liquidation = 1.053" in block
+    # R-UNIFIED-LIQ: BOTH official framings render — PARTIAL (LTV+(1−LTV)/2,
+    # 0.75 at LTV 0.50) and FULL (LTV+(1−LTV)×2/3, 0.8333 at LTV 0.50).
+    assert "LIQ PARCIAL (factor 0.7500 = LTV+(1−LTV)/2)" in block and "$40.3" in block
+    assert "LIQ TOTAL (factor 0.8333 = LTV+(1−LTV)×2/3)" in block
+    assert "Umbrales HYPE" in block and "observación, parcial×1.20" in block
+    assert "acción, parcial×1.10" in block and "early-warning conservador" in block
     assert "buffer" in block
     assert "$60.45" not in block                            # the OLD wrong price
     # T7: naked-long is a SEPARATE, NEUTRAL owner-decision note.

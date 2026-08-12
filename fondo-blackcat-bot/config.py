@@ -89,12 +89,22 @@ PM_MAX_BORROW_LTV = float(
     or 0.65
 )
 PM_HYPE_LTV = PM_MAX_BORROW_LTV  # legacy alias — NO renombrar (imports vivos)
-# SEPARACIÓN CRÍTICA (R-LTV65-QUIET): la liquidación NO usa el max-borrow LTV.
-# LIQ REAL = debt / (PM_MAINT_LTV × 0.95 × tokens) — maintenance LTV 0.75 ×
-# trigger ratio 0.95 = 0.7125 efectivo. El bump de borrow LTV a 0.65 NO cambia
-# el maintenance (verificación live best-effort vía hl_borrow_lend; si el API
-# no reporta maint, se mantiene 0.75 y /health lo marca como no verificado).
-PM_MAINT_LTV = float(os.getenv("PM_MAINT_LTV", "0.75") or 0.75)
+# R-UNIFIED-LIQ (2026-08-11): modelo OFICIAL de liquidación de borrow bajo
+# Portfolio Margin (HL docs support/faq/portfolio-margin). AMBOS umbrales
+# derivan del max-borrow LTV — reemplaza el maint-LTV plano 0.75:
+#   PARTIAL liq: colateral × (LTV + (1−LTV) × 1/2)  → 0.825 con LTV 0.65.
+#     Dispara repetidamente cada 3s (con slippage) hasta volver a sano.
+#   FULL liq:    colateral × (LTV + (1−LTV) × 2/3)  → 0.8833 con LTV 0.65.
+#     Se lleva todo. Consistencia legacy: con LTV 0.50 el factor parcial da
+#     0.75 — el valor que la app mostraba en la era 0.50.
+# PM_MAINT_LTV pasa a ser SOLO un override manual opcional del factor PARCIAL:
+# unset (default) = derivar de la fórmula. Nunca setearlo salvo que HL cambie
+# el modelo y haya que pinnear un valor a mano.
+_pm_maint_raw = os.getenv("PM_MAINT_LTV", "").strip()
+try:
+    PM_MAINT_LTV: float | None = float(_pm_maint_raw) if _pm_maint_raw else None
+except ValueError:
+    PM_MAINT_LTV = None
 # Margin ratio = deuda / capacidad-de-borrow. Umbrales (utilización de la
 # capacidad): WARN 0.40, STRESS 0.70, CRÍTICO/pre-liq 0.85, LIQUIDACIÓN 0.95.
 PM_WARN_RATIO = float(os.getenv("PM_WARN_RATIO", "0.40") or 0.40)
