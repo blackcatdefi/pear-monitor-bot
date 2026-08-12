@@ -190,8 +190,27 @@ def format_gmail_intel_block(gmail: dict[str, Any] | None) -> str:
             if snippet:
                 lines.append(f"    {snippet}")
         n = len(emails)
-        # The scanner archives everything it processes (mark-read + archive).
-        lines.append(f"\nTotales: {n} procesados · {n} archivados")
+        # R-UNIFIED-LIQ Phase C: totals line reflects the actual post-action.
+        action = gmail.get("post_action")
+        acted = int(gmail.get("post_action_count") or 0)
+        if action == "trash" and gmail.get("post_action_dry_run"):
+            lines.append(
+                f"\nTotales: {n} procesados · papelera DRY-RUN "
+                f"({acted} candidatos, archivados por ahora)"
+            )
+        elif action == "trash":
+            if acted == n:
+                lines.append(f"\nTotales: {n} procesados y enviados a papelera")
+            else:
+                lines.append(
+                    f"\nTotales: {n} procesados · {acted} enviados a papelera "
+                    f"(⚠️ {n - acted} sin acción)"
+                )
+        elif action == "none":
+            lines.append(f"\nTotales: {n} procesados · sin acción posterior")
+        else:
+            # archive (or legacy dicts without post_action keys)
+            lines.append(f"\nTotales: {n} procesados · {n} archivados")
         return "\n".join(lines)
     except Exception:  # noqa: BLE001
         log.exception("format_gmail_intel_block failed")

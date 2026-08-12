@@ -34,6 +34,13 @@ X_LIST_ID = os.getenv("X_LIST_ID", "")
 # ─── Gmail (IMAP for /reporte email intel) ──────────────────────────────────
 GMAIL_EMAIL = os.getenv("GMAIL_EMAIL", "")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
+# R-UNIFIED-LIQ Phase C: post-processing action on EXACTLY the processed
+# message ids. trash (default) | archive (legacy) | none.
+EMAIL_POST_ACTION = os.getenv("EMAIL_POST_ACTION", "trash").strip().lower()
+# EMAIL_TRASH_DRY_RUN=1 → report trash candidates but archive instead (legacy).
+EMAIL_TRASH_DRY_RUN = os.getenv("EMAIL_TRASH_DRY_RUN", "").strip().lower() in (
+    "1", "true", "yes",
+)
 
 # ─── Chains ─────────────────────────────────────────────────────────────────
 HYPERLIQUID_API = os.getenv("HYPERLIQUID_API", "https://api.hyperliquid.xyz")

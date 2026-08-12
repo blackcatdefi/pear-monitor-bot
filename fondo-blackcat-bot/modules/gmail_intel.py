@@ -1,11 +1,17 @@
-"""Gmail intel module — reads ALL unread emails, marks read, and archives.
+"""Gmail intel module — reads ALL unread emails, marks read, then post-acts.
 
-Uses IMAP with Gmail App Password for simplicity.
+Uses IMAP with Gmail App Password for simplicity (full-mailbox rights, so the
+Trash operation needs no extra OAuth scope — there is no OAuth here at all).
 Env vars needed:
   GMAIL_EMAIL — Gmail address (e.g. blackcatdefi@gmail.com)
   GMAIL_APP_PASSWORD — App Password from Google Account settings
+  EMAIL_POST_ACTION — trash (default) | archive (legacy) | none
+  EMAIL_TRASH_DRY_RUN — 1 → count trash candidates, archive instead (legacy)
 
-Pattern mirrors scan_telegram_unread: read → extract → mark read → archive → return dict.
+R-UNIFIED-LIQ Phase C contract: the post-action touches EXACTLY and ONLY the
+message uids that were successfully processed (appended to emails_data).
+Pattern mirrors scan_telegram_unread: read → extract → mark read → post-act →
+return dict.
 """
 from __future__ import annotations
 
@@ -16,7 +22,12 @@ import logging
 from email.header import decode_header
 from typing import Any
 
-from config import GMAIL_APP_PASSWORD, GMAIL_EMAIL
+from config import (
+    EMAIL_POST_ACTION,
+    EMAIL_TRASH_DRY_RUN,
+    GMAIL_APP_PASSWORD,
+    GMAIL_EMAIL,
+)
 
 log = logging.getLogger(__name__)
 
@@ -61,8 +72,39 @@ def _get_body(msg: email.message.Message) -> str:
     return ""
 
 
+def _resolve_post_action() -> tuple[str, bool]:
+    """(action, dry_run) — invalid EMAIL_POST_ACTION falls back to trash."""
+    action = EMAIL_POST_ACTION if EMAIL_POST_ACTION in ("trash", "archive", "none") else "trash"
+    dry_run = bool(EMAIL_TRASH_DRY_RUN) and action == "trash"
+    return action, dry_run
+
+
+def _apply_post_action(imap, processed_uids: list, action: str, dry_run: bool) -> int:
+    """Apply the post action to EXACTLY the given uids. Returns acted count."""
+    acted = 0
+    for uid in processed_uids:
+        try:
+            if action == "trash" and not dry_run:
+                # Gmail IMAP: copying to Trash moves the message to Trash.
+                imap.copy(uid, "[Gmail]/Trash")
+                imap.store(uid, "+FLAGS", "\\Deleted")
+            elif action == "archive" or (action == "trash" and dry_run):
+                # Legacy archive (also the safe behavior during trash dry-run).
+                try:
+                    imap.copy(uid, "[Gmail]/All Mail")
+                except Exception:  # noqa: BLE001
+                    pass  # Already in All Mail on Gmail
+                imap.store(uid, "+FLAGS", "\\Deleted")
+            else:  # none — leave in INBOX (already marked read)
+                continue
+            acted += 1
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Post-action %s failed for uid %s: %s", action, uid, exc)
+    return acted
+
+
 def _scan_inbox_sync(max_emails: int = 200) -> dict[str, Any]:
-    """Synchronous IMAP scan of ALL unread emails. Marks read + archives."""
+    """Synchronous IMAP scan of ALL unread emails. Marks read + post-acts."""
     if not GMAIL_EMAIL or not GMAIL_APP_PASSWORD:
         return {"status": "error", "error": "GMAIL_EMAIL or GMAIL_APP_PASSWORD not configured"}
 
@@ -84,6 +126,7 @@ def _scan_inbox_sync(max_emails: int = 200) -> dict[str, Any]:
             ids = ids[-max_emails:]  # Most recent N
 
         emails_data: list[dict[str, Any]] = []
+        processed_uids: list = []  # ONLY uids fully processed get the post-action
 
         for uid in ids:
             try:
@@ -113,19 +156,17 @@ def _scan_inbox_sync(max_emails: int = 200) -> dict[str, Any]:
 
                 # Mark as read
                 imap.store(uid, "+FLAGS", "\\Seen")
-
-                # Archive: copy to All Mail (safety net) then mark deleted from INBOX
-                try:
-                    imap.copy(uid, "[Gmail]/All Mail")
-                except Exception:
-                    pass  # Already in All Mail on Gmail
-                imap.store(uid, "+FLAGS", "\\Deleted")
+                processed_uids.append(uid)
 
             except Exception as exc:  # noqa: BLE001
                 log.warning("Failed to process email %s: %s", uid, exc)
                 continue
 
-        # Expunge archived messages from INBOX view
+        # R-UNIFIED-LIQ Phase C: post-action on EXACTLY the processed uids.
+        action, dry_run = _resolve_post_action()
+        acted = _apply_post_action(imap, processed_uids, action, dry_run)
+
+        # Expunge moved messages from INBOX view (no-op for action=none)
         imap.expunge()
         imap.logout()
 
@@ -133,6 +174,9 @@ def _scan_inbox_sync(max_emails: int = 200) -> dict[str, Any]:
             "status": "ok",
             "emails": emails_data,
             "count": len(emails_data),
+            "post_action": action,
+            "post_action_dry_run": dry_run,
+            "post_action_count": acted if action != "none" else 0,
         }
 
     except imaplib.IMAP4.error as exc:
