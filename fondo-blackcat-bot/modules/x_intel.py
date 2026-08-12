@@ -1194,9 +1194,23 @@ def render_xrefresh_result(payload: dict[str, Any] | None) -> str:
             f"{total} tweets en ventana 48h.\n"
             "Use /timeline to view it."
         )
+    # R-UNIFIED-LIQ Phase B: cost line is backend-aware. Provider bills
+    # $0.0015/call + $0.15/1K tweets; official Console bills $0.005/post.
+    rate, call_cost, src = 0.005, 0.0, "official"
+    try:
+        from modules import x_provider
+        if x_provider.provider_active():
+            src = "twitterapi_io"
+            rate = x_provider.effective_cost_per_post_usd()
+            meta = x_provider.last_fetch_meta()
+            pages = int(meta.get("pages") or 0)
+            call_cost = max(pages, 1) * x_provider.PROVIDER_COST_PER_CALL_USD
+    except Exception:  # noqa: BLE001
+        log.warning("provider cost lookup failed; using official rate", exc_info=True)
+    cost = paid * rate + call_cost
     return (
         f"\u2705 X store refreshed: +{fetched} new posts fetched "
-        f"({paid} posts pagados \u2248 ${paid * 0.005:.2f}) \u2014 "
+        f"({paid} posts pagados \u2248 ${cost:.3f} via {src}) \u2014 "
         f"{total} tweets in 48h window.\n"
         "Use /timeline to view it."
     )

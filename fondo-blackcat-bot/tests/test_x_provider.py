@@ -282,6 +282,24 @@ def test_provider_cost_model_in_record(tmp_path, monkeypatch):
     assert costs["lists/tweets"] == pytest.approx(10.0, abs=1e-9)
 
 
+def test_xrefresh_cost_line_backend_aware(monkeypatch):
+    """/xrefresh: 500 paid posts = $2.50 official, but ~$0.11 via provider."""
+    from modules import x_intel as _xi
+    payload = {"status": "ok", "fetched_new": 173, "posts_paid": 500, "total": 636}
+
+    monkeypatch.delenv("X_PROVIDER_API_KEY", raising=False)
+    monkeypatch.delenv("X_FETCH_BACKEND", raising=False)
+    official = _xi.render_xrefresh_result(payload)
+    assert "$2.500 via official" in official
+
+    monkeypatch.setenv("X_PROVIDER_API_KEY", "k")
+    monkeypatch.setattr(xp, "_last_meta", {"pages": 25, "returned": 500})
+    prov = _xi.render_xrefresh_result(payload)
+    # 25×$0.0015 + 500×$0.00015 = $0.1125 → "%.3f" = 0.112
+    assert "$0.112 via twitterapi_io" in prov
+    assert "$2.50" not in prov
+
+
 def test_health_x_source_key(monkeypatch):
     monkeypatch.setenv("X_PROVIDER_API_KEY", "k")
     monkeypatch.delenv("X_FETCH_BACKEND", raising=False)
