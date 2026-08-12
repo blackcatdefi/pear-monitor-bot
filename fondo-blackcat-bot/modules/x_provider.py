@@ -97,10 +97,48 @@ def list_id() -> str:
     return normalize_list_id(os.getenv("X_LIST_ID", ""))
 
 
+_CREDITS_FLOOR_USD = float(os.getenv("X_OFFICIAL_CREDITS_FLOOR", "0.50"))
+
+
+def official_credits_remaining() -> float:
+    """Prepaid official-API balance still unburned (0.0 = mode disabled).
+
+    R-BURN-CREDITS (2026-08-12): owner disabled auto-recharge with ~$19
+    prepaid left on the official Console; we burn those first, then flip to
+    the provider automatically. Balance = X_OFFICIAL_CREDITS_USD − official
+    spend recorded in intel_memory.x_api_calls since X_OFFICIAL_CREDITS_SINCE
+    (ISO UTC). Best effort: any failure returns 0.0 → provider serves.
+    """
+    try:
+        total = float(os.getenv("X_OFFICIAL_CREDITS_USD", "0") or 0)
+    except ValueError:
+        return 0.0
+    if total <= 0:
+        return 0.0
+    since = os.getenv("X_OFFICIAL_CREDITS_SINCE", "").strip()
+    try:
+        from modules.intel_memory import official_x_cost_since
+        spent = official_x_cost_since(since)
+    except Exception:  # noqa: BLE001
+        return 0.0
+    return max(total - spent, 0.0)
+
+
 def backend_selected() -> str:
-    """The configured backend selector (default twitterapi_io)."""
-    v = os.getenv("X_FETCH_BACKEND", "twitterapi_io").strip().lower()
-    return "official" if v == "official" else "twitterapi_io"
+    """The configured backend selector (default twitterapi_io).
+
+    Explicit X_FETCH_BACKEND ALWAYS wins. Without it, burn-credits auto mode:
+    official while prepaid balance > floor ($0.50 safety buffer so a fetch
+    never dies mid-flight on an empty Console), then twitterapi_io forever.
+    """
+    v = os.getenv("X_FETCH_BACKEND", "").strip().lower()
+    if v == "official":
+        return "official"
+    if v in ("twitterapi_io", "twitterapi", "provider"):
+        return "twitterapi_io"
+    if official_credits_remaining() > _CREDITS_FLOOR_USD:
+        return "official"
+    return "twitterapi_io"
 
 
 def provider_active() -> bool:

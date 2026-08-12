@@ -199,6 +199,27 @@ def count_x_calls_since(hours: int = 24) -> int:
         return 0
 
 
+def official_x_cost_since(since_iso: str = "") -> float:
+    """R-BURN-CREDITS: total est_cost_usd of OFFICIAL X API calls (endpoint
+    NOT provider/*) recorded since the given ISO-UTC timestamp.
+
+    "" → all history counts (conservative: burn mode then sees the balance
+    as spent and the cheap provider serves)."""
+    try:
+        conn = _get_conn()
+        since = (since_iso or "").strip().replace("T", " ").rstrip("Z").split("+")[0]
+        row = conn.execute(
+            "SELECT COALESCE(SUM(est_cost_usd),0) AS c FROM x_api_calls "
+            "WHERE endpoint NOT LIKE 'provider/%' AND ts >= ?",
+            (since,),
+        ).fetchone()
+        conn.close()
+        return float(row["c"] or 0.0)
+    except Exception:  # noqa: BLE001
+        log.exception("official_x_cost_since failed")
+        return 0.0
+
+
 def x_api_cost_projection() -> dict[str, Any]:
     """Return daily/weekly/monthly cost projection based on last 7 days of data."""
     try:

@@ -282,6 +282,70 @@ def test_provider_cost_model_in_record(tmp_path, monkeypatch):
     assert costs["lists/tweets"] == pytest.approx(10.0, abs=1e-9)
 
 
+# ── 7. R-BURN-CREDITS: burn prepaid official credits, then auto-switch ──────
+
+def test_burn_credits_auto_switch(monkeypatch, tmp_path):
+    from modules import intel_memory as im
+    monkeypatch.setattr(im, "DB_PATH", str(tmp_path / "intel.db"), raising=False)
+    monkeypatch.setenv("X_PROVIDER_API_KEY", "k")
+    monkeypatch.delenv("X_FETCH_BACKEND", raising=False)
+    monkeypatch.setenv("X_OFFICIAL_CREDITS_USD", "19")
+    monkeypatch.setenv("X_OFFICIAL_CREDITS_SINCE", "2026-08-12T00:00:00Z")
+
+    # No spend yet → official serves DESPITE the provider key being present.
+    assert xp.official_credits_remaining() == pytest.approx(19.0)
+    assert xp.backend_selected() == "official"
+    assert xp.provider_active() is False
+    assert xp.backend_name() == "official"
+
+    # $18.60 official spend → remaining $0.40 ≤ floor $0.50 → provider takes over.
+    im.record_x_api_call("lists/tweets", 200, pages=1,
+                         tweets_returned=3720, caller="t")  # 3720×$0.005
+    assert xp.official_credits_remaining() == pytest.approx(0.40, abs=1e-6)
+    assert xp.backend_selected() == "twitterapi_io"
+    assert xp.provider_active() is True
+    assert xp.backend_name() == "twitterapi_io"
+
+    # Provider spend does NOT count against the official balance.
+    im.record_x_api_call("provider/list_tweets", 200, pages=1,
+                         tweets_returned=1000, caller="t")
+    assert xp.official_credits_remaining() == pytest.approx(0.40, abs=1e-6)
+
+
+def test_burn_credits_since_filter_and_overrides(monkeypatch, tmp_path):
+    from modules import intel_memory as im
+    monkeypatch.setattr(im, "DB_PATH", str(tmp_path / "intel.db"), raising=False)
+    monkeypatch.setenv("X_PROVIDER_API_KEY", "k")
+    monkeypatch.setenv("X_OFFICIAL_CREDITS_USD", "19")
+    monkeypatch.setenv("X_OFFICIAL_CREDITS_SINCE", "2026-08-12T00:00:00Z")
+    monkeypatch.delenv("X_FETCH_BACKEND", raising=False)
+
+    # Spend recorded BEFORE the since marker is ignored.
+    conn = im._get_conn()
+    conn.execute(
+        "INSERT INTO x_api_calls (ts, endpoint, status, pages, tweets_returned,"
+        " est_cost_usd, caller) VALUES ('2026-08-01 10:00:00', 'lists/tweets',"
+        " 200, 1, 2000, 10.0, 't')"
+    )
+    conn.commit()
+    conn.close()
+    assert xp.official_credits_remaining() == pytest.approx(19.0)
+
+    # Explicit X_FETCH_BACKEND always wins over burn mode.
+    monkeypatch.setenv("X_FETCH_BACKEND", "twitterapi_io")
+    assert xp.backend_selected() == "twitterapi_io" and xp.provider_active()
+    monkeypatch.setenv("X_FETCH_BACKEND", "official")
+    assert xp.backend_selected() == "official" and not xp.provider_active()
+
+    # Mode disabled / garbage env → provider default (credits 0).
+    monkeypatch.delenv("X_FETCH_BACKEND", raising=False)
+    monkeypatch.setenv("X_OFFICIAL_CREDITS_USD", "banana")
+    assert xp.official_credits_remaining() == 0.0
+    assert xp.backend_selected() == "twitterapi_io"
+    monkeypatch.delenv("X_OFFICIAL_CREDITS_USD", raising=False)
+    assert xp.backend_selected() == "twitterapi_io"
+
+
 def test_xrefresh_cost_line_backend_aware(monkeypatch):
     """/xrefresh: 500 paid posts = $2.50 official, but ~$0.11 via provider."""
     from modules import x_intel as _xi

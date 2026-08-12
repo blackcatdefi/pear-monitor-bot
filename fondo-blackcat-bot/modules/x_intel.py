@@ -1442,6 +1442,15 @@ async def format_x_costs() -> str:
             if _provider else " (Console $0.005/post)"
         )
     )
+    # R-BURN-CREDITS: while burning prepaid official credits, show the
+    # remaining balance and the auto-switch promise.
+    _credits = x_provider.official_credits_remaining()
+    if _credits > 0:
+        lines.append(
+            f"🔥 Créditos oficiales restantes: ${_credits:.2f} — "
+            f"al agotarse (piso ${x_provider._CREDITS_FLOOR_USD:.2f}) "
+            f"switch automático a twitterapi.io"
+        )
     lines.append(f"📅 Posts today (UTC): {usage['today']} (${usage['today'] * rate:.2f})")
     lines.append(f"📅 Posts MTD: {usage['used']} (${usage['used'] * rate:.2f})")
     lines.append("")
