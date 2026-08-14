@@ -41,6 +41,11 @@ EMAIL_POST_ACTION = os.getenv("EMAIL_POST_ACTION", "trash").strip().lower()
 EMAIL_TRASH_DRY_RUN = os.getenv("EMAIL_TRASH_DRY_RUN", "").strip().lower() in (
     "1", "true", "yes",
 )
+# R-MAIL-CONTENT-TRASHFIX: excerpt length per email in the report (chars).
+try:
+    EMAIL_EXCERPT_CHARS = int(os.getenv("EMAIL_EXCERPT_CHARS", "800") or "800")
+except ValueError:
+    EMAIL_EXCERPT_CHARS = 800
 
 # ─── Chains ─────────────────────────────────────────────────────────────────
 HYPERLIQUID_API = os.getenv("HYPERLIQUID_API", "https://api.hyperliquid.xyz")

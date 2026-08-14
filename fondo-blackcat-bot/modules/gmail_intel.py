@@ -7,11 +7,29 @@ Env vars needed:
   GMAIL_APP_PASSWORD — App Password from Google Account settings
   EMAIL_POST_ACTION — trash (default) | archive (legacy) | none
   EMAIL_TRASH_DRY_RUN — 1 → count trash candidates, archive instead (legacy)
+  EMAIL_EXCERPT_CHARS — excerpt length per email in the report (default 800)
 
-R-UNIFIED-LIQ Phase C contract: the post-action touches EXACTLY and ONLY the
-message uids that were successfully processed (appended to emails_data).
-Pattern mirrors scan_telegram_unread: read → extract → mark read → post-act →
-return dict.
+R-MAIL-CONTENT-TRASHFIX contracts (supersede the Phase C optimistic count):
+
+1. VERIFIED TRASH. The account's real Trash folder is resolved at runtime from
+   the IMAP LIST \\Trash special-use attribute (Spanish Gmail exposes
+   "[Gmail]/Papelera", NOT "[Gmail]/Trash" — the hardcoded name made COPY
+   return ('NO', [TRYCREATE ...]) which imaplib does NOT raise, so messages
+   silently degraded to archive). Every COPY return status is checked, and
+   after expunge each message is looked up in the Trash folder by its
+   X-GM-MSGID. ``post_action_count`` = VERIFIED-in-Trash count only; failures
+   surface in ``trash_failed`` for the caller to alert on. No optimistic
+   labels ever.
+
+2. CONTENT BEFORE TRASH. Body extraction (full message, text/plain preferred,
+   HTML stripped to text) happens in the read loop, strictly BEFORE any
+   post-action runs. The report is built from ``emails_data`` which is fully
+   populated before the first COPY, so content is always captured before a
+   message is trashed.
+
+3. The post-action touches EXACTLY and ONLY the message uids that were
+   successfully processed (appended to emails_data). Pattern mirrors
+   scan_telegram_unread: read → extract → mark read → post-act → return dict.
 """
 from __future__ import annotations
 
@@ -19,10 +37,14 @@ import asyncio
 import email
 import imaplib
 import logging
+import re
 from email.header import decode_header
+from html import unescape
+from html.parser import HTMLParser
 from typing import Any
 
 from config import (
+    EMAIL_EXCERPT_CHARS,
     EMAIL_POST_ACTION,
     EMAIL_TRASH_DRY_RUN,
     GMAIL_APP_PASSWORD,
@@ -30,6 +52,9 @@ from config import (
 )
 
 log = logging.getLogger(__name__)
+
+# Fallbacks only if LIST yields no \Trash folder (never expected on Gmail).
+_TRASH_FALLBACKS = ("[Gmail]/Trash", "[Gmail]/Papelera")
 
 
 def _decode_header(raw: str | None) -> str:
@@ -46,31 +71,158 @@ def _decode_header(raw: str | None) -> str:
     return " ".join(decoded)
 
 
+# ─── body extraction + cleaning (Part 2) ────────────────────────────────────
+
+class _HTMLTextExtractor(HTMLParser):
+    """Strip tags → text. Skips script/style; <br>/<p>/<div> become newlines."""
+
+    _SKIP = {"script", "style", "head", "title"}
+    _BREAK = {"br", "p", "div", "tr", "li", "h1", "h2", "h3", "h4", "table"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._chunks: list[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag, attrs):  # noqa: D102
+        if tag in self._SKIP:
+            self._skip_depth += 1
+        elif tag in self._BREAK:
+            self._chunks.append("\n")
+
+    def handle_endtag(self, tag):  # noqa: D102
+        if tag in self._SKIP and self._skip_depth > 0:
+            self._skip_depth -= 1
+        elif tag in self._BREAK:
+            self._chunks.append("\n")
+
+    def handle_data(self, data):  # noqa: D102
+        if not self._skip_depth:
+            self._chunks.append(data)
+
+    def text(self) -> str:
+        return "".join(self._chunks)
+
+
+def _html_to_text(html: str) -> str:
+    """Best-effort HTML → plain text (never raises)."""
+    try:
+        p = _HTMLTextExtractor()
+        p.feed(html)
+        p.close()
+        return p.text()
+    except Exception:  # noqa: BLE001
+        # Degrade: regex tag strip, still unescape entities.
+        return unescape(re.sub(r"<[^>]+>", " ", html))
+
+
+# Invisible characters newsletters (Bloomberg et al.) pad bodies with.
+_INVISIBLE_RE = re.compile(r"[\u200b\u200c\u200d\u200e\u200f\u2060\ufeff\u00ad\u034f]")
+
+# Boilerplate lines dropped from excerpts (case-insensitive, per line).
+_BOILERPLATE_RES = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"view (this|in|it in).*browser",
+        r"view (this )?(email|message) (in|as a) ",
+        r"^unsubscribe\b",
+        r"\bunsubscribe (here|now|from)",
+        r"^subscribe\b|\bsubscribe (here|now|today|to get)\b",
+        r"to get this newsletter",
+        r"was this (email|newsletter) forwarded",
+        r"sign up (here|now|for|to receive)",
+        r"^follow us\b|^connect with us\b",
+        r"^(facebook|twitter|x|instagram|linkedin|youtube|telegram|tiktok)$",
+        r"^https?://\S+$",  # bare URL lines (tracking/social)
+        r"^\[?image[:\]]|^\[img\]",
+        r"all rights reserved",
+        r"^copyright\b|^©|\(c\) \d{4}",
+        r"privacy policy|terms of service|terms and conditions",
+        r"you (are receiving|received) this (email|message|newsletter)",
+        r"update your (email )?preferences",
+        r"manage (your )?(subscription|preferences)",
+        r"^this (email|message) was sent to",
+        r"^add us to your address book",
+        r"^click here\b",
+        r"^advertisement$|^sponsored( content)?$|^paid post$",
+    )
+]
+
+_SENTENCE_END_RE = re.compile(r"[.!?…]['\")\]]?(?=\s|$)")
+
+
+def _clean_body_text(text: str) -> str:
+    """Cleaning pipeline: invisible chars → boilerplate lines → collapse ws."""
+    if not text:
+        return ""
+    text = _INVISIBLE_RE.sub("", text).replace("\u00a0", " ").replace("\r", "")
+    kept: list[str] = []
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if any(rx.search(line) for rx in _BOILERPLATE_RES):
+            continue
+        # Collapse runs of spaces/tabs inside the line.
+        kept.append(re.sub(r"[ \t]{2,}", " ", line))
+    return "\n".join(kept)
+
+
+def _cut_at_sentence(text: str, limit: int) -> str:
+    """Cut ``text`` to ≤ limit chars, preferring the last sentence boundary."""
+    if len(text) <= limit:
+        return text
+    window = text[:limit]
+    best_end = -1
+    for m in _SENTENCE_END_RE.finditer(window):
+        best_end = m.end()
+    if best_end > limit // 3:  # sentence cut only if not degenerately short
+        return window[:best_end].rstrip()
+    # Fallback: cut at last word boundary with ellipsis.
+    cut = window.rsplit(" ", 1)[0].rstrip()
+    return (cut or window).rstrip() + "…"
+
+
+def _make_excerpt(body: str, limit: int) -> str:
+    """First substantive content of the cleaned body, ≤ limit chars."""
+    cleaned = _clean_body_text(body)
+    if not cleaned:
+        return ""
+    # Flow lines into a single paragraph-ish text for the excerpt.
+    flowed = re.sub(r"\s*\n\s*", " ", cleaned).strip()
+    return _cut_at_sentence(flowed, max(80, int(limit)))
+
+
 def _get_body(msg: email.message.Message) -> str:
-    """Extract plain-text body from a MIME message."""
+    """Extract full body text: prefer text/plain; else HTML stripped to text."""
+    html_body = ""
     if msg.is_multipart():
         for part in msg.walk():
             ct = part.get_content_type()
-            if ct == "text/plain" and "attachment" not in (part.get("Content-Disposition") or ""):
-                payload = part.get_payload(decode=True)
-                if payload:
-                    charset = part.get_content_charset() or "utf-8"
-                    return payload.decode(charset, errors="replace")
-        # Fallback: try text/html
-        for part in msg.walk():
-            ct = part.get_content_type()
-            if ct == "text/html":
-                payload = part.get_payload(decode=True)
-                if payload:
-                    charset = part.get_content_charset() or "utf-8"
-                    return payload.decode(charset, errors="replace")[:2000]
-    else:
-        payload = msg.get_payload(decode=True)
-        if payload:
-            charset = msg.get_content_charset() or "utf-8"
-            return payload.decode(charset, errors="replace")
+            disp = part.get("Content-Disposition") or ""
+            if "attachment" in disp:
+                continue
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+            charset = part.get_content_charset() or "utf-8"
+            text = payload.decode(charset, errors="replace")
+            if ct == "text/plain":
+                return text
+            if ct == "text/html" and not html_body:
+                html_body = text
+        return _html_to_text(html_body) if html_body else ""
+    payload = msg.get_payload(decode=True)
+    if payload:
+        charset = msg.get_content_charset() or "utf-8"
+        text = payload.decode(charset, errors="replace")
+        if msg.get_content_type() == "text/html":
+            return _html_to_text(text)
+        return text
     return ""
 
+
+# ─── post-action (Part 1: verified trash) ───────────────────────────────────
 
 def _resolve_post_action() -> tuple[str, bool]:
     """(action, dry_run) — invalid EMAIL_POST_ACTION falls back to trash."""
@@ -79,28 +231,156 @@ def _resolve_post_action() -> tuple[str, bool]:
     return action, dry_run
 
 
-def _apply_post_action(imap, processed_uids: list, action: str, dry_run: bool) -> int:
-    """Apply the post action to EXACTLY the given uids. Returns acted count."""
-    acted = 0
-    for uid in processed_uids:
+_LIST_TRASH_RE = re.compile(
+    rb"\\Trash[^)]*\)\s+\"?(?P<delim>[^\"\s]+)\"?\s+\"?(?P<name>[^\"]+?)\"?\s*$"
+)
+
+
+def resolve_trash_folder(imap) -> str | None:
+    """Resolve the account's REAL Trash folder from LIST special-use attrs.
+
+    Root cause of the silent-archive bug: Spanish Gmail has NO
+    "[Gmail]/Trash" — the folder is "[Gmail]/Papelera". COPY to a missing
+    folder returns ('NO', [TRYCREATE...]) which imaplib does not raise.
+    """
+    try:
+        typ, rows = imap.list()
+        if typ == "OK" and rows:
+            for row in rows:
+                if not isinstance(row, bytes):
+                    continue
+                if b"\\Trash" not in row:
+                    continue
+                m = _LIST_TRASH_RE.search(row)
+                if m:
+                    return m.group("name").decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        log.exception("resolve_trash_folder: LIST failed")
+    # Fallback: probe known names via STATUS (does not create anything).
+    for cand in _TRASH_FALLBACKS:
         try:
-            if action == "trash" and not dry_run:
-                # Gmail IMAP: copying to Trash moves the message to Trash.
-                imap.copy(uid, "[Gmail]/Trash")
-                imap.store(uid, "+FLAGS", "\\Deleted")
-            elif action == "archive" or (action == "trash" and dry_run):
-                # Legacy archive (also the safe behavior during trash dry-run).
-                try:
-                    imap.copy(uid, "[Gmail]/All Mail")
-                except Exception:  # noqa: BLE001
-                    pass  # Already in All Mail on Gmail
-                imap.store(uid, "+FLAGS", "\\Deleted")
-            else:  # none — leave in INBOX (already marked read)
-                continue
-            acted += 1
+            typ, _ = imap.status(_quote_mailbox(cand), "(MESSAGES)")
+            if typ == "OK":
+                return cand
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def _quote_mailbox(name: str) -> str:
+    """imaplib does not quote mailbox args — names with spaces need quotes."""
+    if name.startswith('"'):
+        return name
+    if " " in name:
+        return f'"{name}"'
+    return name
+
+
+def _fetch_gm_msgid(imap, uid) -> str | None:
+    """Gmail X-GM-MSGID for a message (immutable across label moves)."""
+    try:
+        typ, data = imap.fetch(uid, "(X-GM-MSGID)")
+        if typ != "OK" or not data:
+            return None
+        for item in data:
+            blob = item if isinstance(item, bytes) else (
+                item[0] if isinstance(item, tuple) and item else b""
+            )
+            if isinstance(blob, bytes):
+                m = re.search(rb"X-GM-MSGID (\d+)", blob)
+                if m:
+                    return m.group(1).decode()
+    except Exception:  # noqa: BLE001
+        log.warning("X-GM-MSGID fetch failed for uid %s", uid)
+    return None
+
+
+def _apply_post_action(
+    imap, processed_uids: list, action: str, dry_run: bool
+) -> tuple[int, list[str]]:
+    """Apply the post action to EXACTLY the given uids.
+
+    Returns (verified_count, failures). For action=trash (live) the count is
+    the number of messages VERIFIED present in the Trash folder after the
+    move (X-GM-MSGID lookup). ``failures`` carries per-uid reasons for the
+    caller to log/alert — nothing is masked.
+    """
+    failures: list[str] = []
+    if not processed_uids or action == "none":
+        return 0, failures
+
+    if action == "archive" or (action == "trash" and dry_run):
+        # Gmail archive = remove the INBOX label = \Deleted + EXPUNGE on
+        # INBOX. (The old COPY to "[Gmail]/All Mail" was a no-op at best and
+        # a localized-name failure at worst — every message is already in
+        # All Mail on Gmail.)
+        acted = 0
+        for uid in processed_uids:
+            try:
+                typ, _ = imap.store(uid, "+FLAGS", "\\Deleted")
+                if typ == "OK":
+                    acted += 1
+                else:
+                    failures.append(f"uid {uid}: archive store returned {typ}")
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"uid {uid}: archive store error {exc}")
+        imap.expunge()
+        return acted, failures
+
+    # ── action == "trash" (live) — verified move ────────────────────────────
+    trash = resolve_trash_folder(imap)
+    if not trash:
+        # Hard failure: do NOT degrade to archive. Leave messages in INBOX
+        # (read) and surface the error.
+        failures.append("trash folder not resolvable via LIST \\Trash")
+        return 0, failures
+
+    trash_arg = _quote_mailbox(trash)
+    pending: list[tuple[Any, str | None]] = []  # (uid, gm_msgid) copied OK
+    for uid in processed_uids:
+        gm_msgid = _fetch_gm_msgid(imap, uid)
+        try:
+            typ, resp = imap.copy(uid, trash_arg)
         except Exception as exc:  # noqa: BLE001
-            log.warning("Post-action %s failed for uid %s: %s", action, uid, exc)
-    return acted
+            failures.append(f"uid {uid}: COPY error {exc}")
+            continue
+        if typ != "OK":
+            # e.g. ('NO', [b'[TRYCREATE] No folder ...']) — the silent killer.
+            failures.append(f"uid {uid}: COPY {typ} {resp!r}")
+            continue
+        try:
+            imap.store(uid, "+FLAGS", "\\Deleted")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("store \\Deleted failed for uid %s: %s", uid, exc)
+            # Copy landed in Trash; message may remain visible in INBOX too.
+        pending.append((uid, gm_msgid))
+
+    imap.expunge()
+
+    # Verification pass: each copied message must be findable in Trash.
+    verified = 0
+    try:
+        typ, _ = imap.select(trash_arg, readonly=True)
+        trash_selected = typ == "OK"
+    except Exception as exc:  # noqa: BLE001
+        trash_selected = False
+        failures.append(f"verify: cannot select {trash}: {exc}")
+    for uid, gm_msgid in pending:
+        if not trash_selected:
+            failures.append(f"uid {uid}: unverified (trash select failed)")
+            continue
+        if not gm_msgid:
+            failures.append(f"uid {uid}: unverified (no X-GM-MSGID)")
+            continue
+        try:
+            typ, hits = imap.search(None, "X-GM-MSGID", gm_msgid)
+            if typ == "OK" and hits and hits[0] and hits[0].split():
+                verified += 1
+            else:
+                failures.append(f"uid {uid}: NOT in trash after move")
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"uid {uid}: verify search error {exc}")
+    return verified, failures
 
 
 def _scan_inbox_sync(max_emails: int = 200) -> dict[str, Any]:
@@ -144,14 +424,15 @@ def _scan_inbox_sync(max_emails: int = 200) -> dict[str, Any]:
                 date_str = msg.get("Date", "")
                 body = _get_body(msg)
 
-                # Truncate body to snippet
-                snippet = body[:500].strip() if body else ""
-
                 emails_data.append({
                     "subject": subject,
                     "from": sender,
                     "date": date_str,
-                    "snippet": snippet,
+                    # Part 2: substantive excerpt for the report (content is
+                    # captured HERE, before any post-action can run).
+                    "excerpt": _make_excerpt(body, EMAIL_EXCERPT_CHARS),
+                    # Legacy short snippet kept for downstream consumers.
+                    "snippet": body[:500].strip() if body else "",
                 })
 
                 # Mark as read
@@ -162,12 +443,13 @@ def _scan_inbox_sync(max_emails: int = 200) -> dict[str, Any]:
                 log.warning("Failed to process email %s: %s", uid, exc)
                 continue
 
-        # R-UNIFIED-LIQ Phase C: post-action on EXACTLY the processed uids.
+        # Post-action on EXACTLY the processed uids — runs strictly AFTER all
+        # content extraction above (order contract 2.4).
         action, dry_run = _resolve_post_action()
-        acted = _apply_post_action(imap, processed_uids, action, dry_run)
+        acted, failures = _apply_post_action(imap, processed_uids, action, dry_run)
+        for f in failures:
+            log.warning("gmail post-action failure: %s", f)
 
-        # Expunge moved messages from INBOX view (no-op for action=none)
-        imap.expunge()
         imap.logout()
 
         return {
@@ -176,7 +458,10 @@ def _scan_inbox_sync(max_emails: int = 200) -> dict[str, Any]:
             "count": len(emails_data),
             "post_action": action,
             "post_action_dry_run": dry_run,
+            # trash live → VERIFIED-in-Trash count. Never optimistic.
             "post_action_count": acted if action != "none" else 0,
+            "trash_failed": len(failures) if action == "trash" and not dry_run else 0,
+            "post_action_failures": failures,
         }
 
     except imaplib.IMAP4.error as exc:

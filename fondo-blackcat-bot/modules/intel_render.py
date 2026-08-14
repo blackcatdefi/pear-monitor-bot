@@ -19,6 +19,7 @@ behaviour of the underlying scanners is UNTOUCHED — these are render-only.
 from __future__ import annotations
 
 import logging
+import textwrap
 import re
 from typing import Any
 
@@ -184,11 +185,19 @@ def format_gmail_intel_block(gmail: dict[str, Any] | None) -> str:
         for e in emails:
             sender = _clean(e.get("from", ""), 60) or "?"
             subject = _clean(e.get("subject", ""), 90) or "(sin asunto)"
-            snippet = _clean(e.get("snippet", ""), _GMAIL_TRUNC)
             date = _clean(str(e.get("date", "")), 32)
             lines.append(f"  ✉️ {sender} — {subject}" + (f" [{date}]" if date else ""))
-            if snippet:
-                lines.append(f"    {snippet}")
+            # R-MAIL-CONTENT-TRASHFIX Part 2: substantive excerpt (already
+            # cleaned + sentence-cut upstream) rendered as an indented block.
+            excerpt = (e.get("excerpt") or "").strip()
+            if excerpt:
+                for wl in textwrap.wrap(excerpt, width=92) or []:
+                    lines.append(f"    {wl}")
+            else:  # legacy dicts without excerpt — fall back to old snippet
+                snippet = _clean(e.get("snippet", ""), _GMAIL_TRUNC)
+                if snippet:
+                    lines.append(f"    {snippet}")
+            lines.append("")
         n = len(emails)
         # R-UNIFIED-LIQ Phase C: totals line reflects the actual post-action.
         action = gmail.get("post_action")
@@ -199,12 +208,15 @@ def format_gmail_intel_block(gmail: dict[str, Any] | None) -> str:
                 f"({acted} candidatos, archivados por ahora)"
             )
         elif action == "trash":
+            # acted = VERIFIED-in-Trash count (never optimistic).
             if acted == n:
-                lines.append(f"\nTotales: {n} procesados y enviados a papelera")
+                lines.append(
+                    f"\nTotales: {n} procesados · {acted} verificados en papelera"
+                )
             else:
                 lines.append(
-                    f"\nTotales: {n} procesados · {acted} enviados a papelera "
-                    f"(⚠️ {n - acted} sin acción)"
+                    f"\nTotales: {n} procesados · {acted} verificados en papelera "
+                    f"(⚠️ {n - acted} NO verificados — quedan en INBOX)"
                 )
         elif action == "none":
             lines.append(f"\nTotales: {n} procesados · sin acción posterior")

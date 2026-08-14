@@ -89,6 +89,18 @@ def slim_intel_for_llm(intel: Any) -> Any:
 
     slim: dict[str, Any] = dict(intel)  # shallow copy — never mutate caller's
 
+    # R-MAIL-CONTENT-TRASHFIX: the gmail "excerpt" field (≤EMAIL_EXCERPT_CHARS
+    # per email) exists for the deterministic $0 render only — strip it from
+    # the LLM payload so the report bill stays flat (short snippet remains).
+    gm = intel.get("gmail")
+    if isinstance(gm, dict) and isinstance(gm.get("emails"), list):
+        slim_gm = dict(gm)
+        slim_gm["emails"] = [
+            {k: v for k, v in e.items() if k != "excerpt"} if isinstance(e, dict) else e
+            for e in gm["emails"]
+        ]
+        slim["gmail"] = slim_gm
+
     i30 = intel.get("intel30")
     if isinstance(i30, dict):
         slim_i30: dict[str, Any] = {}

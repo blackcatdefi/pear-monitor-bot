@@ -475,6 +475,28 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         _gm_block = format_gmail_intel_block(gmail_intel)
         if _gm_block:
             await send_long_message(update, _gm_block, reply_markup=MAIN_KEYBOARD)
+        # R-MAIL-CONTENT-TRASHFIX 1.3: surface verified-trash failures ONCE
+        # (alert_dedup-gated) instead of masking them behind optimistic labels.
+        try:
+            _gm_failed = int((gmail_intel or {}).get("trash_failed") or 0) \
+                if isinstance(gmail_intel, dict) else 0
+            if _gm_failed > 0:
+                from modules.alert_dedup import should_emit as _gm_should_emit
+                if _gm_should_emit(
+                    "gmail_trash_fail", "GMAIL", "unverified",
+                    cooldown_hours=24, material={"failed": _gm_failed},
+                ):
+                    _fails = (gmail_intel.get("post_action_failures") or [])[:5]
+                    await send_long_message(
+                        update,
+                        "\u26a0\ufe0f GMAIL TRASH \u2014 verificaci\u00f3n fall\u00f3\n"
+                        f"{_gm_failed} mensaje(s) NO verificados en papelera "
+                        "(quedan en INBOX/archivo).\n"
+                        + "\n".join(f"\u00b7 {f}" for f in _fails),
+                        reply_markup=MAIN_KEYBOARD,
+                    )
+        except Exception:  # noqa: BLE001
+            log.exception("gmail trash-fail alert failed (non-fatal)")
     except Exception:  # noqa: BLE001
         log.exception("telegram/gmail intel render failed (non-fatal)")
 
