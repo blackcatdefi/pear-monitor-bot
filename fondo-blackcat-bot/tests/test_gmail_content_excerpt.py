@@ -37,6 +37,27 @@ _BLOOMBERG_HTML = (
 )
 
 
+# Realistic Bloomberg text/plain: angle-bracket tracking URL tokens, in the
+# consecutive runs that used to eat most of the 800-char excerpt budget
+# (R-MAIL-POLISH). Includes a wrapped URL spanning two lines.
+_SLI = "https://sli.bloomberg.com/click?id="
+_BLOOMBERG_TEXT_URLBLOCKS = (
+    f"View in browser <{_SLI}vib123&url=https%3A%2F%2Fwww.bloomberg.com%2Fnews>\n\n"
+    f"<{_SLI}run1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa>\n"
+    f"<{_SLI}run2bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb> <{_SLI}run3cc>\n"
+    f"<{_SLI}wrapped-dddddddddddddddddddddddddddddddddd\n"
+    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeee&sig=ffff>\n"
+    f"{_SLI}bare-url-line-gggggggggggggggggggggggggggggg\n"
+    f"{_SLI}bare1 | {_SLI}bare2\n\n"
+    f"Five Things - Americas <{_SLI}header55>\n\n"
+    "Markets are bracing for the Fed decision. The dollar slid against major "
+    "peers while traders priced in two cuts. Oil extended gains after OPEC+ "
+    "signaled restraint.\n\n"
+    f"Read the full story <{_SLI}story77>\n"
+    f"Unsubscribe <{_SLI}unsub99>\n"
+)
+
+
 def _mime(body: str, ctype: str) -> email.message.Message:
     raw = (
         f"From: Bloomberg <noreply@bloomberg.com>\r\nSubject: 5 Things\r\n"
@@ -76,6 +97,32 @@ def test_plain_text_fixture():
     assert excerpt.startswith("BTC reclaimed $120K overnight.")
     assert "ETH lagged" in excerpt
     assert "sign up" not in excerpt and "Unsubscribe" not in excerpt
+
+
+def test_bloomberg_url_blocks_never_reach_excerpt():
+    """R-MAIL-POLISH: angle-bracket tracking URLs and URL-only runs are
+    stripped BEFORE measuring content — the excerpt budget goes to prose."""
+    body = gi._get_body(_mime(_BLOOMBERG_TEXT_URLBLOCKS, "text/plain"))
+    excerpt = gi._make_excerpt(body, 800)
+    # Starts at the first real content, not a URL block.
+    assert excerpt.startswith("Five Things - Americas")
+    assert "Markets are bracing for the Fed decision" in excerpt
+    # No URL garbage of any shape survives.
+    assert "sli.bloomberg.com" not in excerpt
+    assert "<http" not in excerpt and "http" not in excerpt
+    assert "View in browser" not in excerpt and "Unsubscribe" not in excerpt
+    # A line that mixes prose + angle URL keeps its prose ("Read the full
+    # story" is substantive; only the URL token is gone).
+    assert "Read the full story" in excerpt
+
+
+def test_url_only_runs_dropped_wrapped_url_spans_lines():
+    cleaned = gi._clean_body_text(
+        "<https://sli.bloomberg.com/click?id=a\nb&sig=c>\n"
+        "https://x.test/1 | https://x.test/2\n"
+        "Real sentence stays here.\n"
+    )
+    assert cleaned == "Real sentence stays here."
 
 
 def test_sentence_boundary_cut():

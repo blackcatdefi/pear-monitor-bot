@@ -150,18 +150,38 @@ _BOILERPLATE_RES = [
 
 _SENTENCE_END_RE = re.compile(r"[.!?…]['\")\]]?(?=\s|$)")
 
+# Angle-bracket URL tokens: Bloomberg text/plain wraps every tracking link in
+# <https://sli.bloomberg.com/click?...>, often in long consecutive runs that
+# used to eat most of the 800-char excerpt budget. Stripped from the raw text
+# BEFORE any substantive-content measuring. [^<>]* deliberately spans
+# newlines: mail clients hard-wrap long URLs inside the brackets.
+_ANGLE_URL_RE = re.compile(r"<\s*https?://[^<>]*>")
+_URL_TOKEN_RE = re.compile(r"https?://\S+")
+_ALNUM_RE = re.compile(r"[A-Za-z0-9]")
+
 
 def _clean_body_text(text: str) -> str:
-    """Cleaning pipeline: invisible chars → boilerplate lines → collapse ws."""
+    """Cleaning pipeline: invisible chars → URL tokens → boilerplate → ws."""
     if not text:
         return ""
     text = _INVISIBLE_RE.sub("", text).replace("\u00a0", " ").replace("\r", "")
+    # Strip angle-bracket URL tokens globally (they can span wrapped lines).
+    text = _ANGLE_URL_RE.sub(" ", text)
     kept: list[str] = []
     for line in text.split("\n"):
         line = line.strip()
         if not line:
             continue
         if any(rx.search(line) for rx in _BOILERPLATE_RES):
+            continue
+        # URL-only lines (incl. several URLs separated by punctuation): after
+        # removing URL tokens nothing alphanumeric remains → zero content,
+        # drop. These arrive in consecutive runs in newsletter link farms.
+        if _URL_TOKEN_RE.search(line) and not _ALNUM_RE.search(_URL_TOKEN_RE.sub("", line)):
+            continue
+        line = line.strip()
+        if not line or not _ALNUM_RE.search(line):
+            # Leftover bare punctuation once URL tokens are gone.
             continue
         # Collapse runs of spaces/tabs inside the line.
         kept.append(re.sub(r"[ \t]{2,}", " ", line))
@@ -276,20 +296,168 @@ def _quote_mailbox(name: str) -> str:
     return name
 
 
+def _iter_fetch_blobs(data) -> "list[bytes]":
+    """Flatten an imaplib FETCH response into byte blobs.
+
+    imaplib data items are bytes rows, ``None`` placeholders, or tuples when
+    the response carries a literal — for tuples, all bytes parts are joined so
+    the row header (which holds the sequence number and X-GM-MSGID) survives.
+    """
+    blobs: list[bytes] = []
+    for item in data or []:
+        if item is None:
+            continue
+        if isinstance(item, bytes):
+            blobs.append(item)
+        elif isinstance(item, tuple):
+            parts = [p for p in item if isinstance(p, bytes)]
+            if parts:
+                blobs.append(b" ".join(parts))
+    return blobs
+
+
+_FETCH_ROW_SEQ_RE = re.compile(rb"^\s*(\d+)\s+\(")
+_GM_MSGID_RE = re.compile(rb"X-GM-MSGID\s+(\d+)")
+_UID_RE = re.compile(rb"\bUID\s+(\d+)")
+
+
+def _parse_uid_rows(data) -> dict[bytes, tuple[bytes | None, str | None]]:
+    """Parse a FETCH response → {seq: (uid, gm_msgid)} strictly per-row.
+
+    Same per-row discipline as ``_parse_gm_msgid_rows``: sequence number,
+    UID and X-GM-MSGID are all read from the row's own header, so Gmail's
+    interleaved untagged rows can never shift the attribution.
+    """
+    result: dict[bytes, tuple[bytes | None, str | None]] = {}
+    for blob in _iter_fetch_blobs(data):
+        for line in blob.splitlines():
+            seq_m = _FETCH_ROW_SEQ_RE.match(line)
+            if not seq_m:
+                continue
+            uid_m = _UID_RE.search(line)
+            mid_m = _GM_MSGID_RE.search(line)
+            if uid_m or mid_m:
+                result[seq_m.group(1)] = (
+                    uid_m.group(1) if uid_m else None,
+                    mid_m.group(1).decode() if mid_m else None,
+                )
+    return result
+
+
+def _parse_gm_msgid_rows(data) -> dict[bytes, str]:
+    """Parse a (possibly multi-uid) X-GM-MSGID FETCH response → {seq: msgid}.
+
+    Gmail interleaves untagged responses at batch scale: the same FETCH data
+    list can carry FLAGS-update rows (from earlier ``store \\Seen`` calls),
+    ``None`` placeholders and literal tuples between the rows we asked for.
+    Parsing is strictly PER ROW: the sequence number is taken from the row's
+    own header, never assumed from request order — so an interleaved row for
+    another message can never be attributed to the wrong uid.
+    """
+    result: dict[bytes, str] = {}
+    for blob in _iter_fetch_blobs(data):
+        for line in blob.splitlines():
+            seq_m = _FETCH_ROW_SEQ_RE.match(line)
+            if not seq_m:
+                continue
+            mid_m = _GM_MSGID_RE.search(line)
+            if mid_m:
+                result[seq_m.group(1)] = mid_m.group(1).decode()
+    return result
+
+
+def _uid_key(uid) -> bytes:
+    return uid if isinstance(uid, bytes) else str(uid).encode()
+
+
+def _fetch_gm_msgids(imap, uids: list) -> dict[bytes, str]:
+    """Batch-fetch Gmail X-GM-MSGIDs for many uids in ONE round trip.
+
+    One FETCH per uid at batch scale is what broke verification (25 trashed /
+    9 verified): Gmail's interleaved untagged responses got consumed by the
+    wrong in-flight command and individual fetches came back empty → false
+    "no X-GM-MSGID". A single multi-uid FETCH parsed per-row is immune to
+    ordering; any uid still missing afterwards gets one per-uid retry.
+    """
+    result: dict[bytes, str] = {}
+    if not uids:
+        return result
+    wanted = [_uid_key(u) for u in uids]
+    try:
+        typ, data = imap.fetch(b",".join(wanted), "(X-GM-MSGID)")
+        if typ == "OK":
+            rows = _parse_gm_msgid_rows(data)
+            for key in wanted:
+                if key in rows:
+                    result[key] = rows[key]
+    except Exception:  # noqa: BLE001
+        log.warning("batch X-GM-MSGID fetch failed for %d uids", len(wanted))
+    # Per-uid retry for anything the batch response did not cover.
+    for uid in uids:
+        key = _uid_key(uid)
+        if key not in result:
+            single = _fetch_gm_msgid(imap, uid)
+            if single:
+                result[key] = single
+    return result
+
+
+def _fetch_uid_gm_msgids(
+    imap, seqs: list
+) -> dict[bytes, tuple[bytes | None, str | None]]:
+    """Batch-resolve (UID, X-GM-MSGID) for sequence numbers in ONE round trip.
+
+    MUST run BEFORE any mutation: COPY-to-Trash strips \\Inbox on Gmail and
+    the server interleaves untagged EXPUNGEs, so sequence numbers SHIFT
+    mid-loop — a seq-addressed COPY then hits the WRONG message (confirmed
+    live: alternating messages ended archived instead of trashed). Every
+    mutating command afterwards must address messages by immutable UID.
+    """
+    result: dict[bytes, tuple[bytes | None, str | None]] = {}
+    if not seqs:
+        return result
+    wanted = [_uid_key(s) for s in seqs]
+    try:
+        typ, data = imap.fetch(b",".join(wanted), "(UID X-GM-MSGID)")
+        if typ == "OK":
+            rows = _parse_uid_rows(data)
+            for key in wanted:
+                if key in rows:
+                    result[key] = rows[key]
+    except Exception:  # noqa: BLE001
+        log.warning("batch UID/X-GM-MSGID fetch failed for %d seqs", len(wanted))
+    # Per-seq retry for anything the batch response did not cover.
+    for key in wanted:
+        if key in result and result[key][0] is not None:
+            continue
+        try:
+            typ, data = imap.fetch(key, "(UID X-GM-MSGID)")
+            if typ == "OK":
+                rows = _parse_uid_rows(data)
+                if key in rows:
+                    result[key] = rows[key]
+                elif len(rows) == 1:
+                    result[key] = next(iter(rows.values()))
+        except Exception:  # noqa: BLE001
+            log.warning("UID/X-GM-MSGID retry failed for seq %s", key)
+    return result
+
+
 def _fetch_gm_msgid(imap, uid) -> str | None:
-    """Gmail X-GM-MSGID for a message (immutable across label moves)."""
+    """Gmail X-GM-MSGID for a single message (retry path of the batch)."""
     try:
         typ, data = imap.fetch(uid, "(X-GM-MSGID)")
         if typ != "OK" or not data:
             return None
-        for item in data:
-            blob = item if isinstance(item, bytes) else (
-                item[0] if isinstance(item, tuple) and item else b""
-            )
-            if isinstance(blob, bytes):
-                m = re.search(rb"X-GM-MSGID (\d+)", blob)
-                if m:
-                    return m.group(1).decode()
+        rows = _parse_gm_msgid_rows(data)
+        if rows:
+            # Prefer the row matching this uid; tolerate servers that omit
+            # the echo by falling back to the single row present.
+            key = _uid_key(uid)
+            if key in rows:
+                return rows[key]
+            if len(rows) == 1:
+                return next(iter(rows.values()))
     except Exception:  # noqa: BLE001
         log.warning("X-GM-MSGID fetch failed for uid %s", uid)
     return None
@@ -336,50 +504,65 @@ def _apply_post_action(
         return 0, failures
 
     trash_arg = _quote_mailbox(trash)
-    pending: list[tuple[Any, str | None]] = []  # (uid, gm_msgid) copied OK
-    for uid in processed_uids:
-        gm_msgid = _fetch_gm_msgid(imap, uid)
+    # Resolve (UID, X-GM-MSGID) for ALL messages in ONE round trip BEFORE any
+    # mutation: on Gmail, COPY-to-Trash strips \Inbox and untagged EXPUNGEs
+    # shift sequence numbers mid-loop, so every command below addresses
+    # messages by immutable UID only (R-MAIL-POLISH).
+    seq_map = _fetch_uid_gm_msgids(imap, processed_uids)
+    pending: list[tuple[Any, str | None]] = []  # (seq, gm_msgid) copied OK
+    for seq in processed_uids:
+        uid, gm_msgid = seq_map.get(_uid_key(seq), (None, None))
+        if not uid:
+            # Never fall back to seq-addressed COPY: after any earlier copy
+            # the seq may point at a DIFFERENT message. Fail loudly instead.
+            failures.append(f"uid {seq}: no UID resolvable; NOT trashed")
+            continue
         try:
-            typ, resp = imap.copy(uid, trash_arg)
+            typ, resp = imap.uid("COPY", uid, trash_arg)
         except Exception as exc:  # noqa: BLE001
-            failures.append(f"uid {uid}: COPY error {exc}")
+            failures.append(f"uid {seq}: COPY error {exc}")
             continue
         if typ != "OK":
             # e.g. ('NO', [b'[TRYCREATE] No folder ...']) — the silent killer.
-            failures.append(f"uid {uid}: COPY {typ} {resp!r}")
+            failures.append(f"uid {seq}: COPY {typ} {resp!r}")
             continue
         try:
-            imap.store(uid, "+FLAGS", "\\Deleted")
+            imap.uid("STORE", uid, "+FLAGS", "\\Deleted")
         except Exception as exc:  # noqa: BLE001
-            log.warning("store \\Deleted failed for uid %s: %s", uid, exc)
+            log.warning("store \\Deleted failed for uid %s: %s", seq, exc)
             # Copy landed in Trash; message may remain visible in INBOX too.
-        pending.append((uid, gm_msgid))
+        pending.append((seq, gm_msgid))
 
     imap.expunge()
 
-    # Verification pass: each copied message must be findable in Trash.
+    # Verification pass: ONE batched X-GM-MSGID listing of the Trash folder,
+    # then set membership. Per-message ``SEARCH X-GM-MSGID`` desyncs against
+    # Gmail's untagged EXISTS updates exactly like per-uid FETCH did
+    # (confirmed live: alternating false "NOT in trash" on present messages).
     verified = 0
+    trash_ids: set[str] = set()
+    trash_selected = False
     try:
         typ, _ = imap.select(trash_arg, readonly=True)
         trash_selected = typ == "OK"
+        if trash_selected:
+            typ, data = imap.search(None, "ALL")
+            if typ == "OK" and data and data[0]:
+                trash_ids = set(
+                    _fetch_gm_msgids(imap, data[0].split()).values()
+                )
     except Exception as exc:  # noqa: BLE001
         trash_selected = False
         failures.append(f"verify: cannot select {trash}: {exc}")
-    for uid, gm_msgid in pending:
+    for seq, gm_msgid in pending:
         if not trash_selected:
-            failures.append(f"uid {uid}: unverified (trash select failed)")
-            continue
-        if not gm_msgid:
-            failures.append(f"uid {uid}: unverified (no X-GM-MSGID)")
-            continue
-        try:
-            typ, hits = imap.search(None, "X-GM-MSGID", gm_msgid)
-            if typ == "OK" and hits and hits[0] and hits[0].split():
-                verified += 1
-            else:
-                failures.append(f"uid {uid}: NOT in trash after move")
-        except Exception as exc:  # noqa: BLE001
-            failures.append(f"uid {uid}: verify search error {exc}")
+            failures.append(f"uid {seq}: unverified (trash select failed)")
+        elif not gm_msgid:
+            failures.append(f"uid {seq}: unverified (no X-GM-MSGID)")
+        elif gm_msgid in trash_ids:
+            verified += 1
+        else:
+            failures.append(f"uid {seq}: NOT in trash after move")
     return verified, failures
 
 
