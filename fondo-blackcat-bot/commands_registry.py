@@ -42,6 +42,7 @@ COMMANDS: List[BotCommand] = [
     # R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): /ciclo y /ciclo_update ELIMINADOS.
     BotCommand("dca", "Tiered DCA plan BTC/ETH/HYPE + current zone", "trading", "cmd_dca"),
     BotCommand("pnl", "Realized PnL 7D / 30D / YTD", "trading", "cmd_pnl"),
+    BotCommand("cierres", "Ledger trades cerrados: NET/fees/funding + ciclos (R-TRADE-LEDGER)", "trading", "cmd_cierres"),
     BotCommand("pnlx", "Extended PnL by period + best/worst (R18)", "trading", "cmd_pnlx"),
     BotCommand("pretrade", "5-point pre-trade checklist <SYMBOL>", "trading", "cmd_pretrade"),
     BotCommand("compounding_history", "Compounding events last 30d (R18)", "trading", "cmd_compounding_history"),

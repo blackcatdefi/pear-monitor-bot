@@ -362,14 +362,16 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # R-BOT-FEEDS-EXPAND (2026-05-07) — TraderMap.io BTC fetched in parallel
     # alongside the other intel sources so it adds zero serial latency.
     from modules.tradermap import fetch_tradermap_btc
-    portfolio, market, unlocks, x_intel, gmail_intel, bt, recent_fills, tradermap = await asyncio.gather(
+    # R-TRADE-LEDGER: the 24h fills window was replaced by the persistent
+    # closed-trade ledger (modules/trade_ledger.py) — cursor-based section
+    # "CIERRES DESDE EL ULTIMO REPORTE" rendered after positions below.
+    portfolio, market, unlocks, x_intel, gmail_intel, bt, tradermap = await asyncio.gather(
         fetch_all_wallets(),
         fetch_market_data(),
         fetch_unlocks(),
         fetch_x_intel(hours=48, caller="reporte", app=context.application),
         scan_gmail_unread(),
         fetch_bounce_tech(),
-        fetch_all_recent_fills(hours=24),
         fetch_tradermap_btc(),
     )
     hl: list = []  # HyperLend deprecado — riesgo vivo = Portfolio Margin (panel PM)
@@ -504,7 +506,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     positions_text = format_quick_positions(
         portfolio, hl,
         bounce_tech=bt,
-        recent_fills=recent_fills,
+        recent_fills=None,  # R-TRADE-LEDGER: 24h window replaced by ledger section
         market=market,
     )
     await send_long_message(
@@ -512,6 +514,22 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "\U0001f4bc POSITIONS\n" + ("\u2500" * 30) + "\n\n" + positions_text,
         reply_markup=MAIN_KEYBOARD,
     )
+
+    # ─── Section 2-ter: CIERRES DESDE EL ULTIMO REPORTE (R-TRADE-LEDGER) ─────
+    # Persistent closed-trade ledger: exact window (last report, now] with zero
+    # gaps and zero duplicates. Cursor is advanced ONLY after the section was
+    # sent successfully, so a failed send re-includes the same closures next
+    # time (no silent loss). NET = gross - fees + funding.
+    try:
+        from modules import trade_ledger as _tl
+        await _tl.sync_all()
+        _prev_ms = _tl.get_report_cursor()
+        _now_ms = int(time.time() * 1000)
+        _cierres_text = _tl.render_cierres_section(_prev_ms, _now_ms)
+        await send_long_message(update, _cierres_text, reply_markup=MAIN_KEYBOARD)
+        _tl.set_report_cursor(_now_ms)
+    except Exception:  # noqa: BLE001
+        log.exception("trade ledger CIERRES section failed (non-fatal)")
 
     # ─── Section 2a: Position classification (R-REPORTE-LIVE FIX 2) ───────────
     # Deterministic per-run tagging of each open position by its REAL on-chain
@@ -961,6 +979,31 @@ async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await update.message.reply_text("⏳ Fetching fills from Hyperliquid...", reply_markup=MAIN_KEYBOARD)
     text = await pnl_tracker.build_auto_summary()
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_cierres(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-TRADE-LEDGER: permanent closed-trade ledger query.
+
+    Usage:
+      /cierres                     → last 10 closed positions + all-time totals
+      /cierres 25                  → last N closed positions
+      /cierres 2026-08-20          → all closures of that day (UTC)
+      /cierres ciclo 2026-08-20    → full cycle detail with per-leg fills
+    """
+    from modules import trade_ledger as _tl
+    await update.message.reply_text(
+        "⏳ Sincronizando ledger de cierres (fills + funding HL)...",
+        reply_markup=MAIN_KEYBOARD,
+    )
+    try:
+        await _tl.sync_all()
+    except Exception:  # noqa: BLE001
+        log.exception("/cierres sync_all failed — rendering from stored data")
+    arg = " ".join(context.args) if context.args else None
+    text = _tl.render_cierres_command(arg)
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
@@ -3873,6 +3916,8 @@ HANDLER_MAP = {
     # R-NOPRELIQ + REMOVE BLOFIN (2026-05-15): "ciclo" / "ciclo_update" ELIMINADOS.
     "dca": cmd_dca,
     "pnl": cmd_pnl,
+    # R-TRADE-LEDGER (2026-08-20): permanent closed-trade ledger query
+    "cierres": cmd_cierres,
     "log": cmd_log,
     # Round 16
     "version": cmd_version,

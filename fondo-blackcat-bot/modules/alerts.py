@@ -161,6 +161,17 @@ async def run_alert_cycle(bot) -> None:  # noqa: C901
     except Exception:  # noqa: BLE001
         log.exception("trailing rule alerts failed (non-fatal)")
 
+    # 6b-ter. R-TRADE-LEDGER — real-time close alerts. Detects open→closed
+    # transitions by diffing the persisted open-position snapshot against the
+    # live wallets payload just fetched above; emits ONE deduped alert per
+    # closed position with full economics (entry→exit, fees, funding, NET,
+    # ROE) and a cycle subtotal when a whole basket cycle finishes. Non-fatal.
+    try:
+        from modules.trade_ledger import run_close_alerts
+        await run_close_alerts(bot, wallets)
+    except Exception:  # noqa: BLE001
+        log.exception("trade ledger close alerts failed (non-fatal)")
+
     # 7. (Removido R-SIGNAL-DIET 2026-07-20) BCD DCA zone watchdog (Round 13).
     # Los [DCA ALERT] de zonas de precio (BTC/ETH/HYPE) empujaban ruido nightly
     # que BCD ya ve en sus charts. Eliminado el push scheduler COMPLETO — el
