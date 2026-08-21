@@ -216,10 +216,13 @@ def ledger_wallets() -> dict[str, str]:
     """Primary PM wallet + every FUND_WALLET_N (+ optional LEDGER_WALLETS
     CSV extra). Read-only scope — never mutates COMPUTE_PM_STATE inputs."""
     out: dict[str, str] = {}
-    if PM_PRIMARY_WALLET and PM_PRIMARY_WALLET.startswith("0x"):
-        out[PM_PRIMARY_WALLET] = "core"
+    # H3: the configured FUND_WALLET_N_LABEL is the public track-record
+    # wording — it wins. "core" is only the fallback label when the primary
+    # PM wallet is not among the FUND_WALLET_N env vars.
     for addr, label in (FUND_WALLETS or {}).items():
-        out.setdefault(addr.lower(), label)
+        out[addr.lower()] = label
+    if PM_PRIMARY_WALLET and PM_PRIMARY_WALLET.startswith("0x"):
+        out.setdefault(PM_PRIMARY_WALLET, "core")
     raw = os.getenv("LEDGER_WALLETS", "").strip()
     for part in raw.split(","):
         w = part.strip().lower()
@@ -386,7 +389,14 @@ async def _fetch_fills_paged(wallet: str, start_ms: int) -> list[dict[str, Any]]
         out.extend(page)
         if len(page) < FILLS_PAGE_CAP:
             break
-        cursor = max(int(f.get("time", 0) or 0) for f in page)  # overlap 1ms — PK dedups
+        new_cursor = max(int(f.get("time", 0) or 0) for f in page)  # overlap 1ms — PK dedups
+        if new_cursor <= cursor:
+            # H2: a full page sharing one millisecond would stall the cursor —
+            # break explicitly instead of burning MAX_PAGES on the same window.
+            log.warning("LEDGER fills cursor stalled at %d for %s — breaking",
+                        new_cursor, wallet[:6])
+            break
+        cursor = new_cursor
     return out
 
 
@@ -405,7 +415,12 @@ async def _fetch_funding_paged(wallet: str, start_ms: int) -> list[dict[str, Any
         out.extend(page)
         if len(page) < FUNDING_PAGE_CAP:
             break
-        cursor = max(int(e.get("time", 0) or 0) for e in page)
+        new_cursor = max(int(e.get("time", 0) or 0) for e in page)
+        if new_cursor <= cursor:  # H2: same stall guard as fills pagination
+            log.warning("LEDGER funding cursor stalled at %d for %s — breaking",
+                        new_cursor, wallet[:6])
+            break
+        cursor = new_cursor
     return out
 
 
@@ -721,12 +736,15 @@ async def run_close_alerts(bot, wallets_payload: list[dict[str, Any]],
         con.close()
 
     # Fetch health guard: only treat a tracked position as CLOSED if its
-    # wallet payload came back status=ok this cycle (a failed fetch must
-    # never fake a close).
+    # wallet payload came back from a LIVE fetch this cycle. NOTE:
+    # portfolio.fetch_wallet returns status="ok" WITH stale=True when all
+    # retries failed and it fell back to the cache — a stale payload must
+    # never drive close detection (a failed OR stale fetch must never fake
+    # a close).
     ok_wallets = {
         str((w.get("data") or {}).get("wallet", "")).lower()
         for w in (wallets_payload or [])
-        if isinstance(w, dict) and w.get("status") == "ok"
+        if isinstance(w, dict) and w.get("status") == "ok" and not w.get("stale")
     }
 
     closed_keys = [

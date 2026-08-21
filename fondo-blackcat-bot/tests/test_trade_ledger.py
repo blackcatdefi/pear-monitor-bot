@@ -252,6 +252,29 @@ def test_failed_wallet_fetch_never_fakes_close(monkeypatch):
     assert n2 == 1 and len(sent) == 1
 
 
+def test_stale_cache_payload_never_fakes_close(monkeypatch):
+    """H1: portfolio returns status='ok' + stale=True when every retry
+    failed and it served the cache — that must NOT drive close detection."""
+    _seed_closures()
+
+    async def _fake_sync(wallet):
+        return 0
+
+    monkeypatch.setattr(tl, "sync_wallet", _fake_sync)
+    sent: list[str] = []
+    open_pos = [{"coin": "BTC", "size": 10.0, "leverage": 3.0,
+                 "cum_funding_since_open": 0.0, "entry_px": 100.0}]
+    asyncio.run(tl.run_close_alerts(None, _payload(open_pos), send=sent.append))
+    # stale=ok payload WITHOUT the position → must not fake a close
+    stale = [{"status": "ok", "stale": True, "stale_reason": "fetch_failed_after_retries",
+              "data": {"wallet": W, "label": "core", "positions": []}}]
+    n = asyncio.run(tl.run_close_alerts(None, stale, send=sent.append))
+    assert n == 0 and sent == []
+    # live fetch confirms the close → alert fires exactly once
+    n2 = asyncio.run(tl.run_close_alerts(None, _payload([]), send=sent.append))
+    assert n2 == 1 and len(sent) == 1
+
+
 # ─── rendering (Parts 2 & 5) ────────────────────────────────────────────────
 
 def test_render_cierres_section_empty_and_populated():
