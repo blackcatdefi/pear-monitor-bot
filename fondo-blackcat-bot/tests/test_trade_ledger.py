@@ -329,6 +329,65 @@ def test_cycle_detail_and_subtotal_render():
     assert "CICLO CERRADO" in sub and "2 pata(s)" in sub
 
 
+def test_first_run_cursor_seeded_no_history_dump():
+    """First /reporte after deploy must NOT dump the whole backfilled
+    horizon: the cursor is seeded to (last closure - lookback)."""
+    # Closures months apart: old ones at ~epoch, recent one "now"-ish
+    old_close = 1_000_000
+    recent_close = old_close + 200 * 24 * H  # ~200 days later
+    fills = [
+        _fill("ETH", "B", 100, 1, old_close - H, fee=1, tid=11, d="Open Long"),
+        _fill("ETH", "A", 110, 1, old_close, pnl=10, fee=1, tid=12, d="Close Long"),
+        _fill("SOL", "B", 50, 1, recent_close - H, fee=1, tid=13, d="Open Long"),
+        _fill("SOL", "A", 55, 1, recent_close, pnl=5, fee=1, tid=14, d="Close Long"),
+    ]
+    tl._store_fills(W, fills)
+    tl.rebuild_wallet_positions(W)
+    assert tl.get_report_cursor() == 0
+    tl.ensure_report_cursor_seeded()
+    cur = tl.get_report_cursor()
+    assert cur == recent_close - tl.FIRST_RUN_LOOKBACK_MS
+    # window from the seeded cursor contains ONLY the recent closure
+    rows = tl.closures_between(cur, recent_close + 1)
+    assert [r["coin"] for r in rows] == ["SOL"]
+    out = tl.render_cierres_section(cur, recent_close + 1)
+    assert "SOL" in out and "ETH" not in out
+    assert "historial anterior" in out and "/cierres" in out
+    # after a successful send the one-shot note is consumed
+    tl.set_report_cursor(recent_close + 1)
+    out2 = tl.render_cierres_section(tl.get_report_cursor(), recent_close + 2)
+    assert "historial anterior" not in out2
+    # seeding is idempotent — never moves an already-set cursor
+    tl.ensure_report_cursor_seeded()
+    assert tl.get_report_cursor() == recent_close + 1
+
+
+def test_section_render_cap_totals_never_truncated(monkeypatch):
+    """Cap the rendered lines at SECTION_MAX_ROWS but compute subtotals and
+    the final total over the FULL window."""
+    monkeypatch.setattr(tl, "SECTION_MAX_ROWS", 2)
+    fills = []
+    coins = ["AAA", "BBB", "CCC", "DDD", "EEE"]
+    for i, coin in enumerate(coins):
+        t0 = 1_000_000 + i * 20 * MIN
+        t1 = 2_000_000 + i * H  # closes spread out; all in window
+        fills += [
+            _fill(coin, "B", 100, 1, t0, fee=1.0, tid=100 + i, d="Open Long"),
+            _fill(coin, "A", 110, 1, t1, pnl=10.0, fee=1.0, tid=200 + i, d="Close Long"),
+        ]
+    tl._store_fills(W, fills)
+    tl.rebuild_wallet_positions(W)
+    out = tl.render_cierres_section(0, 10 ** 13)
+    # only the 2 most recent closures rendered
+    assert "EEE" in out and "DDD" in out
+    assert "AAA LONG" not in out and "BBB LONG" not in out
+    assert "3 cierre(s) mas antiguos omitidos" in out
+    # totals over the FULL window: 5 legs, gross 50, fees 10, NET 40
+    assert "TOTAL: 5 pata(s)" in out
+    assert "NET +$40.00" in out
+    assert "subtotal wallet: 5 pata(s)" in out
+
+
 def test_format_position_line_economics():
     _seed_closures()
     row = [r for r in tl.closures_between(0, 10 ** 15) if r["coin"] == "SOL"][0]

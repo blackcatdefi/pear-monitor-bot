@@ -78,6 +78,19 @@ CYCLE_WINDOW_MS = int(float(os.getenv("LEDGER_CYCLE_WINDOW_MIN", "15") or 15) * 
 # Fund standard leverage assumed for BACKFILLED closes (fills carry none).
 ASSUMED_LEVERAGE = float(os.getenv("LEDGER_ASSUMED_LEVERAGE", "5") or 5)
 
+# First-run guard: the report cursor starts at 0, and (0, now] would dump the
+# ENTIRE backfilled horizon (months of closures, dozens of Telegram messages)
+# into the first /reporte. Instead the cursor is seeded at sync time to the
+# most recent closure minus this lookback, so the first section only covers
+# the recent window; older history stays reachable via /cierres.
+FIRST_RUN_LOOKBACK_MS = int(
+    float(os.getenv("LEDGER_FIRST_RUN_LOOKBACK_HOURS", "72") or 72) * 3_600_000
+)
+
+# Hard cap on closures RENDERED in one section. Subtotals/totals are always
+# computed over the FULL window — only the per-position lines are capped.
+SECTION_MAX_ROWS = int(os.getenv("LEDGER_SECTION_MAX_ROWS", "40") or 40)
+
 # Net-size epsilon: HL sizes are decimal strings; treat |net| below this as
 # flat (guards float dust from partial-fill arithmetic).
 _EPS = 1e-9
@@ -594,6 +607,10 @@ async def sync_all() -> None:
                 await sync_wallet(w)
             except Exception:  # noqa: BLE001
                 log.exception("LEDGER sync failed for %s (non-fatal)", w[:6])
+        try:
+            ensure_report_cursor_seeded()
+        except Exception:  # noqa: BLE001
+            log.exception("LEDGER cursor seeding failed (non-fatal)")
 
 
 # ─── Part 2: persistent /reporte cursor ─────────────────────────────────────
@@ -604,7 +621,33 @@ def get_report_cursor() -> int:
 
 
 def set_report_cursor(ts_ms: int) -> None:
+    """Advance the cursor after a SUCCESSFUL section send. Also consumes the
+    one-shot first-run note (the note is rendered at most once)."""
     _meta_set("last_report_ts_ms", str(int(ts_ms)))
+    if _meta_get("first_run_note_pending"):
+        _meta_set("first_run_note_pending", "")
+
+
+def ensure_report_cursor_seeded() -> None:
+    """First-run guard: if the report cursor was never set, seed it to
+    (most recent closure − LEDGER_FIRST_RUN_LOOKBACK_HOURS) so the first
+    /reporte section covers only the recent window instead of dumping the
+    whole backfilled horizon. Marks a one-shot note for the renderer."""
+    if get_report_cursor() > 0:
+        return
+    con = _conn()
+    try:
+        row = con.execute("SELECT MAX(close_ts) m FROM ledger_positions").fetchone()
+    finally:
+        con.close()
+    mx = int(row["m"] or 0) if row is not None else 0
+    if mx <= 0:
+        return  # empty ledger — nothing to guard yet
+    seeded = max(0, mx - FIRST_RUN_LOOKBACK_MS)
+    _meta_set("last_report_ts_ms", str(seeded))  # NOT set_report_cursor — keep note
+    _meta_set("first_run_note_pending", "1")
+    log.info("LEDGER report cursor seeded at %d (first run, lookback %dh)",
+             seeded, FIRST_RUN_LOOKBACK_MS // 3_600_000)
 
 
 def closures_between(start_ms: int, end_ms: int) -> list[dict[str, Any]]:
@@ -896,6 +939,14 @@ def render_cierres_section(prev_ms: int, now_ms: int) -> str:
         lines.append("Sin cierres desde el ultimo reporte.")
         return "\n".join(lines)
 
+    # Render cap: only the most recent SECTION_MAX_ROWS closures get a line.
+    # ALL subtotals and the final total stay computed over the FULL window —
+    # totals must never be truncated.
+    shown_ids = {
+        id(r) for r in sorted(rows, key=lambda x: x["close_ts"], reverse=True)[:SECTION_MAX_ROWS]
+    }
+    omitted = len(rows) - len(shown_ids)
+
     by_wallet: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
         by_wallet.setdefault(r["wallet"], []).append(r)
@@ -910,12 +961,20 @@ def render_cierres_section(prev_ms: int, now_ms: int) -> str:
             if tag:
                 lines.append(f"  \u25cf {tag}")
             for r in sorted(trows, key=lambda x: x["close_ts"]):
-                lines.append("  " + format_position_line(r))
+                if id(r) in shown_ids:
+                    lines.append("  " + format_position_line(r))
             if tag:
                 lines.append("  " + _totals_line(trows, label=f"subtotal {tag}"))
         lines.append("  " + _totals_line(wrows, label="subtotal wallet"))
+    if omitted > 0:
+        lines.append("")
+        lines.append(f"\u2026 {omitted} cierre(s) mas antiguos omitidos del render "
+                     "(incluidos en los totales) — detalle via /cierres")
     lines.append("")
     lines.append(_totals_line(rows))
+    if _meta_get("first_run_note_pending"):
+        lines.append("Primer reporte con ledger: el historial anterior "
+                     "(backfill completo) esta disponible via /cierres")
     lines.append(_formula_footer())
     return "\n".join(lines)
 
