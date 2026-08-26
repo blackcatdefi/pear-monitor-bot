@@ -520,9 +520,16 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # gaps and zero duplicates. Cursor is advanced ONLY after the section was
     # sent successfully, so a failed send re-includes the same closures next
     # time (no silent loss). NET = gross - fees + funding.
+    # R-LEDGER-FIX: sync_all now RETURNS its outcome and alerts on failure; a
+    # wallet that could not be synced (or that produced zero funding for a
+    # window with closures) is logged here AND banner-rendered inside the
+    # section itself, instead of vanishing with silent zeros.
     try:
         from modules import trade_ledger as _tl
-        await _tl.sync_all()
+        _sync_res = await _tl.sync_all()
+        if _sync_res.get("failed"):
+            log.error("LEDGER sync degraded before /reporte CIERRES: %s",
+                      _sync_res["failed"])
         _prev_ms = _tl.get_report_cursor()
         _now_ms = int(time.time() * 1000)
         _cierres_text = _tl.render_cierres_section(_prev_ms, _now_ms)
@@ -999,7 +1006,9 @@ async def cmd_cierres(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         reply_markup=MAIN_KEYBOARD,
     )
     try:
-        await _tl.sync_all()
+        _res = await _tl.sync_all()
+        if _res.get("failed"):
+            log.error("/cierres sync degraded: %s", _res["failed"])
     except Exception:  # noqa: BLE001
         log.exception("/cierres sync_all failed — rendering from stored data")
     arg = " ".join(context.args) if context.args else None

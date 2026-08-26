@@ -20,3 +20,23 @@ Append-only log per Cowork constitución §6 paso 8.
   - LIVE: hl_info_api, criptoya_ar, bcra_macro, isw_ctp, apollo_spark, farside_etfs (BTC), eia_oil
   - GRACEFUL (no key): fred_api, arkham_intel
   - GRACEFUL (SPA migration): hypurrscan, asxn_data
+
+## 2026-08-26 — R-LEDGER-FIX (D1 funding cero / D2 wallet faltante / D3 ROE inflado)
+
+- **base commit**: `2d527ce` (R-TRADE-LEDGER: first-run cursor seed + section render cap)
+- **service**: pear-monitor-bot (amusing-acceptance) / branch `master`
+- **archivos**: `modules/trade_ledger.py`, `bot.py`, `.env.example`, `requirements.txt`, `tests/test_trade_ledger.py`
+- **suite**: 1291 passed (`python3 -m pytest tests/ --asyncio-mode=auto`)
+- **env vars nuevas (opcionales, todas con default seguro)**:
+  - `LEDGER_ASSUMED_LEVERAGE=3` (antes 5 hardcodeado → ROE inflado ~67%)
+  - `LEDGER_PAGE_PAUSE_SEC=1.1` (pacing anti-429, HL cobra weight 20 / 1200 por min)
+  - `LEDGER_PAGE_MAX_ATTEMPTS=3`
+  - `LEDGER_WALLETS=` (CSV extra; la wallet de RETO ya entra por FUND_WALLET_2)
+- **migracion automatica al boot**: `ledger_positions.margin_open` (ALTER TABLE),
+  tabla `ledger_sync_health`, y recompute one-shot de todas las filas via
+  `semantics_version=2` (re-precia el ROE historico a 3x sin intervencion).
+- **verificacion en vivo (sync real contra HL, DB limpia)**: ciclo 2026-08-13
+  con 15 patas por wallet, funding real, alerts=0, health ok en ambas.
+  - core 0xc7ae: gross +1,417.14 / fees -62.75 / funding -9.32 / NET **+1,345.07**
+  - reto 0x171b: gross +67.93 / fees -6.26 / funding -2.03 / NET **+59.64**
+  - COMBINADO 30 patas: NET **+1,404.71**

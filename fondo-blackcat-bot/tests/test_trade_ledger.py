@@ -23,6 +23,7 @@ from modules import alert_dedup
 from modules import trade_ledger as tl
 
 W = "0xc7ae23316b47f7e75f455f53ad37873a18351505"
+W2 = "0x171b7880939d76abbc6b6b2094f54e6636f829a7"   # wallet de RETO
 MIN = 60_000
 H = 3_600_000
 
@@ -164,7 +165,7 @@ def test_rebuild_funding_attribution_net_and_roe_assumed():
     assert by["SOL"]["net_pnl"] == pytest.approx(102.0)
     # BTC no funding rows
     assert by["BTC"]["funding_net"] == pytest.approx(0.0)
-    # ROE with assumed leverage 5: margin = 1000/5 = 200
+    # ROE with the assumed leverage: margin = notional / ASSUMED_LEVERAGE
     assert by["SOL"]["leverage_source"] == "assumed"
     assert by["SOL"]["roe_pct"] == pytest.approx(102.0 / (1000.0 / tl.ASSUMED_LEVERAGE) * 100)
     # rebuild is idempotent — no duplicate rows
@@ -228,8 +229,192 @@ def test_close_alert_dedup_lifecycle(monkeypatch):
     # live snapshot funding: cumFunding.sinceOpen=+1.2 (paid) → stored as -1.2
     row = [r for r in tl.closures_between(0, 10 ** 15) if r["coin"] == "BTC"][0]
     assert row["funding_live_snapshot"] == pytest.approx(-1.2)
+    # R-LEDGER-FIX D3: the snapshot posted margin_used=333.0 on a 1000 notional,
+    # so leverage is DERIVED (1000/333) and outranks the reported 3.0x.
+    assert row["margin_open"] == pytest.approx(333.0)
+    assert row["leverage"] == pytest.approx(1000.0 / 333.0)
+    assert row["leverage_source"] == "derived"
+
+
+def test_leverage_derived_from_posted_margin_beats_assumed(monkeypatch):
+    """D3: leverage comes from notional_open / margin actually posted; the
+    env default is the LAST resort and it is 3x, not 5x."""
+    assert tl.ASSUMED_LEVERAGE == pytest.approx(3.0)
+    # derived, in band
+    assert tl.derive_leverage(3000.0, 1000.0) == pytest.approx(3.0)
+    # out of band / unusable → None, never a bogus ROE
+    assert tl.derive_leverage(3000.0, 0.0) is None
+    assert tl.derive_leverage(None, 1000.0) is None
+    assert tl.derive_leverage(3000.0, 1.0) is None       # 3000x → rejected
+    # precedence: derived > live > assumed
+    assert tl.resolve_leverage(3000.0, 1000.0, 5.0) == (pytest.approx(3.0), "derived")
+    assert tl.resolve_leverage(3000.0, None, 5.0) == (pytest.approx(5.0), "live")
+    assert tl.resolve_leverage(3000.0, None, None) == (
+        pytest.approx(tl.ASSUMED_LEVERAGE), "assumed")
+    # '~' marker ONLY on assumed values
+    base = {"coin": "ETH", "side": "LONG", "avg_entry": 100.0, "avg_exit": 110.0,
+            "max_size": 10.0, "gross_pnl": 100.0, "fees_total": 2.0,
+            "funding_net": 0.0, "net_pnl": 98.0, "roe_pct": 29.4,
+            "open_ts": 1_000_000, "close_ts": 1_000_000 + H, "wallet": W}
+    assumed = tl.format_position_line({**base, "leverage": 3.0,
+                                       "leverage_source": "assumed"})
+    derived = tl.format_position_line({**base, "leverage": 3.0,
+                                       "leverage_source": "derived"})
+    live = tl.format_position_line({**base, "leverage": 3.0,
+                                    "leverage_source": "live"})
+    assert "ROE ~" in assumed and "@3x" in assumed
+    assert "ROE ~" not in derived and "@3x" in derived
+    assert "ROE ~" not in live
+
+
+def test_assumed_roe_uses_3x_not_5x():
+    """The inflated-ROE regression: a 1000 notional basket leg at 3x has
+    margin 333.33, so ROE must be ~3/5 of what the old 5x default printed."""
+    _seed_closures()
+    row = [r for r in tl.closures_between(0, 10 ** 15) if r["coin"] == "SOL"][0]
     assert row["leverage"] == pytest.approx(3.0)
-    assert row["leverage_source"] == "live"
+    assert row["leverage_source"] == "assumed"
+    roe_3x = 102.0 / (1000.0 / 3.0) * 100
+    assert row["roe_pct"] == pytest.approx(roe_3x)
+    assert row["roe_pct"] == pytest.approx(102.0 / (1000.0 / 5.0) * 100 * 3 / 5)
+
+
+# ─── D1: a failing funding fetch surfaces instead of storing zeros ──────────
+
+def test_funding_fetch_failure_raises_and_marks_unhealthy(monkeypatch):
+    """D1 root cause: _fetch_funding_paged used to catch-log-break and return
+    [], so a 429 became funding 0.00 on every leg. Now it raises, the partial
+    rows are still persisted, and the wallet is marked unhealthy."""
+    _seed_closures()
+
+    async def _ok_fills(wallet, start_ms):
+        return []
+
+    async def _boom_funding(wallet, start_ms):
+        raise tl.LedgerSyncError("userFunding: page 3 failed after 3 attempts (429)",
+                                 wallet=wallet, kind="userFunding",
+                                 partial=[{"time": 1_000_000 + 45 * MIN,
+                                           "delta": {"type": "funding", "coin": "BTC",
+                                                     "usdc": "-1.5", "szi": 10,
+                                                     "fundingRate": 0.0001}}])
+
+    monkeypatch.setattr(tl, "_fetch_fills_paged", _ok_fills)
+    monkeypatch.setattr(tl, "_fetch_funding_paged", _boom_funding)
+
+    with pytest.raises(tl.LedgerSyncError):
+        asyncio.run(tl.sync_wallet(W))
+
+    h = tl.sync_health()[W]
+    assert h["ok"] == 0 and h["funding_ok"] == 0 and h["fills_ok"] == 1
+    assert "429" in h["detail"]
+    # partial funding was NOT thrown away
+    row = [r for r in tl.closures_between(0, 10 ** 15) if r["coin"] == "BTC"][0]
+    assert row["funding_net"] == pytest.approx(-1.5)
+    # and the incompleteness is announced at the top of the report section
+    out = tl.render_cierres_section(0, 10 ** 13)
+    assert "LEDGER INCOMPLETO" in out
+    assert "funding" in out.lower()
+
+
+def test_sync_all_alerts_once_on_failed_wallet_and_funding_gap(monkeypatch):
+    """D1+D2: a failed wallet and an empty-funding window each produce ONE
+    deduped alert instead of a silent zero / a missing wallet."""
+    _seed_closures()
+    monkeypatch.setattr(tl, "ledger_wallets", lambda: {W: "core", W2: "reto"})
+
+    async def _fail(wallet):
+        raise tl.LedgerSyncError("userFillsByTime: page 2 failed (429)",
+                                 wallet=wallet, kind="userFillsByTime")
+
+    monkeypatch.setattr(tl, "sync_wallet", _fail)
+    sent: list[str] = []
+    res = asyncio.run(tl.sync_all(send=sent.append))
+    assert res["ok"] == [] and set(res["failed"]) == {W, W2}
+    joined = "\n".join(sent)
+    assert joined.count("LEDGER SYNC FALLIDO") == 2
+    assert res["alerts"] >= 2
+    # second run in the cooldown window → deduped, no repeat spam
+    sent2: list[str] = []
+    res2 = asyncio.run(tl.sync_all(send=sent2.append))
+    assert set(res2["failed"]) == {W, W2}
+    assert sent2 == []
+
+
+def test_funding_gap_detects_closures_without_carry():
+    """The D1 signature: closures inside the window but zero funding rows."""
+    fills = [
+        _fill("ETH", "B", 100, 10, 1_000_000, fee=1.0, d="Open Long"),
+        _fill("ETH", "A", 110, 10, 1_000_000 + H, pnl=100.0, fee=1.0, d="Close Long"),
+    ]
+    tl._store_fills(W, fills)
+    tl.rebuild_wallet_positions(W)
+    assert tl.funding_gap(W, 0, 10 ** 15) is True
+    tl._store_funding(W, [{"time": 1_000_000 + 30 * MIN,
+                           "delta": {"type": "funding", "coin": "ETH",
+                                     "usdc": "-2.5", "szi": 10,
+                                     "fundingRate": 0.0001}}])
+    assert tl.funding_gap(W, 0, 10 ** 15) is False
+    # no closures in the window → not a gap, just a quiet window
+    assert tl.funding_gap(W, 10 ** 14, 10 ** 15) is False
+
+
+def test_sync_all_alerts_when_challenge_wallet_missing_from_scope(monkeypatch):
+    """D2: one wallet in scope means the challenge wallet cannot appear in
+    the track record — that must be loud, not invisible."""
+    monkeypatch.setattr(tl, "ledger_wallets", lambda: {W: "core"})
+
+    async def _noop(wallet):
+        return 0
+
+    monkeypatch.setattr(tl, "sync_wallet", _noop)
+    sent: list[str] = []
+    res = asyncio.run(tl.sync_all(send=sent.append))
+    assert res["ok"] == [W]
+    assert any("SCOPE DEGRADADO" in s for s in sent)
+    # two wallets in scope → no scope alert
+    monkeypatch.setattr(tl, "ledger_wallets", lambda: {W: "core", W2: "reto"})
+    sent2: list[str] = []
+    asyncio.run(tl.sync_all(send=sent2.append))
+    assert not any("SCOPE DEGRADADO" in s for s in sent2)
+
+
+# ─── D2: both wallets + the COMBINED cycle total ────────────────────────────
+
+def test_two_wallet_window_renders_both_wallets_and_combined_total():
+    """THE public-track-record test: when the same basket cycle ran on the
+    core AND the challenge wallet, the section must render both wallets,
+    both subtotals, and the COMBINED cycle line."""
+    base = 1_755_648_000_000
+    for wallet, pnl in ((W, 100.0), (W2, 25.0)):
+        fills = [
+            _fill("ETH", "B", 100, 10, base, fee=1.0, tid=hash(wallet) % 10 ** 6 + 1,
+                  d="Open Long"),
+            _fill("SOL", "B", 50, 20, base + 5 * MIN, fee=1.0,
+                  tid=hash(wallet) % 10 ** 6 + 2, d="Open Long"),
+            _fill("ETH", "A", 110, 10, base + H, pnl=pnl, fee=1.0,
+                  tid=hash(wallet) % 10 ** 6 + 3, d="Close Long"),
+            _fill("SOL", "A", 55, 20, base + H, pnl=pnl, fee=1.0,
+                  tid=hash(wallet) % 10 ** 6 + 4, d="Close Long"),
+        ]
+        tl._store_fills(wallet, fills)
+        tl.rebuild_wallet_positions(wallet)
+
+    rows = tl.closures_between(0, 10 ** 15)
+    assert len({r["wallet"] for r in rows}) == 2
+    tag = rows[0]["cycle_tag"]
+    assert tag and all(r["cycle_tag"] == tag for r in rows)
+
+    out = tl.render_cierres_section(0, 10 ** 13)
+    # both wallets present, each with its own subtotal
+    assert W[:6] in out and W2[:6] in out
+    assert out.count("subtotal wallet") == 2
+    # the combined cycle line — 4 legs across both wallets
+    assert f"COMBINADO {tag}" in out
+    combined_line = [l for l in out.splitlines() if l.startswith("COMBINADO")][0]
+    assert "4 pata(s)" in combined_line
+    # NET = gross(2*100 + 2*25) - fees(8) = 242
+    assert "NET +$242.00" in combined_line
+    assert "TOTAL: 4 pata(s)" in out
 
 
 def test_failed_wallet_fetch_never_fakes_close(monkeypatch):
