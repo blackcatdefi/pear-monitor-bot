@@ -417,6 +417,41 @@ def test_two_wallet_window_renders_both_wallets_and_combined_total():
     assert "TOTAL: 4 pata(s)" in out
 
 
+def test_sync_failure_during_close_detection_never_loses_the_alert(monkeypatch):
+    """D1 fallout guard: sync_wallet now RAISES on a failed HL read. That must
+    not eat the close — the open snapshot survives so the next cycle retries,
+    and the alert fires once the sync recovers."""
+    _seed_closures()
+    calls = {"n": 0}
+
+    async def _flaky_sync(wallet):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise tl.LedgerSyncError("userFunding: page 1 failed (429)",
+                                     wallet=wallet, kind="userFunding")
+        return 0
+
+    monkeypatch.setattr(tl, "sync_wallet", _flaky_sync)
+    sent: list[str] = []
+    open_pos = [{"coin": "BTC", "size": 10.0, "leverage": 3.0,
+                 "cum_funding_since_open": 0.0, "entry_px": 100.0}]
+    asyncio.run(tl.run_close_alerts(None, _payload(open_pos), send=sent.append))
+    # position gone + sync blows up → NO alert, but the snapshot is kept
+    n = asyncio.run(tl.run_close_alerts(None, _payload([]), send=sent.append))
+    assert n == 0 and sent == []
+    con = tl._conn()
+    try:
+        assert con.execute("SELECT COUNT(*) c FROM ledger_open_snap "
+                           "WHERE coin='BTC'").fetchone()["c"] == 1
+    finally:
+        con.close()
+    # next cycle the sync works → the close is alerted exactly once
+    n2 = asyncio.run(tl.run_close_alerts(None, _payload([]), send=sent.append))
+    assert n2 == 1 and len(sent) == 1
+    n3 = asyncio.run(tl.run_close_alerts(None, _payload([]), send=sent.append))
+    assert n3 == 0 and len(sent) == 1
+
+
 def test_failed_wallet_fetch_never_fakes_close(monkeypatch):
     _seed_closures()
 
