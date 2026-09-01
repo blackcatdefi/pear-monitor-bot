@@ -3026,6 +3026,39 @@ async def _backup_volume_job(application: Application) -> None:
         log.exception("backup_volume cron job failed")
 
 
+async def _ledger_sync_job(application: Application) -> None:
+    """R-LEDGER-FIX (2026-09-01): mantener el ledger sincronizado SIN depender
+    de que alguien escriba /reporte.
+
+    Por que existe: la migracion de semantica (recompute one-shot a 3x) y el
+    relleno de funding viven dentro de sync_all(), que hasta ahora SOLO corria
+    desde /reporte y /cierres. Post-deploy el /health mostraba
+    semantics_version=null y funding 0.00 en todos los ciclos: la migracion
+    quedaba esperando una accion manual. Una migracion que no se completa sola
+    no esta desplegada. Corre una vez al arranque (+2 min) y despues cada
+    LEDGER_SYNC_HOURS (default 6). Las alertas ya vienen dedupeadas desde
+    sync_all, asi que repetir no spamea.
+    """
+    try:
+        from modules import trade_ledger as _tl
+
+        async def _send(text: str) -> None:
+            chat_id = os.getenv("ALERT_CHAT_ID") or os.getenv("AUTHORIZED_USER_ID")
+            if not chat_id:
+                return
+            try:
+                await application.bot.send_message(chat_id=int(chat_id), text=text)
+            except Exception:  # noqa: BLE001
+                log.exception("ledger sync alert send failed")
+
+        res = await _tl.sync_all(send=_send)
+        log.info("LEDGER periodic sync: ok=%d failed=%d alerts=%d",
+                 len(res.get("ok") or []), len(res.get("failed") or {}),
+                 res.get("alerts") or 0)
+    except Exception:  # noqa: BLE001
+        log.exception("ledger sync cron job failed")
+
+
 async def _cost_alert_job(application: Application) -> None:
     """R-PERFECT Fase 3 #3: hourly LLM cost threshold check, alert if breached."""
     if os.getenv("COST_ALERTS_ENABLED", "true").strip().lower() == "false":
@@ -3855,6 +3888,27 @@ async def post_init(application: Application) -> None:
                 next_run_time=datetime.now(timezone.utc) + timedelta(minutes=10),
             )
             log.info("R-PERFECT: cost_alert hourly check ENABLED")
+
+        # R-LEDGER-FIX: ledger self-sync. Primera corrida a los 2 min del boot
+        # (completa sola la migracion de semantica y el backfill de funding),
+        # despues cada LEDGER_SYNC_HOURS.
+        if os.getenv("LEDGER_SYNC_ENABLED", "true").strip().lower() != "false":
+            try:
+                _ledger_hours = float(os.getenv("LEDGER_SYNC_HOURS", "6") or 6)
+            except ValueError:
+                _ledger_hours = 6.0
+            scheduler.add_job(
+                _ledger_sync_job,
+                "interval",
+                hours=_ledger_hours,
+                args=[application],
+                id="ledger_sync",
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now(timezone.utc) + timedelta(minutes=2),
+            )
+            log.info("R-LEDGER-FIX: ledger_sync ENABLED (cada %gh, primera +2min)",
+                     _ledger_hours)
 
         scheduler.start()
         application.bot_data["scheduler"] = scheduler

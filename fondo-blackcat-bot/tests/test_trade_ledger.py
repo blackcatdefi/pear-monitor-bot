@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -671,3 +672,42 @@ def test_health_payload_carries_ledger_block():
     p = health_payload(commands_count=1)
     assert "ledger" in p and isinstance(p["ledger"], dict)
     assert "schema" in p["ledger"] or "error" in p["ledger"]
+
+
+# ─── R-LEDGER-FIX: la migracion tiene que completarse SOLA ──────────────────
+# El primer deploy dejo /health con semantics_version=null y funding 0.00 en
+# todos los ciclos: el recompute one-shot y el backfill de funding viven dentro
+# de sync_all(), que solo corria desde /reporte y /cierres. Una migracion que
+# espera una accion manual no esta desplegada. Estos tests fijan el job
+# periodico para que no se pierda en un refactor.
+
+def test_ledger_sync_job_is_wired_into_the_scheduler():
+    src = (Path(__file__).resolve().parents[1] / "bot.py").read_text()
+    assert "async def _ledger_sync_job(" in src
+    assert 'id="ledger_sync"' in src
+    assert "_ledger_sync_job," in src
+    # Corre poco despues del boot, no solo al cumplirse el intervalo.
+    job = src.split('id="ledger_sync"')[0]
+    assert "next_run_time" in src.split("_ledger_sync_job,")[1][:600]
+    assert "LEDGER_SYNC_HOURS" in src
+    assert job  # el bloque existe
+
+
+@pytest.mark.asyncio
+async def test_ledger_sync_job_never_raises_when_sync_all_fails(monkeypatch):
+    """El job es best-effort: si sync_all revienta, el scheduler sigue vivo."""
+    import bot as _bot
+    from modules import trade_ledger as _tl
+
+    async def _boom(*a, **k):
+        raise RuntimeError("HL 429")
+
+    monkeypatch.setattr(_tl, "sync_all", _boom)
+
+    class _App:
+        class bot:  # noqa: N801
+            @staticmethod
+            async def send_message(**k):
+                return None
+
+    await _bot._ledger_sync_job(_App())  # no debe propagar
