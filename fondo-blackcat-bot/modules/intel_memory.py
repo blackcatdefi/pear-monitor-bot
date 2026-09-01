@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from config import DATA_DIR
+from modules import health_registry
+from utils.tsnorm import ts_bound, ts_norm  # noqa: F401  (re-export historico)
 
 log = logging.getLogger(__name__)
 
@@ -126,17 +128,13 @@ X_API_COST_PER_1K_TWEETS = float(os.getenv("X_API_COST_PER_1K_TWEETS", "5.0"))
 # every "since" window lost the rows on its boundary day. Same silent-zero
 # class as the ledger funding bug: a wrong answer that looks like a quiet day.
 # Fix centrally — normalise BOTH sides to "YYYY-MM-DD HH:MM:SS".
-TS_NORM = "replace(substr(ts,1,19),'T',' ')"
-
-
-def ts_bound(value: Any) -> str:
-    """Normalise a datetime / ISO string to the stored ts format."""
-    if isinstance(value, datetime):
-        value = value.isoformat()
-    s = str(value or "").strip()
-    if not s:
-        return ""
-    return s.replace("T", " ").rstrip("Z").split("+")[0][:19]
+#
+# R-BOT-DEFINITIVE: la implementacion se movio a utils/tsnorm.py para que
+# cualquier modulo la use sin arrastrar intel_memory (y su DB) como dependencia.
+# Aca queda TS_NORM ya resuelto para la columna 'ts' — unica de formato mixto en
+# este archivo — asi las 7 consultas de abajo lo siguen concatenando tal cual, y
+# ts_bound se re-exporta desde el import de arriba para no romper llamadores.
+TS_NORM = ts_norm("ts")
 
 
 
@@ -178,6 +176,7 @@ def record_x_api_call(
         conn.commit()
         conn.close()
     except Exception:
+        health_registry.swallowed("x_api", "record_x_api_call")
         log.exception("record_x_api_call failed (non-fatal)")
 
 
@@ -202,6 +201,7 @@ def last_successful_x_call_ts(endpoint: str | None = None) -> datetime | None:
         # SQLite CURRENT_TIMESTAMP is naive UTC
         return datetime.fromisoformat(row["ts"]).replace(tzinfo=timezone.utc)
     except Exception:
+        health_registry.swallowed("x_api", "last_successful_x_call_ts")
         log.exception("last_successful_x_call_ts failed")
         return None
 
@@ -218,6 +218,7 @@ def count_x_calls_since(hours: int = 24) -> int:
         conn.close()
         return int(row["c"] or 0)
     except Exception:
+        health_registry.swallowed("x_api", "count_x_calls_since")
         log.exception("count_x_calls_since failed")
         return 0
 
@@ -239,6 +240,7 @@ def official_x_cost_since(since_iso: str = "") -> float:
         conn.close()
         return float(row["c"] or 0.0)
     except Exception:  # noqa: BLE001
+        health_registry.swallowed("x_api", "official_x_cost_since")
         log.exception("official_x_cost_since failed")
         return 0.0
 
@@ -268,6 +270,7 @@ def x_api_cost_projection() -> dict[str, Any]:
             "monthly_projection_usd": monthly,
         }
     except Exception:
+        health_registry.swallowed("x_api", "x_api_cost_projection")
         log.exception("x_api_cost_projection failed")
         return {"cost_7d": 0.0, "calls_7d": 0, "tweets_7d": 0, "daily_avg_usd": 0.0, "monthly_projection_usd": 0.0}
 
@@ -289,6 +292,7 @@ def count_x_calls_today_calendar() -> int:
         conn.close()
         return int(row["c"] or 0)
     except Exception:
+        health_registry.swallowed("x_api", "count_x_calls_today_calendar")
         log.exception("count_x_calls_today_calendar failed")
         return 0
 
@@ -310,6 +314,7 @@ def count_x_calls_today_live_only() -> int:
         conn.close()
         return int(row["c"] or 0)
     except Exception:
+        health_registry.swallowed("x_api", "count_x_calls_today_live_only")
         log.exception("count_x_calls_today_live_only failed")
         return 0
 
@@ -347,6 +352,7 @@ def should_send_75pct_alert(used: int, cap: int) -> bool:
         conn.close()
         return True
     except Exception:
+        health_registry.swallowed("x_api", "should_send_75pct_alert")
         log.exception("should_send_75pct_alert failed")
         return False
 
@@ -379,6 +385,7 @@ def save_x_timeline_payload(payload: dict) -> None:
         conn.commit()
         conn.close()
     except Exception:
+        health_registry.swallowed("x_api", "save_x_timeline_payload")
         log.exception("save_x_timeline_payload failed (non-fatal)")
 
 
@@ -398,6 +405,7 @@ def load_x_timeline_payload() -> tuple[dict | None, datetime | None]:
             saved = saved.replace(tzinfo=timezone.utc)
         return payload, saved
     except Exception:
+        health_registry.swallowed("x_api", "load_x_timeline_payload")
         log.exception("load_x_timeline_payload failed")
         return None, None
 
@@ -430,6 +438,7 @@ def x_cost_breakdown_by_caller(days: int = 7) -> list[dict]:
             for r in rows
         ]
     except Exception:
+        health_registry.swallowed("x_api", "x_cost_breakdown_by_caller")
         log.exception("x_cost_breakdown_by_caller failed")
         return []
 
@@ -457,6 +466,7 @@ def x_cache_hit_rate(days: int = 7) -> dict[str, Any]:
             "calls_per_day": (int(row["total"] or 0) / max(days, 1)),
         }
     except Exception:
+        health_registry.swallowed("x_api", "x_cache_hit_rate")
         log.exception("x_cache_hit_rate failed")
         return {"total_calls": 0, "successful": 0, "calls_per_day": 0.0}
 
@@ -638,6 +648,7 @@ def track_llm_usage(
         conn.commit()
         conn.close()
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("cost_tracker", "track_llm_usage")
         log.warning("track_llm_usage failed (%s): %s", model_used, exc)
 
 
@@ -680,6 +691,7 @@ def get_usage_stats(period: str = "today") -> list[dict]:
             for r in rows
         ]
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("cost_tracker", "get_usage_stats")
         log.warning("get_usage_stats(%s) failed: %s", period, exc)
         return []
 
@@ -725,6 +737,7 @@ def save_unlock_events(events: list[dict]) -> int:
             )
             inserted += 1
         except Exception as exc:  # noqa: BLE001
+            health_registry.swallowed("intel_feeds", "save_unlock_events")
             log.debug("save_unlock_events skip %s: %s", ev.get("token"), exc)
     conn.commit()
     conn.close()
@@ -764,5 +777,6 @@ def get_cached_unlocks(window_days: int = 14, max_age_hours: int = 6) -> list[di
         conn.close()
         return [dict(r) for r in rows]
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("intel_feeds", "get_cached_unlocks")
         log.warning("get_cached_unlocks failed: %s", exc)
         return []

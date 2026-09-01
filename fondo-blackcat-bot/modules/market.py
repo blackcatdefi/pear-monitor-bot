@@ -16,6 +16,8 @@ from typing import Any
 from config import COINGLASS_API_KEY
 from utils.http import get_json
 from modules.coinglass import get_basket_oi_funding
+from modules import health_registry
+from utils.shape import UnexpectedShape, dig, require_mapping
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +66,16 @@ async def coingecko_prices() -> dict[str, Any]:
         "include_market_cap": "true",
     }
     try:
-        data = await get_json(COINGECKO_PRICE_URL, params=params)
+        data = require_mapping(await get_json(COINGECKO_PRICE_URL,
+                                              params=params),
+                               source="coingecko/simple/price")
+        # C4: CoinGecko responde 200 con {"status":{"error_code":429}} cuando
+        # rate-limitea. Sin esta guarda ningun gid aparecia, out quedaba {} y el
+        # reporte imprimia "sin precios" en vez de "no pude leer precios".
+        if not any(g in data for g in _GECKO_IDS.values()):
+            raise UnexpectedShape(
+                "coingecko/simple/price: 200 sin ninguno de los ids pedidos "
+                f"(claves={sorted(data)[:6]})")
         out: dict[str, Any] = {}
         for sym, gid in _GECKO_IDS.items():
             entry = data.get(gid, {})
@@ -77,6 +88,7 @@ async def coingecko_prices() -> dict[str, Any]:
         _cache_set("gecko_prices", out)
         return out
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("market", "coingecko_prices")
         log.warning("CoinGecko prices failed: %s", exc)
         return {}
 
@@ -87,7 +99,9 @@ async def coingecko_global() -> dict[str, Any]:
         return cached
     try:
         data = await get_json(COINGECKO_GLOBAL_URL)
-        d = (data or {}).get("data", {}) or {}
+        # C4: sin la clave 'data' esto quedaba en {} y devolvia dominancia BTC
+        # None, que el render dibuja como n/d indistinguible de un fallo real.
+        d = dig(data, "data", source="coingecko/global", expect=dict)
         out = {
             "total_market_cap_usd": (d.get("total_market_cap") or {}).get("usd"),
             "total_volume_usd": (d.get("total_volume") or {}).get("usd"),
@@ -98,6 +112,7 @@ async def coingecko_global() -> dict[str, Any]:
         _cache_set("gecko_global", out)
         return out
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("market", "coingecko_global")
         log.warning("CoinGecko global failed: %s", exc)
         return {}
 
@@ -112,7 +127,11 @@ async def fear_greed() -> dict[str, Any]:
         return cached
     try:
         data = await get_json(FNG_URL)
-        items = (data or {}).get("data", []) or []
+        # C4: alternative.me responde 200 con {"metadata":{"error":...}}. Antes
+        # eso daba items=[] y un `return {}` que el reporte leia como "sin
+        # Fear&Greed hoy". Ahora la forma mala levanta; la lista vacia legitima
+        # (que la API no produce nunca, pero podria) se sigue respetando.
+        items = dig(data, "data", source="alternative.me/fng", expect=list)
         if not items:
             return {}
         latest = items[0]
@@ -127,6 +146,7 @@ async def fear_greed() -> dict[str, Any]:
         _cache_set("fng", result)
         return result
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("market", "fear_greed")
         log.warning("Fear&Greed failed: %s", exc)
         return {}
 
@@ -142,6 +162,7 @@ async def _coinglass_get(path: str, params: dict[str, Any] | None = None) -> Any
     try:
         return await get_json(f"{COINGLASS_BASE}{path}", headers=headers, params=params or {})
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("market", "_coinglass_get")
         log.warning("CoinGlass %s failed: %s", path, exc)
         return None
 
@@ -198,7 +219,7 @@ async def defillama_top_fees(top_n: int = 10) -> list[dict[str, Any]]:
         return cached
     try:
         data = await get_json(LLAMA_FEES)
-        protos = (data or {}).get("protocols", []) or []
+        protos = dig(data, "protocols", source="defillama/fees", expect=list)
         protos = sorted(protos, key=lambda p: p.get("total24h") or 0, reverse=True)[:top_n]
         out = [
             {
@@ -213,6 +234,7 @@ async def defillama_top_fees(top_n: int = 10) -> list[dict[str, Any]]:
         _cache_set(f"llama_fees_{top_n}", out)
         return out
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("market", "defillama_top_fees")
         log.warning("DefiLlama fees failed: %s", exc)
         return []
 
@@ -223,7 +245,8 @@ async def defillama_stablecoin_supply() -> dict[str, Any]:
         return cached
     try:
         data = await get_json(LLAMA_STABLES)
-        coins = (data or {}).get("peggedAssets", []) or []
+        coins = dig(data, "peggedAssets", source="defillama/stablecoins",
+                    expect=list)
         total = 0.0
         usdt = usdc = 0.0
         for c in coins:
@@ -238,6 +261,7 @@ async def defillama_stablecoin_supply() -> dict[str, Any]:
         _cache_set("llama_stables", out)
         return out
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("market", "defillama_stablecoin_supply")
         log.warning("DefiLlama stables failed: %s", exc)
         return {}
 

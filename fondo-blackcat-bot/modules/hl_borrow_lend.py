@@ -28,6 +28,8 @@ import time
 import urllib.request
 from typing import Any
 
+from modules import health_registry
+
 try:
     from config import HYPERLIQUID_API
 except Exception:  # noqa: BLE001 — keep importable in isolated tests
@@ -48,11 +50,17 @@ _cache: dict[str, Any] = {"ts": 0.0, "ltv": {}}
 
 def _post(payload: dict) -> Any:
     # R-BOT-DEFINITIVE WI-4: shared rate-limited + cached HL client first.
+    # R-BOT-DEFINITIVE clase C2: el fallback urllib de abajo NO pasa por el
+    # rate limiter compartido de hl_client. Activarlo en silencio lleva a 429,
+    # y un 429 tragado es lo que produjo funding 0.00. Se conserva el fallback
+    # pero se declara la degradacion en vez de pasar de largo.
     try:
         from modules.hl_client import post_info_sync
-        return post_info_sync(payload)
     except ImportError:  # pragma: no cover
-        pass
+        health_registry.swallowed(
+            "pm_state", "hl_client no importable; urllib SIN rate limiter")
+    else:
+        return post_info_sync(payload)
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
         _INFO_URL,

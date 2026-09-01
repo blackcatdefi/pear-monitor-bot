@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from config import DATA_DIR, TELEGRAM_CHAT_ID
+from modules import health_registry
 
 log = logging.getLogger(__name__)
 
@@ -64,6 +65,7 @@ def _load_state() -> dict[str, Any]:
         with open(_RECONCILE_STATE_FILE) as f:
             return json.load(f)
     except Exception:
+        health_registry.swallowed("pm_state", "_load_state")
         return {}
 
 
@@ -72,6 +74,7 @@ def _save_state(state: dict[str, Any]) -> None:
         with open(_RECONCILE_STATE_FILE, "w") as f:
             json.dump(state, f, indent=2)
     except Exception:
+        health_registry.swallowed("pm_state", "_save_state")
         log.exception("Could not save reconcile_state.json")
 
 
@@ -83,6 +86,7 @@ def _wallet_matches_basket_label(wallet_addr: str) -> bool:
     try:
         from fund_state import ALT_SHORT_BLEED_WALLETS
     except Exception:
+        health_registry.swallowed("pm_state", "_wallet_matches_basket_label")
         return False
     addr_low = (wallet_addr or "").lower()
     for prefix in ALT_SHORT_BLEED_WALLETS:
@@ -101,6 +105,7 @@ async def reconcile_fund_state() -> list[Discrepancy]:
             BASKET_PERP_TOKENS,
         )
     except Exception:
+        health_registry.swallowed("pm_state", "reconcile_fund_state")
         log.exception("fund_state import failed")
         return []
 
@@ -116,7 +121,21 @@ async def reconcile_fund_state() -> list[Discrepancy]:
     for w in wallets or []:
         if w.get("status") != "ok":
             continue
-        d = w.get("data", {})
+        # status == "ok" es una promesa: significa que la lectura de esa wallet
+        # funciono. Si ademas falta 'data', las dos afirmaciones se contradicen
+        # y el .get("data", {}) de antes resolvia la contradiccion de la peor
+        # forma posible: hacia de cuenta que la wallet no tenia ninguna
+        # posicion. Eso baja total_basket_notional y el reconciliador concluye
+        # "la canasta esta mas chica de lo que dice fund_state" — una
+        # discrepancia inventada por un bug, indistinguible de una real.
+        d = w.get("data")
+        if not isinstance(d, dict):
+            health_registry.swallowed(
+                "portfolio",
+                f"reconcile_fund_state: wallet con status=ok y data "
+                f"{type(d).__name__}; la canasta se calcula incompleta")
+            log.error("fund_state_reconciler: status=ok sin data (%r)", w)
+            continue
         addr = (d.get("wallet") or "").lower()
         # Iterate positions and identify basket SHORTs
         for pos in d.get("positions") or []:
@@ -408,6 +427,7 @@ async def scheduled_reconcile(bot) -> int:
             types_alerted_today.add(d.type)
             sent += 1
         except Exception:
+            health_registry.swallowed("pm_state", "scheduled_reconcile")
             log.exception("scheduled_reconcile alert failed: %s", d.type)
 
     state[today_key] = list(types_alerted_today)

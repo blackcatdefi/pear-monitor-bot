@@ -66,6 +66,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
+from modules import health_registry
 
 log = logging.getLogger(__name__)
 
@@ -121,6 +122,7 @@ def _registered_wallets() -> dict[str, str]:
             out[addr.lower()] = label
         return out
     except Exception:  # noqa: BLE001
+        health_registry.swallowed("pm_state", "_registered_wallets")
         return {}
 
 
@@ -478,6 +480,7 @@ async def build_authoritative_state_block() -> str:
     try:
         detected = await detect_active_baskets()
     except Exception:  # noqa: BLE001
+        health_registry.swallowed("pm_state", "build_authoritative_state_block")
         log.exception("fund_state_v2: detect_active_baskets failed")
         return ""
     return render_state_block(detected)

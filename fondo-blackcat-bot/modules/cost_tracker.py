@@ -19,6 +19,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from modules import health_registry
 
 log = logging.getLogger(__name__)
 
@@ -116,6 +117,7 @@ def log_llm_call(model: str, tokens_in: int, tokens_out: int,
                 (int(time.time()), model, tokens_in, tokens_out, cost, source),
             )
     except sqlite3.Error as e:
+        health_registry.swallowed("cost_tracker", "log_llm_call")
         log.debug("cost_tracker insert failed: %s", e)
     return cost
 
@@ -140,6 +142,7 @@ def _aggregate(since_ts: int) -> dict[str, Any]:
                 out["total_usd"] += float(cost or 0.0)
                 out["total_calls"] += int(n or 0)
     except sqlite3.Error as e:
+        health_registry.swallowed("cost_tracker", "_aggregate")
         log.debug("cost_tracker aggregate failed: %s", e)
     return out
 

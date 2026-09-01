@@ -40,6 +40,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+from modules import health_registry
 
 try:
     from config import (
@@ -111,15 +112,53 @@ class VaultDepositsResult:
     error: str | None = None
 
 
+def _as_equity_list(data: Any, depositor: str) -> list[dict]:
+    """Valida la FORMA de la respuesta antes de creerle.
+
+    R-BOT-DEFINITIVE, clase C4 (200 con shape inesperado tratado como "no hay
+    datos"). Antes esto era ``return data if isinstance(data, list) else []``.
+    Hyperliquid responde 200 con un objeto ``{"error": ...}`` en varias
+    condiciones (rate limit blando, direccion mal formada, mantenimiento). Ese
+    objeto no es una lista, asi que se convertia en ``[]`` y el llamador lo leia
+    como "este depositante no tiene nada en ningun vault" — restando su equity
+    del NAV del fondo sin una sola linea de log. Es la misma forma exacta del
+    bug de userFunding que convertia un 429 en funding 0.00 en todas las patas.
+
+    Una lista vacia SI es una respuesta valida (el depositante realmente no
+    tiene vaults) y por eso se acepta. Lo que no se acepta es cualquier otra
+    cosa: eso es un fallo, y se levanta como tal.
+    """
+    if isinstance(data, list):
+        return data
+    detail = ""
+    if isinstance(data, dict):
+        detail = str(data.get("error") or data.get("message") or "")[:200]
+    raise ValueError(
+        f"userVaultEquities devolvio {type(data).__name__} en vez de list "
+        f"para {_short_addr(depositor)}" + (f": {detail}" if detail else ""))
+
+
 def _post_user_vault_equities(depositor: str) -> list[dict]:
     """POST userVaultEquities for one depositor. Raises on transport error."""
     # R-BOT-DEFINITIVE WI-4: shared rate-limited + cached HL client first.
+    #
+    # R-BOT-DEFINITIVE clase C2: el fallback urllib de abajo NO pasa por el
+    # rate limiter compartido de hl_client. Si se activa en silencio, la
+    # primera consecuencia visible es un 429 — y un 429 tragado es exactamente
+    # lo que produjo funding 0.00. El fallback se conserva (responder sin rate
+    # limiter es mejor que no responder) pero ahora se declara en el registro
+    # de salud. Ademas el try envuelve SOLO el import: antes tambien envolvia
+    # la llamada, asi que un ImportError lanzado dentro de post_info_sync
+    # disparaba una segunda peticion por urllib sin que nadie lo supiera.
     try:
         from modules.hl_client import post_info_sync
-        data = post_info_sync({"type": "userVaultEquities", "user": depositor})
-        return data if isinstance(data, list) else []
     except ImportError:  # pragma: no cover
-        pass
+        health_registry.swallowed(
+            "vault", "hl_client no importable; urllib SIN rate limiter")
+    else:
+        return _as_equity_list(
+            post_info_sync({"type": "userVaultEquities", "user": depositor}),
+            depositor)
     body = json.dumps(
         {"type": "userVaultEquities", "user": depositor}
     ).encode()
@@ -134,7 +173,7 @@ def _post_user_vault_equities(depositor: str) -> list[dict]:
     )
     with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_SEC) as r:
         data = json.load(r)
-    return data if isinstance(data, list) else []
+    return _as_equity_list(data, depositor)
 
 
 def _safe_float(v: Any) -> float:
@@ -174,6 +213,7 @@ def _resolve_vault_name(vault_address: str) -> str:
             # Strip decorative junk some vaults use (brackets, infinity emoji).
             name = str(nm).replace("[", "").replace("]", "").replace("♾️", "").strip() or _short_addr(va)
     except Exception as e:  # noqa: BLE001 — best-effort
+        health_registry.swallowed("vault", "_resolve_vault_name")
         log.debug("vault name resolve failed for %s: %s", va, e)
     _name_cache[va] = name
     return name
@@ -186,12 +226,14 @@ def _fund_depositor_wallets() -> set[str]:
         if PM_PRIMARY_WALLET:
             out.add(PM_PRIMARY_WALLET.lower())
     except Exception:  # noqa: BLE001
+        health_registry.swallowed("vault", "_fund_depositor_wallets")
         pass
     try:
         for w in (FUND_WALLETS or {}):
             if w:
                 out.add(str(w).lower())
     except Exception:  # noqa: BLE001
+        health_registry.swallowed("vault", "_fund_depositor_wallets")
         pass
     return out
 
@@ -342,6 +384,7 @@ def get_vault_deposits_total(force: bool = False) -> float:
         r = fetch_vault_deposits(force=force)
         return float(r.total_usd) if r.ok else 0.0
     except Exception as e:  # noqa: BLE001 — never break a caller
+        health_registry.swallowed("vault", "get_vault_deposits_total")
         log.warning("get_vault_deposits_total failed: %s", e)
         return 0.0
 
@@ -366,6 +409,7 @@ def _fmt_lockup(locked_until_ts: int) -> str:
         # HL lockedUntilTimestamp is epoch milliseconds.
         dt = datetime.fromtimestamp(locked_until_ts / 1000.0, tz=timezone.utc)
     except (ValueError, OverflowError, OSError):
+        health_registry.swallowed("vault", "_fmt_lockup")
         return ""
     if dt <= datetime.now(timezone.utc):
         return ""

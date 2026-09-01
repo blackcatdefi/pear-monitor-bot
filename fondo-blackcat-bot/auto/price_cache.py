@@ -29,6 +29,7 @@ import logging
 import os
 import time
 from typing import Any
+from modules import health_registry
 
 log = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ def read() -> dict[str, Any]:
             if not isinstance(data, dict):
                 return {}
     except Exception:  # noqa: BLE001
+        health_registry.swallowed("market", "read")
         log.warning("price_cache: read failed, ignoring")
         return {}
     ts = float(data.get("ts_epoch") or 0.0)
@@ -84,4 +86,5 @@ def record(btc: float | None, eth: float | None, hype: float | None) -> None:
         try:
             os.remove(tmp)
         except Exception:  # noqa: BLE001
+            health_registry.swallowed("market", "record")
             pass

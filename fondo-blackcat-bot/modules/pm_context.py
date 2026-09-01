@@ -39,6 +39,7 @@ is hardcoded. NEVER raises — a failure returns "" so /reporte is never broken.
 from __future__ import annotations
 
 from typing import Any
+from modules import health_registry
 
 # Phrases that are LIQUIDATION/urgency language. They are allowed ONLY when the
 # aave-HF is genuinely in the danger zone (< HF_DANGER). When the position is
@@ -82,6 +83,7 @@ def select_primary_pm_state(
         from config import PM_PRIMARY_WALLET as _PMW
         from modules.portfolio_margin import compute_pm_state
     except Exception:  # noqa: BLE001
+        health_registry.swallowed("pm_state", "select_primary_pm_state")
         return None
     try:
         pmw = (_PMW or "").lower()
@@ -117,6 +119,7 @@ def select_primary_pm_state(
             return None
         return pm
     except Exception:  # noqa: BLE001
+        health_registry.swallowed("pm_state", "select_primary_pm_state")
         return None
 
 
@@ -334,4 +337,5 @@ def build_pm_llm_block_from_wallets(
         pm = select_primary_pm_state(wallets, market)
         return build_pm_llm_block(pm)
     except Exception:  # noqa: BLE001
+        health_registry.swallowed("pm_state", "build_pm_llm_block_from_wallets")
         return ""

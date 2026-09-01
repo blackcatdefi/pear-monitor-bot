@@ -46,6 +46,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import modules.integrity_halt as ih
+from modules import health_registry
 
 log = logging.getLogger(__name__)
 
@@ -117,6 +118,7 @@ def normalize_excerpt(s: Any) -> str:
         text = str(s or "").lower().translate(_PUNCT_TABLE)
         return " ".join(text.split())
     except Exception:  # noqa: BLE001
+        health_registry.swallowed("integrity", "normalize_excerpt")
         return ""
 
 
@@ -139,6 +141,20 @@ def fuzzy_ratio(a: Any, b: Any) -> float:
         from rapidfuzz import fuzz
         return float(fuzz.token_set_ratio(na, nb))
     except Exception:  # noqa: BLE001 — fallback keeps reconcile working keyless
+        # R-BOT-DEFINITIVE clase C2: ESTE es el fallback que ya mordio al repo.
+        # rapidfuzz falto en requirements.txt y nadie se entero, porque difflib
+        # no falla: solo puntua distinto. token_set_ratio da ~85 sobre un rumor
+        # parafraseado; difflib sobre los mismos tokens da ~58. Con el umbral de
+        # dedup en el medio, los rumores parafraseados dejaron de deduplicarse y
+        # el conteo de integridad quedo inflado, sin un solo error en los logs.
+        #
+        # El fallback se conserva (deduplicar peor es mejor que no deduplicar),
+        # pero ahora se declara: si esto corre, 'integrity' queda degradado y se
+        # ve en /health y en /diagnostico. Un fallback mas debil y callado es
+        # exactamente lo que esta ronda existe para eliminar.
+        health_registry.swallowed(
+            "integrity",
+            "rapidfuzz no disponible; dedup con difflib (puntua mas bajo)")
         import difflib
         # difflib over sorted token sets approximates token_set_ratio.
         ta = " ".join(sorted(sa))
@@ -281,6 +297,7 @@ def _conn():
                 conn.execute(f"ALTER TABLE integrity_halt ADD COLUMN {name} {decl}")
         conn.commit()
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("integrity", "_conn")
         log.warning("integrity_halt migration failed: %s", exc)
     return conn
 
@@ -300,6 +317,7 @@ def _dismiss(conn, asset: str, reason: str, res: ResolveResult) -> bool:
         )
         return cur.rowcount > 0
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("integrity", "_dismiss")
         log.warning("integrity_reconcile dismiss failed: %s", exc)
         return False
 
@@ -314,6 +332,7 @@ def _touch(conn, asset: str, res: ResolveResult) -> None:
             (res.resolved_asset, res.keyword_family, res.confidence, now, asset.upper()),
         )
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("integrity", "_touch")
         log.warning("integrity_reconcile touch failed: %s", exc)
 
 
@@ -398,5 +417,6 @@ def reconcile_persisted_flags(
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("integrity", "reconcile_persisted_flags")
         log.warning("reconcile_persisted_flags failed: %s", exc)
     return dismissed

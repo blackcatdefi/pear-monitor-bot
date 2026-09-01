@@ -32,6 +32,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from config import DATA_DIR
+from modules import health_registry
 
 log = logging.getLogger(__name__)
 
@@ -123,6 +124,7 @@ def get_since_id() -> str | None:
         conn.close()
         return row["value"] if row and row["value"] else None
     except Exception:
+        health_registry.swallowed("x_api", "get_since_id")
         log.exception("x_store.get_since_id failed")
         return None
 
@@ -149,6 +151,7 @@ def set_since_id(tweet_id: str) -> None:
         conn.commit()
         conn.close()
     except Exception:
+        health_registry.swallowed("x_api", "set_since_id")
         log.exception("x_store.set_since_id failed")
 
 
@@ -165,6 +168,7 @@ def last_fetch_ts() -> datetime | None:
         ts = datetime.fromisoformat(row["updated_at"])
         return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
     except Exception:
+        health_registry.swallowed("x_api", "last_fetch_ts")
         return None
 
 
@@ -201,6 +205,7 @@ def log_fetch(
         conn.commit()
         conn.close()
     except Exception:
+        health_registry.swallowed("x_api", "log_fetch")
         log.exception("x_store.log_fetch failed")
 
 
@@ -214,6 +219,7 @@ def recent_fetch_log(n: int = 5) -> list[dict[str, Any]]:
         conn.close()
         return [dict(r) for r in rows]
     except Exception:
+        health_registry.swallowed("x_api", "recent_fetch_log")
         log.exception("x_store.recent_fetch_log failed")
         return []
 
@@ -261,6 +267,7 @@ def upsert_tweets(tweets: list[dict[str, Any]], source: str = "list") -> int:
         conn.commit()
         conn.close()
     except Exception:
+        health_registry.swallowed("x_api", "upsert_tweets")
         log.exception("x_store.upsert_tweets failed")
     return inserted
 
@@ -279,6 +286,7 @@ def prune_old(hours: int | None = None) -> int:
             log.info("[X_STORE] pruned %d tweets older than %dh", deleted, hours)
         return deleted
     except Exception:
+        health_registry.swallowed("x_api", "prune_old")
         log.exception("x_store.prune_old failed")
         return 0
 
@@ -310,6 +318,7 @@ def get_window(hours: int = 48) -> list[dict[str, Any]]:
                 "url": r["url"],
             })
     except Exception:
+        health_registry.swallowed("x_api", "get_window")
         log.exception("x_store.get_window failed")
     return out
 
@@ -386,6 +395,7 @@ def posts_fetched_since(start_iso: str) -> int:
         conn.close()
         return int(row["n"] or 0)
     except Exception:
+        health_registry.swallowed("x_api", "posts_fetched_since")
         log.exception("x_store.posts_fetched_since failed")
         return 0
 

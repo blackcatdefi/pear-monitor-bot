@@ -1,0 +1,110 @@
+{
+  "_doc": [
+    "R-BOT-DEFINITIVE (2026-09-01) — swallows del money path ACEPTADOS.",
+    "",
+    "Regla que vigila tests/test_silent_degradation_guard.py: en los 25",
+    "archivos del money path, todo `except` que produzca un valor plausible",
+    "tiene que estar en UNO de estos dos estados:",
+    "",
+    "  a) INSTRUMENTADO — el handler llama health_registry.swallowed(), asi",
+    "     que sigue devolviendo su default pero marca el subsistema degradado",
+    "     y eso se ve en /health, en /diagnostico y como banner en la seccion",
+    "     del reporte. La degradacion existe pero esta declarada.",
+    "",
+    "  b) ACEPTADO ACA — con una razon escrita que explique por que ese",
+    "     default NO puede corromper un numero que el dueno lee ni una",
+    "     decision que el bot toma.",
+    "",
+    "Cualquier tercer caso es un default silencioso nuevo y el test falla.",
+    "Agregar una entrada aca obliga a justificarla por escrito; ese es el",
+    "punto. Las razones no son tramite: si no se puede escribir una, el",
+    "swallow no se acepta, se arregla.",
+    "",
+    "La clave es file::func::catches::swallow — no incluye numero de linea a",
+    "proposito, para que editar el archivo alrededor no invalide la entrada."
+  ],
+
+  "_criterio_guardas_de_coercion": [
+    "La mayoria de las entradas de abajo son la misma cosa: un `except",
+    "(TypeError, ValueError)` alrededor de un float()/int() sobre UN valor",
+    "suelto, dentro de un helper de 3 lineas cuyo trabajo declarado es",
+    "'convertir esto a numero o decir que no se pudo'.",
+    "",
+    "Eso NO es la clase de bug de esta ronda. La diferencia es donde nace el",
+    "error: aca nace en el DATO (un campo vino null, vacio o con texto), y el",
+    "llamador ya sabe que ese campo puede faltar y lo trata. En los bugs que",
+    "motivaron la ronda el error nacia en el TRANSPORTE (429, timeout, tabla",
+    "ausente) y se disfrazaba de dato: 'no hubo funding', 'no hubo posts', 'no",
+    "hubo PnL'. Un 0.0 que significa 'este campo venia vacio' es honesto; un",
+    "0.0 que significa 'la API me rechazo' es una mentira.",
+    "",
+    "Instrumentar estas guardas seria activamente malo: marcarian subsistemas",
+    "degradados en operacion normal, el banner estaria siempre encendido y",
+    "dejaria de significar algo. Una alarma que suena siempre no es una alarma."
+  ],
+
+  "accepted": {
+    "auto/capital_calc.py::_get::(TypeError, ValueError)::return 0.0":
+      "Guarda de coercion. _get() lee un campo opcional del estado del fondo y devuelve 0.0 cuando no es numerico. El llamador suma estos valores y ya contempla campos ausentes; un 0.0 aca significa 'ese campo no estaba', que es la verdad.",
+
+    "modules/funding_tracker.py::funding_8h_bps::(TypeError, ValueError)::return None":
+      "Guarda de coercion sobre el rate horario que publica HL. Devuelve None (no 0.0) precisamente para que el llamador distinga 'no se pudo leer' de 'funding cero'; el render imprime n/d en vez de un numero inventado.",
+
+    "modules/hl_borrow_lend.py::_safe_float::(TypeError, ValueError)::return None":
+      "Guarda de coercion de un unico valor. Devuelve None, que el llamador propaga como 'sin dato' en vez de convertirlo en 0.",
+
+    "modules/hl_prices.py::_safe_float::(TypeError, ValueError)::return None":
+      "Guarda de coercion de un unico valor, ademas rechaza NaN explicitamente (f == f). Devuelve None y el llamador omite el activo del mapa de precios en vez de valuarlo en cero.",
+
+    "modules/hype_acquisition.py::_live_hype_balance::(TypeError, ValueError)::return None":
+      "Guarda de coercion sobre el balance spot de HYPE. Devuelve None, y el bloque de PPC ya trata None como 'balance no disponible' y lo dice; no lo convierte en 0 unidades.",
+
+    "modules/hype_acquisition.py::_fetch_fills::(TypeError, ValueError)::pass":
+      "Salta UN fill cuyo px/sz no parsea y sigue con el resto. Relevante para el PPC, pero el conteo de unidades cubiertas se reporta explicitamente contra el balance (ver Fase 3.3), asi que un fill perdido se ve como cobertura incompleta, no como un PPC falsamente exacto.",
+
+    "modules/performance_attribution.py::_get_default_beta::ValueError::pass":
+      "El beta por defecto viene de una env var; si no parsea se usa la constante del modulo. Es configuracion mal escrita, no un dato de mercado, y el valor usado queda expuesto en /diagnostico.",
+
+    "modules/pm_context.py::_f::(TypeError, ValueError)::return 0.0":
+      "Guarda de coercion de un unico campo del contexto de portfolio margin. Los campos que SI mueven decisiones (equity, deuda, LTV) se validan aguas arriba y su ausencia degrada pm_state por via instrumentada.",
+
+    "modules/portfolio.py::_f::(TypeError, ValueError)::return 0.0":
+      "Guarda de coercion de un unico campo de la respuesta de HL. El fallo de transporte de esa misma respuesta esta instrumentado aparte, asi que un 0.0 aca solo puede venir de un campo vacio.",
+
+    "modules/portfolio.py::_to_float::(TypeError, ValueError)::return None":
+      "Guarda de coercion que devuelve None, no 0.0: el llamador distingue ausencia de cero.",
+
+    "modules/portfolio_margin.py::_f::(TypeError, ValueError)::return 0.0":
+      "Guarda de coercion de un unico campo. Mismo criterio que portfolio._f.",
+
+    "modules/portfolio_margin.py::_clean_ltv::(TypeError, ValueError)::pass":
+      "Descarta un LTV no parseable en vez de propagarlo. Un LTV basura es peor que un LTV ausente: alimentaria el calculo de umbral de liquidacion. Descartarlo es la decision correcta y el faltante se ve en el bloque de PM.",
+
+    "modules/portfolio_margin.py::_liq_threshold_for_ltv::(TypeError, ValueError)::pass":
+      "Ignora una entrada mal formada de la tabla de umbrales y sigue buscando en el resto. Si ninguna entrada sirve, la funcion devuelve None y el llamador no imprime umbral, en vez de imprimir uno equivocado. Aparece dos veces (dos bucles de parseo) y el criterio es el mismo.",
+
+    "modules/trade_ledger.py::_alert::Exception::pass":
+      "_alert() es el que MANDA los avisos. Instrumentarlo con health_registry crearia recursion cuando el fallo sea del propio envio, y ademas el llamador ya cuenta los envios fallidos y reporta el conteo. Esta en SKIP_FUNCS de tools/instrument_swallows.py por la misma razon.",
+
+    "modules/trade_ledger.py::_alert::Exception::return False":
+      "Misma funcion, rama que devuelve False. El False es el valor de retorno documentado para 'no se pudo enviar' y el llamador lo suma a su contador de fallos, asi que la degradacion ya viaja por el valor de retorno.",
+
+    "modules/trade_ledger.py::derive_leverage::(TypeError, ValueError)::return None":
+      "Devuelve None = 'no derivable', que es justo lo que resolve_leverage necesita para pasar al siguiente origen (live, y despues assumed). El origen elegido se persiste en leverage_source y se imprime, asi que el ROE derivado de un leverage assumed sale marcado con ~.",
+
+    "modules/trade_ledger.py::resolve_leverage::(TypeError, ValueError)::pass":
+      "Descarta un candidato de leverage no numerico y prueba el siguiente en la cadena de precedencia. El origen final queda registrado en leverage_source.",
+
+    "modules/vault_deposits.py::_safe_float::(TypeError, ValueError)::return 0.0":
+      "Guarda de coercion de un campo de equity de vault. El fallo de transporte y el 200 con shape inesperado — que son los que SI podian borrar equity del NAV — ahora levantan en _as_equity_list(); lo que queda aca es solo un campo vacio.",
+
+    "modules/vault_deposits.py::_safe_int::(TypeError, ValueError)::return 0":
+      "Guarda de coercion de un contador (numero de vaults). Mismo criterio.",
+
+    "modules/vault_history.py::_safe_float::(TypeError, ValueError)::return 0.0":
+      "Guarda de coercion de un punto de la serie historica de vault. Los fallos de lectura de la serie completa estan instrumentados aparte.",
+
+    "modules/x_store.py::set_since_id::(TypeError, ValueError)::pass":
+      "El since_id de X viene como string; si no es un entero se ignora y el cursor queda donde estaba. Eso produce refetch (costo), nunca perdida de tweets. El fallo de ESCRITURA del cursor, que si tiene consecuencias, esta instrumentado en el handler ancho de la misma funcion."
+  }
+}

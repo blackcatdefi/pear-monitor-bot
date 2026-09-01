@@ -571,7 +571,29 @@ async def fetch_timeline_via_list(
                 return None, diag
 
             data = resp.json()
-            batch = data.get("data", [])
+            # C4 (R-BOT-DEFINITIVE): la API v2 de X SI omite 'data' de forma
+            # legitima — cuando la busqueda no devolvio nada manda solo
+            # {"meta": {"result_count": 0}}. Por eso el default [] es correcto
+            # EN ESE CASO y solo en ese. Lo que no se puede seguir haciendo es
+            # tratar cualquier otra ausencia de 'data' como "no hubo posts":
+            # un 200 con un cuerpo que no reconocemos se veria identico a un
+            # dia sin actividad, que es exactamente el bug de esta ronda.
+            _meta = data.get("meta")
+            _meta = _meta if isinstance(_meta, dict) else {}
+            if "data" in data:
+                batch = data["data"]
+                if not isinstance(batch, list):
+                    return None, (
+                        f"200 con shape inesperado: 'data' es "
+                        f"{type(batch).__name__} y se esperaba lista. "
+                        f"Esto NO es 'no hubo posts'.")
+            elif _meta.get("result_count") == 0:
+                batch = []          # vacio declarado por la propia API
+            else:
+                return None, (
+                    f"200 sin clave 'data' y sin meta.result_count=0 "
+                    f"(claves={sorted(data)[:8]}). Esto NO es 'no hubo "
+                    f"posts': es una respuesta que no sabemos leer.")
             tweets_returned_by_api += len(batch)
             log.info(
                 "[X_STORE] page=%d batch=%d meta=%s boundary_since_id=%s",

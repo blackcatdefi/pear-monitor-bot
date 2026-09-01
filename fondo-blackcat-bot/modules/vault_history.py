@@ -27,6 +27,7 @@ import os
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable
+from modules import health_registry
 
 try:
     from config import DATA_DIR
@@ -117,6 +118,7 @@ def record_vault_snapshot(
                 written += 1
             conn.commit()
     except Exception as e:  # noqa: BLE001 — robustness contract
+        health_registry.swallowed("vault", "record_vault_snapshot")
         log.warning("vault_history.record_vault_snapshot failed: %s", e)
         return 0
     return written
@@ -147,6 +149,7 @@ def get_previous_snapshot(
             ).fetchone()
             return dict(row) if row is not None else None
     except Exception as e:  # noqa: BLE001
+        health_registry.swallowed("vault", "get_previous_snapshot")
         log.warning("vault_history.get_previous_snapshot failed: %s", e)
         return None
 
@@ -169,6 +172,7 @@ def get_all_snapshots(
             ).fetchall()
             return [dict(r) for r in rows]
     except Exception as e:  # noqa: BLE001
+        health_registry.swallowed("vault", "get_all_snapshots")
         log.warning("vault_history.get_all_snapshots failed: %s", e)
         return []
 
@@ -214,6 +218,7 @@ def compute_max_drawdown(
             mdd_pct=mdd_pct, mdd_usd=mdd_usd, peak_usd=peak_at_mdd, has_data=True
         )
     except Exception as e:  # noqa: BLE001
+        health_registry.swallowed("vault", "compute_max_drawdown")
         log.warning("vault_history.compute_max_drawdown failed: %s", e)
     return out
 
@@ -327,6 +332,7 @@ def format_vault_evolution_line(
     try:
         ev = compute_vault_evolution(deposit, now=now, db_path=db_path)
     except Exception as e:  # noqa: BLE001
+        health_registry.swallowed("vault", "format_vault_evolution_line")
         log.warning("format_vault_evolution_line failed: %s", e)
         return ""
     if ev.get("basis_source") == "none":
@@ -365,6 +371,7 @@ def format_vault_evolution_block(
     try:
         deposits = list(getattr(result, "deposits", []) or [])
     except Exception:  # noqa: BLE001
+        health_registry.swallowed("vault", "format_vault_evolution_block")
         return ""
     found = [d for d in deposits if getattr(d, "found", False)
              and _safe_float(getattr(d, "equity_usd", 0.0)) > 0]

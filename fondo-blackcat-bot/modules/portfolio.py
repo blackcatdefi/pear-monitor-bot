@@ -17,6 +17,7 @@ from typing import Any
 from config import FUND_WALLETS, HIP3_DEXES, HYPERLIQUID_API, WALLET_FETCH_TIMEOUT, DATA_DIR
 from utils.http import post_json
 from modules import spot_index
+from modules import health_registry
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ def _save_wallet_cache() -> None:
         with open(_WALLET_CACHE_FILE, "w") as f:
             json.dump(_wallet_cache, f, indent=2, default=str)
     except Exception as e:
+        health_registry.swallowed("portfolio", "_save_wallet_cache")
         log.warning("Could not save wallet cache: %s", e)
 
 
@@ -101,6 +103,7 @@ async def frontend_open_orders(wallet: str, dex: str | None = None) -> list[dict
         res = await _info(payload)
         return res if isinstance(res, list) else []
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("portfolio", "frontend_open_orders")
         log.warning("frontend_open_orders for %s (dex=%s) failed: %s", wallet, dex, exc)
         return []
 
@@ -125,6 +128,7 @@ async def fetch_all_open_orders(wallet: str) -> list[dict[str, Any]]:
                 merged.extend(r)
         return merged
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("portfolio", "fetch_all_open_orders")
         log.warning("fetch_all_open_orders for %s failed: %s", wallet, exc)
         return []
 
@@ -174,6 +178,7 @@ async def fetch_fills_since(
             return []
         return [_normalize_fill(f, wallet_label=label) for f in raw]
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("portfolio", "fetch_fills_since")
         log.warning("fetch_fills_since(%s, %s) failed: %s", wallet, since.isoformat(), exc)
         return []
 
@@ -378,6 +383,7 @@ async def _fetch_spot(wallet: str) -> list[dict[str, Any]]:
             })
         return result
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("portfolio", "_fetch_spot")
         log.warning("Fetch spot for %s failed: %s", wallet, exc)
         return []
 
@@ -599,6 +605,7 @@ async def get_spot_price(coin: str) -> float | None:
                 return None
         return None
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("portfolio", "get_spot_price")
         log.warning("get_spot_price(%s) failed: %s", coin, exc)
         return None
 
@@ -633,6 +640,7 @@ async def fetch_recent_fills(wallet: str, hours: int = 24) -> list[dict[str, Any
                 continue
         return recent
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("portfolio", "fetch_recent_fills")
         log.warning("fetch_recent_fills for %s failed: %s", wallet, exc)
         return []
 

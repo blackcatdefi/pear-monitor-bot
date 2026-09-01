@@ -22,6 +22,7 @@ from typing import Any
 
 from config import HYPERLIQUID_API, WALLET_FETCH_TIMEOUT
 from utils.http import post_json
+from modules import health_registry
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +109,7 @@ async def refresh_spot_index_map(force: bool = False) -> dict[str, str]:
             _cache["ts"] = now
             log.info("spot_index: refreshed map (%d pairs)", len(new_map))
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("market", "refresh_spot_index_map")
         log.warning("spot_index: refresh failed (%s) — keeping last map", exc)
     return _cache["map"]
 

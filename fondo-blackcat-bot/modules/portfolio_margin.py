@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from typing import Any
+from modules import health_registry
 
 try:
     from config import (
@@ -507,6 +508,7 @@ def compute_pm_state(
             for k, v in (get_oracle_prices() or {}).items():
                 prices.setdefault(k, v)
         except Exception:  # noqa: BLE001
+            health_registry.swallowed("pm_state", "compute_pm_state")
             pass
     if hype_px is not None and hype_px > 0:
         prices["HYPE"] = hype_px
@@ -820,6 +822,7 @@ def format_pm_state_telegram(
             from modules.alerts_margin import format_perp_cross_util_line
             lines.append(format_perp_cross_util_line(float(perp_cross_util_pct)))
         except Exception:  # noqa: BLE001 — panel must never break on this line
+            health_registry.swallowed("pm_state", "format_pm_state_telegram")
             pass
     # R-PM-MARGIN-MODE-FIX: the hedge framing still shows TOTAL short notional
     # (cross + isolated) as the macro hedge of the leveraged HYPE long, but it

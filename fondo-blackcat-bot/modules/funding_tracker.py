@@ -33,6 +33,7 @@ import logging
 import os
 from dataclasses import dataclass
 from typing import Any
+from modules import health_registry
 
 log = logging.getLogger(__name__)
 
@@ -251,6 +252,7 @@ async def fetch_funding_rates() -> dict[str, float]:
                 continue
         return out
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("funding", "fetch_funding_rates")
         log.warning("fetch_funding_rates failed: %s", exc)
         return {}
 
@@ -411,6 +413,7 @@ def build_funding_block(
         if note:
             head += f" ({note})"
     except Exception:  # noqa: BLE001
+        health_registry.swallowed("funding", "build_funding_block")
         pass
     return head + "\n" + "\n".join(rows)
 
@@ -496,6 +499,7 @@ def build_funding_llm_block(
         if note:
             lines.append(f"(fuente funding: {note})")
     except Exception:  # noqa: BLE001
+        health_registry.swallowed("funding", "build_funding_llm_block")
         pass
     lines.append("═══════ FIN FUNDING PRE-CALCULADO ═══════")
     return "\n".join(lines)

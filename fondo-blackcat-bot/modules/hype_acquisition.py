@@ -33,6 +33,7 @@ import logging
 import os
 from dataclasses import dataclass
 from typing import Any
+from modules import health_registry
 
 log = logging.getLogger(__name__)
 
@@ -94,6 +95,7 @@ def _live_hype_balance(wallet: str) -> float | None:
             {"type": "spotClearinghouseState", "user": wallet}
         )
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("ppc", "_live_hype_balance")
         log.warning("hype_acquisition: balance read failed for %s: %s", wallet, exc)
         return None
     if not isinstance(data, dict):
@@ -120,6 +122,7 @@ def _resolve_spot_map() -> dict[str, str]:
         meta = post_info_sync({"type": "spotMeta"})
         return build_spot_index_map(meta) or {}
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("ppc", "_resolve_spot_map")
         log.warning("hype_acquisition: spotMeta resolve failed: %s", exc)
         return {}
 
@@ -192,6 +195,7 @@ def _fetch_fills(wallet: str) -> list[dict] | None:
         _LAST_FETCH_TRUNCATED = pages_exhausted
         return out
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("ppc", "_fetch_fills")
         log.warning("hype_acquisition: fills read failed for %s: %s", wallet, exc)
         return None
 
@@ -348,6 +352,7 @@ def set_ppc_override(ppc_usd: float, net_acq_usd: float) -> bool:
         conn.close()
         return True
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("ppc", "set_ppc_override")
         log.warning("set_ppc_override failed: %s", exc)
         return False
 
@@ -362,6 +367,7 @@ def clear_ppc_override() -> bool:
         conn.close()
         return cleared
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("ppc", "clear_ppc_override")
         log.warning("clear_ppc_override failed: %s", exc)
         return False
 
@@ -382,6 +388,7 @@ def get_ppc_override() -> dict[str, Any] | None:
             "set_date": str(row["set_ts"] or "")[:10],
         }
     except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("ppc", "get_ppc_override")
         log.warning("get_ppc_override failed: %s", exc)
         return None
 

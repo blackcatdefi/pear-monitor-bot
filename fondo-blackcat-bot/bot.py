@@ -122,7 +122,7 @@ from modules.basket_killer import (
 )
 from modules.pretrade_checklist import build_pretrade_checklist
 from modules.intel_search import format_search_results, search_intel
-from modules.exports import export_dispatch
+from modules.exports import ExportError, export_dispatch
 from modules.weekly_summary import scheduled_summary as weekly_scheduled_summary
 # Round 18 — proactive modules (lazy imports so missing files don't crash boot)
 try:
@@ -1256,6 +1256,18 @@ async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         path, count = await asyncio.to_thread(export_dispatch, tipo, periodo)
     except ValueError as exc:
         await update.message.reply_text(f"❌ {exc}", reply_markup=MAIN_KEYBOARD)
+        return
+    except ExportError as exc:
+        # R-BOT-DEFINITIVE: antes esta rama no existia y el export devolvia un
+        # CSV con cabeceras y cero filas, que se leia como "no hubo actividad
+        # en el periodo". Ahora la fuente inconsultable se dice con su causa.
+        log.warning("/export %s %s degradado: %s", tipo, periodo, exc)
+        await update.message.reply_text(
+            f"⚠️ No se pudo exportar {tipo} ({periodo}).\n"
+            f"Motivo: {exc}\n"
+            f"Esto NO significa que no haya datos: la fuente no se pudo leer.",
+            reply_markup=MAIN_KEYBOARD,
+        )
         return
     except Exception:  # noqa: BLE001
         log.exception("/export failed")

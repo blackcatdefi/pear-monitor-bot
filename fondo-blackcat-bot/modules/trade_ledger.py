@@ -95,6 +95,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from config import DATA_DIR, FUND_WALLETS, PM_PRIMARY_WALLET
+from modules import health_registry
 
 log = logging.getLogger(__name__)
 
@@ -926,6 +927,22 @@ def rebuild_wallet_positions(wallet: str) -> int:
             # corrected assumed leverage would never have reached the rows
             # already stored — every historical ROE would have stayed
             # inflated forever.
+            #
+            # R-BOT-DEFINITIVE, clase C3 (columna del INSERT ausente del SET):
+            #   * `side` faltaba. Se recalcula desde los fills en cada rebuild,
+            #     asi que SI puede cambiar; omitirlo dejaba congelado un side
+            #     mal derivado. Es la misma forma exacta del bug de `leverage`.
+            #     Se agrega directo.
+            #   * `margin_open` y `funding_live_snapshot` se preservaban "de
+            #     casualidad": se leen de `prev` arriba y se re-insertan, asi
+            #     que omitirlos del SET no perdia nada HOY. Pero la garantia
+            #     dependia de que ese read-back siguiera existiendo: si alguien
+            #     simplifica el codigo de arriba, el UPDATE empieza a escribir
+            #     NULL y borra el margen realmente posteado — que es justo el
+            #     dato no recomputable que hace derivable el leverage.
+            #     Se pasan a COALESCE(excluded.x, tabla.x): la intencion
+            #     ("una vez capturado, no se pisa con NULL") queda escrita en
+            #     el SQL en vez de vivir en un detalle del Python.
             con.execute(
                 "INSERT INTO ledger_positions (wallet, coin, side, open_ts, close_ts,"
                 " avg_entry, avg_exit, max_size, notional_open, margin_open, leverage,"
@@ -933,13 +950,19 @@ def rebuild_wallet_positions(wallet: str) -> int:
                 " funding_live_snapshot, funding_delta, gross_pnl, net_pnl, roe_pct,"
                 " cycle_tag) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(wallet, coin, open_ts) DO UPDATE SET "
+                " side=excluded.side,"
                 " close_ts=excluded.close_ts, avg_entry=excluded.avg_entry,"
                 " avg_exit=excluded.avg_exit, max_size=excluded.max_size,"
                 " notional_open=excluded.notional_open,"
-                " margin_open=excluded.margin_open, leverage=excluded.leverage,"
+                " margin_open=COALESCE(excluded.margin_open,"
+                "                      ledger_positions.margin_open),"
+                " leverage=excluded.leverage,"
                 " leverage_source=excluded.leverage_source,"
                 " open_fills=excluded.open_fills, close_fills=excluded.close_fills,"
                 " fees_total=excluded.fees_total, funding_net=excluded.funding_net,"
+                " funding_live_snapshot=COALESCE("
+                "     excluded.funding_live_snapshot,"
+                "     ledger_positions.funding_live_snapshot),"
                 " funding_delta=excluded.funding_delta, gross_pnl=excluded.gross_pnl,"
                 " net_pnl=excluded.net_pnl, roe_pct=excluded.roe_pct,"
                 " cycle_tag=excluded.cycle_tag",
@@ -1075,6 +1098,7 @@ async def sync_all(send: Callable | None = None) -> dict[str, Any]:
                 try:
                     await asyncio.to_thread(rebuild_wallet_positions, w)
                 except Exception:  # noqa: BLE001
+                    health_registry.swallowed("ledger", "sync_all")
                     log.exception("LEDGER recompute failed for %s", w[:6])
             _meta_set("semantics_version", LEDGER_SEMANTICS_VERSION)
             log.info("LEDGER recomputed stored rows at semantics v%s "
@@ -1097,6 +1121,7 @@ async def sync_all(send: Callable | None = None) -> dict[str, Any]:
         try:
             ensure_report_cursor_seeded()
         except Exception:  # noqa: BLE001
+            health_registry.swallowed("ledger", "sync_all")
             log.exception("LEDGER cursor seeding failed (non-fatal)")
 
     # Funding-coverage guard: a wallet that closed positions in the reported
@@ -1116,6 +1141,7 @@ async def sync_all(send: Callable | None = None) -> dict[str, Any]:
                     "numeros como definitivos hasta re-sincronizar.",
                     "ledger_funding", w, "empty", send))
         except Exception:  # noqa: BLE001
+            health_registry.swallowed("ledger", "sync_all")
             log.exception("LEDGER funding-gap check failed for %s", w[:6])
     return result
 
@@ -1345,6 +1371,7 @@ async def run_close_alerts(bot, wallets_payload: list[dict[str, Any]],
                     await _send(bot, chat_id, render_cycle_subtotal(wallet, tag), send)
                     sent += 1
         except Exception:  # noqa: BLE001
+            health_registry.swallowed("ledger", "run_close_alerts")
             log.exception("LEDGER close alert failed for %s %s (non-fatal)",
                           wallet[:6], coin)
 

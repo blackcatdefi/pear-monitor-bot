@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from config import DATA_DIR
+from modules import health_registry
 
 log = logging.getLogger(__name__)
 
@@ -125,6 +126,7 @@ def persist(attr: dict[str, Any], entry_value: float, exit_value: float,
         c.commit()
         c.close()
     except Exception:  # noqa: BLE001
+        health_registry.swallowed("attribution", "persist")
         log.exception("perf_attribution: persist failed")
 
 
@@ -180,5 +182,6 @@ def recent_attributions(limit: int = 5) -> list[dict[str, Any]]:
             for r in rows
         ]
     except Exception:  # noqa: BLE001
+        health_registry.swallowed("attribution", "recent_attributions")
         log.exception("perf_attribution: recent fetch failed")
         return []
