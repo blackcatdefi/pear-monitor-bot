@@ -127,3 +127,58 @@ o vía signup guiado en Brave.
 - ✅ smoke 5/5 series sin error
 - ✅ Outstanding actualizado (8 keys quedan, todas GRACEFUL_NO_KEY)
 - ✅ Arkham permanent-skip documentado
+
+## R-LEDGER-FIX — deploy + verificacion (2026-09-01, 20:10 UTC)
+
+Commits: `9ea8443` (telemetria /health + R-TS-BOUND) y `47a13f0` (job
+ledger_sync) sobre `cbeaa82`. Base de la ronda: `2d527ce`.
+
+### Push
+Device flow de GitHub (client id publico de gh, scope repo). Orden correcto
+esta vez: aviso primero, BCD confirma que esta en github.com/login/device, y
+RECIEN AHI se genera el codigo y se poolea. Los dos codigos que vencieron el
+21/08 fue por generar antes de que estuviera frente a la pantalla.
+
+### Lo que aparecio al verificar
+El primer deploy (`cbeaa82`) dejo `/health` con `semantics_version=null`,
+funding 0.00 en los 5 ciclos y 1 sola wallet en ciclo 2026-08-13. El schema si
+habia migrado. Causa: el recompute one-shot y el backfill de funding viven
+dentro de `sync_all()`, que solo corria desde /reporte y /cierres — la
+migracion estaba esperando que alguien escribiera un comando. Fix: job
+`ledger_sync` (+2 min del boot, despues cada `LEDGER_SYNC_HOURS`, default 6).
+
+### Verificacion post-deploy (todo desde /health, commit 47a13f0)
+- (a) `commit=47a13f0`, service up, 95 comandos registrados.
+- (b) `margin_open=true`, `ledger_sync_health=true`, `semantics_version="2"`.
+- (c) `ciclo 2026-08-13`: **30 patas, 2 wallets, gross 1485.08, fees 69.02,
+  funding -11.35, NET +1404.71**. Funding real tambien en 2026-08-04 (+2.41),
+  2026-07-21 (-18.76), 2026-06-30 (+0.77).
+- (d) `degraded=[]`, `degraded_detail=[]`. Sin banner LEDGER INCOMPLETO.
+- ROE: `assumed_leverage=3.0`. ARB del ciclo queda en **+48.1%** (era +79.5%
+  a 5x). ZK +48.9%, AERO +34.4%, NIL -12.6%.
+- Scope: 5 wallets, la de reto (DreamCash 0x171b) incluida.
+- `leverage_sources` sigue 100% `assumed`: las filas historicas se reconstruyen
+  desde fills, que no traen el margen posteado, asi que no hay de donde derivar.
+  Por eso el ROE conserva el `~`. Se deriva de ahora en mas, en cierres nuevos.
+
+### Bug lateral encontrado y corregido (R-TS-BOUND)
+`x_api_calls.ts` lo escribe SQLite con CURRENT_TIMESTAMP
+("YYYY-MM-DD HH:MM:SS") pero los bounds llegaban en `.isoformat()`
+("YYYY-MM-DDTHH:MM:SS+00:00"). En comparacion TEXT el espacio (0x20) va antes
+de la 'T' (0x54), asi que toda fila del mismo dia que el corte se descartaba:
+`posts_fetched_today()` devolvia 0 SIEMPRE y toda ventana rolling perdia el dia
+frontera — el panel de costos venia mintiendo. Normalizados los dos lados con
+`TS_NORM` / `ts_bound()` en los 7 predicados de intel_memory y en
+`x_store.posts_fetched_since`. `cleanup_old()` queda intacto a proposito
+(intel_memory.timestamp_utc si se escribe con isoformat).
+
+Suite: 1300 passed.
+
+### Pendiente operativo
+`GITHUB_TOKEN` NO esta seteado en Railway (`/health` → `pat_status.
+token_present=false`, name `pear-monitor-bot-round8`). Sin eso, cada push
+depende del device flow. `backboard.railway.app/graphql/v2` SI responde 200
+desde el sandbox, o sea que con un token de Railway se pueden leer las
+variables (`variableUpsert` ya se uso asi en R-KEYS-ASSIST, projectId
+be38a440-37ee-455d-b9bf-0672a30659bb) — pero ese token tiene que llegar como
+archivo (tokens.env), nunca por chat.
