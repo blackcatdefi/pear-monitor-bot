@@ -365,12 +365,23 @@ def store_stats() -> dict[str, Any]:
 # degrades or alters fetch behavior — there is NO limit on X API usage.
 
 def posts_fetched_since(start_iso: str) -> int:
-    """SUM(tweets_returned) from x_api_calls since a UTC ISO timestamp."""
+    """SUM(tweets_returned) from x_api_calls since a UTC ISO timestamp.
+
+    R-TS-BOUND (2026-09-01): x_api_calls.ts lo escribe SQLite con
+    CURRENT_TIMESTAMP ("YYYY-MM-DD HH:MM:SS"), pero el bound llegaba en
+    .isoformat() ("YYYY-MM-DDTHH:MM:SS+00:00"). En comparacion TEXT el espacio
+    (0x20) va ANTES de la 'T' (0x54), asi que toda fila del mismo dia que el
+    corte se descartaba: posts_fetched_today() devolvia 0 SIEMPRE. Se normalizan
+    ambos lados con TS_NORM / ts_bound().
+    """
     try:
+        from modules.intel_memory import TS_NORM, ts_bound
+
         conn = _get_conn()
         row = conn.execute(
-            "SELECT COALESCE(SUM(tweets_returned),0) AS n FROM x_api_calls WHERE ts >= ?",
-            (start_iso,),
+            "SELECT COALESCE(SUM(tweets_returned),0) AS n FROM x_api_calls "
+            "WHERE " + TS_NORM + " >= ?",
+            (ts_bound(start_iso),),
         ).fetchone()
         conn.close()
         return int(row["n"] or 0)

@@ -400,6 +400,93 @@ def _health_banner() -> list[str]:
     return lines
 
 
+def ledger_diagnostics() -> dict[str, Any]:
+    """Read-only ledger state for the PUBLIC /health payload.
+
+    R-LEDGER-FIX post-deploy: production ledger state was unverifiable from
+    outside the box, which is why "funding is zero" survived a whole deploy.
+    This exposes exactly what proves a boot went clean — schema migration,
+    semantics version, leverage provenance histogram, degraded wallets — and
+    deliberately NOT the money detail: no wallet addresses, no per-leg rows,
+    only per-cycle aggregates. NEVER raises: /health must not 500 because a
+    diagnostic did.
+    """
+    out: dict[str, Any] = {"ok": False, "assumed_leverage": ASSUMED_LEVERAGE}
+    try:
+        con = _conn()
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"db unavailable: {exc}"[:200]
+        return out
+    try:
+        cols = {r["name"] for r in con.execute("PRAGMA table_info(ledger_positions)")}
+        tables = {r["name"] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        out["schema"] = {
+            "margin_open": "margin_open" in cols,
+            "ledger_sync_health": "ledger_sync_health" in tables,
+            "semantics_version": _meta_get("semantics_version"),
+            "semantics_expected": LEDGER_SEMANTICS_VERSION,
+        }
+        out["rows"] = {
+            t: int(con.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"])
+            for t in ("ledger_fills", "ledger_funding", "ledger_positions")
+            if t in tables
+        }
+        # D1 tell-tale: how many closed legs still carry EXACTLY zero funding.
+        # A perp position accrues funding hourly, so a high count here means
+        # the carry is missing, not that the market was quiet.
+        out["zero_funding_legs"] = int(con.execute(
+            "SELECT COUNT(*) c FROM ledger_positions WHERE funding_net=0"
+        ).fetchone()["c"]) if "ledger_positions" in tables else None
+        out["leverage_sources"] = {
+            str(r["leverage_source"] or "none"): int(r["n"])
+            for r in con.execute(
+                "SELECT leverage_source, COUNT(*) n FROM ledger_positions "
+                "GROUP BY leverage_source")
+        }
+        # Per-cycle aggregates only — the COMBINADO number, no per-leg detail.
+        out["last_cycles"] = [
+            {"tag": r["cycle_tag"], "legs": int(r["legs"]),
+             "wallets": int(r["wallets"]),
+             "gross": round(float(r["gross"] or 0), 2),
+             "fees": round(float(r["fees"] or 0), 2),
+             "funding": round(float(r["funding"] or 0), 2),
+             "net": round(float(r["net"] or 0), 2)}
+            for r in con.execute(
+                "SELECT cycle_tag, COUNT(*) legs, COUNT(DISTINCT wallet) wallets, "
+                "SUM(gross_pnl) gross, SUM(fees_total) fees, "
+                "SUM(funding_net) funding, SUM(net_pnl) net "
+                "FROM ledger_positions WHERE cycle_tag IS NOT NULL "
+                "GROUP BY cycle_tag ORDER BY MAX(close_ts) DESC LIMIT 5")
+        ]
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = str(exc)[:200]
+        return out
+    finally:
+        con.close()
+    try:
+        scope = ledger_wallets()
+        out["scope"] = sorted(scope.values())
+        bad = degraded_wallets()
+        out["degraded"] = sorted(wallet_label(str(h["wallet"])) for h in bad)
+        out["degraded_detail"] = [
+            {"wallet": wallet_label(str(h["wallet"])),
+             "fills_ok": bool(h["fills_ok"]), "funding_ok": bool(h["funding_ok"]),
+             "detail": str(h.get("detail") or "")[:160]}
+            for h in bad
+        ]
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = str(exc)[:200]
+        return out
+    out["ok"] = (
+        bool(out["schema"]["margin_open"])
+        and bool(out["schema"]["ledger_sync_health"])
+        and out["schema"]["semantics_version"] == LEDGER_SEMANTICS_VERSION
+        and not out["degraded"]
+    )
+    return out
+
+
 async def _alert(text: str, atype: str, entity: str, state: str,
                  send: Callable | None = None) -> bool:
     """ONE deduped Telegram alert. NEVER raises — an alert that cannot be

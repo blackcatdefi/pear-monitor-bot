@@ -220,6 +220,18 @@ def _x_source_safe() -> str:
         return "(unavailable)"
 
 
+def _ledger_status_safe() -> dict:
+    """R-LEDGER-FIX post-deploy telemetry: schema migration, semantics
+    version, leverage provenance and degraded wallets — the state that had
+    to be verifiable from outside the box for a ledger bug to be caught
+    before it reaches a report. Aggregates only, never per-leg detail."""
+    try:
+        from modules.trade_ledger import ledger_diagnostics
+        return ledger_diagnostics()
+    except Exception:  # noqa: BLE001
+        return {"ok": False, "error": "ledger diagnostics unavailable"}
+
+
 def health_payload(commands_count: int) -> dict:
     """JSON payload for /health endpoint (Railway probe)."""
     return {
@@ -245,4 +257,6 @@ def health_payload(commands_count: int) -> dict:
         "pat_status": _pat_status_safe(),
         # R-LTV65-QUIET (2026-08-11): PM LTV params + maint verification.
         "pm_ltv": _pm_ltv_status(),
+        # R-LEDGER-FIX (2026-09-01): ledger schema/health telemetry.
+        "ledger": _ledger_status_safe(),
     }

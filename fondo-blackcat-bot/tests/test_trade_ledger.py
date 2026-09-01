@@ -618,3 +618,56 @@ def test_format_position_line_economics():
     assert "funding +$4.00 (cobra)" in line
     assert "NET +$102.00" in line
     assert "ROE ~" in line                       # assumed leverage marker
+
+
+# ─── /health telemetry (post-deploy verifiability) ──────────────────────────
+
+def test_ledger_diagnostics_shape_and_ok_flag(monkeypatch):
+    """The ledger state had to be verifiable from outside the box: schema,
+    semantics version, leverage provenance, degraded wallets. Aggregates
+    only — no wallet addresses, no per-leg rows on a public endpoint."""
+    _seed_closures()
+    monkeypatch.setattr(tl, "ledger_wallets", lambda: {W: "core", W2: "reto"})
+    tl._meta_set("semantics_version", tl.LEDGER_SEMANTICS_VERSION)
+    tl.set_sync_health(W, ok=True)
+    tl.set_sync_health(W2, ok=True)
+
+    d = tl.ledger_diagnostics()
+    assert d["ok"] is True
+    assert d["schema"]["margin_open"] is True
+    assert d["schema"]["ledger_sync_health"] is True
+    assert d["schema"]["semantics_version"] == tl.LEDGER_SEMANTICS_VERSION
+    assert d["assumed_leverage"] == pytest.approx(3.0)
+    assert d["rows"]["ledger_positions"] == 3
+    assert d["leverage_sources"]["assumed"] == 3
+    assert d["zero_funding_legs"] == 1          # BTC had no funding rows
+    assert d["scope"] == ["core", "reto"] and d["degraded"] == []
+    # aggregates must not leak addresses or per-leg detail
+    blob = repr(d)
+    assert W not in blob and W2 not in blob
+    assert "roe" not in blob.lower() and "coin" not in blob.lower()
+
+    # a degraded wallet flips ok=False and names the label, not the address
+    tl.set_sync_health(W2, ok=False, funding_ok=False, detail="429 en userFunding")
+    d2 = tl.ledger_diagnostics()
+    assert d2["ok"] is False and d2["degraded"] == ["reto"]
+    assert d2["degraded_detail"][0]["funding_ok"] is False
+    assert "429" in d2["degraded_detail"][0]["detail"]
+    assert W2 not in repr(d2)
+
+
+def test_ledger_diagnostics_never_raises(monkeypatch):
+    """/health must not 500 because a diagnostic did."""
+    monkeypatch.setattr(tl, "DB_PATH", "/nonexistent-dir/nope.db")
+    d = tl.ledger_diagnostics()
+    assert d["ok"] is False and "error" in d
+
+    _seed_closures.__doc__  # keep linters quiet about the unused import path
+
+
+def test_health_payload_carries_ledger_block():
+    from modules.version_info import health_payload
+    _seed_closures()
+    p = health_payload(commands_count=1)
+    assert "ledger" in p and isinstance(p["ledger"], dict)
+    assert "schema" in p["ledger"] or "error" in p["ledger"]

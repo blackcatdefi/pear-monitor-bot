@@ -242,3 +242,39 @@ async def test_since_id_and_exclude_never_sent_as_params(fresh_store, monkeypatc
     assert "exclude" not in captured["params"]
     assert "since_id" not in captured["params"]
     assert diag is None
+
+
+# ─── R-TS-BOUND (2026-09-01) — el bug que rompia TODA ventana "since" ───────
+# x_api_calls.ts lo escribe SQLite con CURRENT_TIMESTAMP → "YYYY-MM-DD HH:MM:SS".
+# Los bounds llegaban en .isoformat() → "YYYY-MM-DDTHH:MM:SS+00:00". En
+# comparacion TEXT ' ' (0x20) < 'T' (0x54), asi que CUALQUIER fila cuyo dia
+# coincide con el dia del corte quedaba por debajo del bound y se descartaba.
+# Efecto en prod: posts_fetched_today() == 0 SIEMPRE, y todas las ventanas
+# rolling perdian el dia frontera. Estos tests fallan sin la normalizacion.
+
+def test_posts_fetched_today_counts_a_call_recorded_right_now(fresh_store):
+    from modules import intel_memory as im
+    xs = fresh_store
+    im.record_x_api_call(endpoint="tweets/search", status=200, tweets_returned=300)
+    assert xs.posts_fetched_today() == 300
+    assert xs.posts_fetched_month() == 300
+
+
+def test_x_call_counters_see_a_call_recorded_right_now(fresh_store):
+    from modules import intel_memory as im
+    im.record_x_api_call(endpoint="tweets/search", status=200, tweets_returned=7)
+    assert im.count_x_calls_since(24) == 1
+    assert im.count_x_calls_today_calendar() == 1
+    assert im.count_x_calls_today_live_only() == 1
+    assert im.x_api_cost_projection()["calls_7d"] == 1
+
+
+def test_ts_bound_normalises_both_datetime_and_iso_string():
+    from modules.intel_memory import ts_bound
+    dt = datetime(2026, 9, 1, 0, 0, 0, tzinfo=timezone.utc)
+    assert ts_bound(dt) == "2026-09-01 00:00:00"
+    assert ts_bound("2026-09-01T00:00:00+00:00") == "2026-09-01 00:00:00"
+    assert ts_bound("2026-09-01T00:00:00Z") == "2026-09-01 00:00:00"
+    assert ts_bound("2026-09-01 00:00:00") == "2026-09-01 00:00:00"
+    assert ts_bound("") == ""
+    assert ts_bound(None) == ""

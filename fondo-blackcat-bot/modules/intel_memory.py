@@ -116,6 +116,29 @@ def _get_conn() -> sqlite3.Connection:
 # $5.00 / 1,000 tweets. The old 0.25 figure under-estimated cost by 20x.
 X_API_COST_PER_1K_TWEETS = float(os.getenv("X_API_COST_PER_1K_TWEETS", "5.0"))
 
+# ─── R-TS-BOUND (2026-09-01) — timestamp comparison normaliser ───────────────
+# x_api_calls.ts is written by SQLite CURRENT_TIMESTAMP as "YYYY-MM-DD HH:MM:SS"
+# (space separator, no offset), but every window query bound it with a Python
+# datetime.isoformat(), i.e. "YYYY-MM-DDTHH:MM:SS+00:00". SQLite compares those
+# as TEXT, and ' ' (0x20) sorts BEFORE 'T' (0x54) — so any row whose date part
+# equals the cutoff's date part was silently dropped. Consequence:
+# posts_fetched_today() returned 0 ALWAYS (its cutoff is always today), and
+# every "since" window lost the rows on its boundary day. Same silent-zero
+# class as the ledger funding bug: a wrong answer that looks like a quiet day.
+# Fix centrally — normalise BOTH sides to "YYYY-MM-DD HH:MM:SS".
+TS_NORM = "replace(substr(ts,1,19),'T',' ')"
+
+
+def ts_bound(value: Any) -> str:
+    """Normalise a datetime / ISO string to the stored ts format."""
+    if isinstance(value, datetime):
+        value = value.isoformat()
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    return s.replace("T", " ").rstrip("Z").split("+")[0][:19]
+
+
 
 def record_x_api_call(
     endpoint: str,
@@ -187,9 +210,9 @@ def count_x_calls_since(hours: int = 24) -> int:
     """Count X API calls (all statuses) in the last N hours."""
     try:
         conn = _get_conn()
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        cutoff = ts_bound(datetime.now(timezone.utc) - timedelta(hours=hours))
         row = conn.execute(
-            "SELECT COUNT(*) AS c FROM x_api_calls WHERE ts >= ?",
+            "SELECT COUNT(*) AS c FROM x_api_calls WHERE " + TS_NORM + " >= ?",
             (cutoff,),
         ).fetchone()
         conn.close()
@@ -207,10 +230,10 @@ def official_x_cost_since(since_iso: str = "") -> float:
     as spent and the cheap provider serves)."""
     try:
         conn = _get_conn()
-        since = (since_iso or "").strip().replace("T", " ").rstrip("Z").split("+")[0]
+        since = ts_bound(since_iso)
         row = conn.execute(
             "SELECT COALESCE(SUM(est_cost_usd),0) AS c FROM x_api_calls "
-            "WHERE endpoint NOT LIKE 'provider/%' AND ts >= ?",
+            "WHERE endpoint NOT LIKE 'provider/%' AND " + TS_NORM + " >= ?",
             (since,),
         ).fetchone()
         conn.close()
@@ -224,11 +247,11 @@ def x_api_cost_projection() -> dict[str, Any]:
     """Return daily/weekly/monthly cost projection based on last 7 days of data."""
     try:
         conn = _get_conn()
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        cutoff = ts_bound(datetime.now(timezone.utc) - timedelta(days=7))
         row = conn.execute(
             "SELECT COALESCE(SUM(est_cost_usd),0) AS c, COUNT(*) AS n, "
             "COALESCE(SUM(tweets_returned),0) AS tw "
-            "FROM x_api_calls WHERE ts >= ?",
+            "FROM x_api_calls WHERE " + TS_NORM + " >= ?",
             (cutoff,),
         ).fetchone()
         conn.close()
@@ -258,9 +281,9 @@ def count_x_calls_today_calendar() -> int:
     try:
         conn = _get_conn()
         now = datetime.now(timezone.utc)
-        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        day_start = ts_bound(now.replace(hour=0, minute=0, second=0, microsecond=0))
         row = conn.execute(
-            "SELECT COUNT(*) AS c FROM x_api_calls WHERE ts >= ?",
+            "SELECT COUNT(*) AS c FROM x_api_calls WHERE " + TS_NORM + " >= ?",
             (day_start,),
         ).fetchone()
         conn.close()
@@ -279,9 +302,9 @@ def count_x_calls_today_live_only() -> int:
     try:
         conn = _get_conn()
         now = datetime.now(timezone.utc)
-        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        day_start = ts_bound(now.replace(hour=0, minute=0, second=0, microsecond=0))
         row = conn.execute(
-            "SELECT COUNT(*) AS c FROM x_api_calls WHERE ts >= ? AND status=200",
+            "SELECT COUNT(*) AS c FROM x_api_calls WHERE " + TS_NORM + " >= ? AND status=200",
             (day_start,),
         ).fetchone()
         conn.close()
@@ -383,14 +406,14 @@ def x_cost_breakdown_by_caller(days: int = 7) -> list[dict]:
     """Return per-caller cost breakdown over the last N days for /costos_x."""
     try:
         conn = _get_conn()
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        cutoff = ts_bound(datetime.now(timezone.utc) - timedelta(days=days))
         rows = conn.execute(
             "SELECT caller, COUNT(*) AS calls, "
             "       COALESCE(SUM(tweets_returned),0) AS tweets, "
             "       COALESCE(SUM(est_cost_usd),0) AS cost, "
             "       SUM(CASE WHEN status=200 THEN 1 ELSE 0 END) AS ok, "
             "       SUM(CASE WHEN status<>200 THEN 1 ELSE 0 END) AS fail "
-            "FROM x_api_calls WHERE ts >= ? "
+            "FROM x_api_calls WHERE " + TS_NORM + " >= ? "
             "GROUP BY caller ORDER BY cost DESC",
             (cutoff,),
         ).fetchall()
@@ -420,11 +443,11 @@ def x_cache_hit_rate(days: int = 7) -> dict[str, Any]:
     """
     try:
         conn = _get_conn()
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        cutoff = ts_bound(datetime.now(timezone.utc) - timedelta(days=days))
         row = conn.execute(
             "SELECT COUNT(*) AS total, "
             "       SUM(CASE WHEN status=200 THEN 1 ELSE 0 END) AS ok "
-            "FROM x_api_calls WHERE ts >= ?",
+            "FROM x_api_calls WHERE " + TS_NORM + " >= ?",
             (cutoff,),
         ).fetchone()
         conn.close()
@@ -581,6 +604,9 @@ def format_intel_summary(hours: int = 24, source_filter: str | None = None) -> s
 
 
 def cleanup_old(days: int = 7) -> int:
+    # NOTA: intel_memory.timestamp_utc SI se escribe con .isoformat() (ver
+    # save_intel), a diferencia de x_api_calls.ts que usa CURRENT_TIMESTAMP.
+    # Aca no aplica ts_bound(): romperia la comparacion.
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     conn = _get_conn()
     cur = conn.execute("DELETE FROM intel_memory WHERE timestamp_utc < ?", (cutoff,))
