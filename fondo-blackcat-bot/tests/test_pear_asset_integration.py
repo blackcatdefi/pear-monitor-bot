@@ -199,8 +199,15 @@ def test_hype_acq_nd_when_fills_dont_reconcile(monkeypatch):
     import modules.hype_acquisition as ha
 
     # 1,987 HYPE of buys but 3,006 on-chain → 34% gap → n/d.
+    #
+    # R-BOT-DEFINITIVE Fase 3.3: el gate sigue negandose a inventar un PPC,
+    # pero la RAZON dejo de ser "no confiable" a secas. Este es el caso real
+    # que BCD veia hace semanas sin saber que significaba, asi que el test
+    # ahora exige la explicacion completa: hasta cuando llegan los fills,
+    # cuantas unidades explican y cuantas no.
     fills = [
-        {"coin": "@107", "side": "B", "dir": "Buy", "px": "65.0", "sz": "1987.38"}
+        {"coin": "@107", "side": "B", "dir": "Buy", "px": "65.0",
+         "sz": "1987.38", "time": 1717200000000},   # 2024-06-01
     ]
     monkeypatch.setattr(ha, "_resolve_spot_map", lambda: {"@107": "HYPE"})
     monkeypatch.setattr(ha, "_fetch_fills", lambda w: fills)
@@ -208,7 +215,19 @@ def test_hype_acq_nd_when_fills_dont_reconcile(monkeypatch):
     acq = ha.compute_hype_acquisition("0xc7ae")
     assert acq.known is False
     assert acq.ppc_usd is None and acq.net_acq_usd is None
-    assert "reconcil" in (acq.reason or "")
+    # La cuenta tiene que cerrar y estar expuesta, no resumida en "gap 34%".
+    assert acq.covered_qty == pytest.approx(1987.38)
+    assert acq.uncovered_qty == pytest.approx(3006.28 - 1987.38)
+    assert acq.fills_from_utc == "2024-06-01"
+    assert acq.covered_ppc_usd == pytest.approx(65.0)
+    assert acq.coverage_pct == pytest.approx(66.1, abs=0.2)
+    reason = acq.reason or ""
+    assert "2024-06-01" in reason, (
+        "la razon tiene que decir hasta cuando llegan los fills: sin fecha, "
+        "la linea vuelve a ser una alarma sin significado")
+    assert "1,018.90" in reason and "bridge" in reason
+    assert "no confiable" not in reason, (
+        "'PPC no confiable' era la frase que nadie podia interpretar")
     line = ha.format_hype_acquisition_line(acq)
     assert "n/d" in line
 
@@ -230,6 +249,56 @@ def test_hype_acq_real_ppc_when_fills_reconcile(monkeypatch):
     assert acq.ppc_usd == pytest.approx(64.0, abs=0.01)
     # net acq = (64000 - 8000) / 900 = 62.222…
     assert acq.net_acq_usd == pytest.approx(56000.0 / 900.0, abs=0.01)
+
+
+def test_un_fill_sin_fecha_legible_entra_al_ppc_y_se_declara(monkeypatch):
+    """R-BOT-DEFINITIVE Fase 1.2 — el swallow que encontro el guardian.
+
+    Un fill con `time` ilegible YA sumo a buy_qty y buy_notional: esta adentro
+    del PPC. Antes, el `except: pass` lo dejaba fuera de t_min/t_max, asi que
+    la ventana decia "los fills llegan hasta 2024-06-01" mientras el PPC
+    incluia plata que no estaba en esa ventana.
+
+    El numero no estaba mal; la linea que lo EXPLICA si. Y una explicacion
+    incorrecta de un numero correcto es exactamente la clase de dato plausible
+    y falso que esta ronda existe para eliminar.
+    """
+    import modules.hype_acquisition as ha
+
+    fills = [
+        {"coin": "HYPE", "side": "B", "dir": "Buy", "px": "60.0", "sz": "600",
+         "time": 1717200000000},                      # 2024-06-01
+        {"coin": "HYPE", "side": "B", "dir": "Buy", "px": "20.0", "sz": "400",
+         "time": "no-es-un-numero"},                  # entra al PPC, sin fecha
+    ]
+    monkeypatch.setattr(ha, "_resolve_spot_map", lambda: {})
+    monkeypatch.setattr(ha, "_fetch_fills", lambda w: fills)
+    monkeypatch.setattr(ha, "_live_hype_balance", lambda w: 3000.0)  # gap grande
+    acq = ha.compute_hype_acquisition("0xc7ae")
+
+    # 1) el fill sin fecha SI conto para la plata: 600+400 unidades cubiertas.
+    assert acq.covered_qty == pytest.approx(1000.0), (
+        "el fill sin fecha dejo de contarse en el PPC: se perdio plata")
+    # 2) ...y eso queda declarado en vez de quedar tapado.
+    assert acq.fills_sin_fecha == 1
+    assert acq.fills_from_utc == "2024-06-01"
+    assert "fecha ilegible" in acq.reason, (
+        "la ventana de fechas se publica como si cubriera todo el PPC, pero "
+        "hay un fill adentro del PPC que quedo fuera de la ventana")
+
+
+def test_sin_fills_ilegibles_no_se_ensucia_la_linea(monkeypatch):
+    """El contador nuevo no debe agregar ruido en el caso normal."""
+    import modules.hype_acquisition as ha
+
+    fills = [{"coin": "HYPE", "side": "B", "dir": "Buy", "px": "60.0",
+              "sz": "600", "time": 1717200000000}]
+    monkeypatch.setattr(ha, "_resolve_spot_map", lambda: {})
+    monkeypatch.setattr(ha, "_fetch_fills", lambda w: fills)
+    monkeypatch.setattr(ha, "_live_hype_balance", lambda w: 3000.0)
+    acq = ha.compute_hype_acquisition("0xc7ae")
+    assert acq.fills_sin_fecha == 0
+    assert "ilegible" not in acq.reason
 
 
 def test_hype_acq_nd_when_no_hype_fills(monkeypatch):

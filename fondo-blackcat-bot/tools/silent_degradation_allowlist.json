@@ -62,6 +62,9 @@
     "modules/hype_acquisition.py::_fetch_fills::(TypeError, ValueError)::pass":
       "Salta UN fill cuyo px/sz no parsea y sigue con el resto. Relevante para el PPC, pero el conteo de unidades cubiertas se reporta explicitamente contra el balance (ver Fase 3.3), asi que un fill perdido se ve como cobertura incompleta, no como un PPC falsamente exacto.",
 
+    "modules/hype_acquisition.py::_ms_to_date::(TypeError, ValueError, OSError, OverflowError)::return None":
+      "Formatea un epoch en ms a 'YYYY-MM-DD' solo para mostrar la ventana de fechas de los fills. Devolver None es un 'no se', no un numero plausible: el render lo imprime como 'fecha desconocida' y ninguna cuenta de plata lo toca. Los fills cuya fecha no se pudo leer se cuentan aparte en fills_sin_fecha y se anuncian en la linea del PPC, asi que la ventana nunca se presenta como completa cuando no lo esta.",
+
     "modules/performance_attribution.py::_get_default_beta::ValueError::pass":
       "El beta por defecto viene de una env var; si no parsea se usa la constante del modulo. Es configuracion mal escrita, no un dato de mercado, y el valor usado queda expuesto en /diagnostico.",
 

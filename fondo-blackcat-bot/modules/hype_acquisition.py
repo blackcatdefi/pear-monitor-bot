@@ -72,6 +72,46 @@ class HypeAcquisition:
     onchain_balance: float | None
     reason: str | None = None
 
+    # ── R-BOT-DEFINITIVE Fase 3.3 — el porque, no solo el "no confiable" ──
+    # Durante semanas el bloque de posiciones imprimio "fills no reconcilian
+    # con el saldo, 32% gap — PPC no confiable" y nadie sabia que significaba.
+    # Una linea alarmante cuyo significado se desconoce es peor que no tener
+    # linea: no se puede actuar sobre ella y entrena a ignorar las alarmas.
+    # Estos campos convierten esa frase en un hecho verificable: hasta que
+    # fecha llegan los fills, cuantas unidades del saldo explican y cuantas
+    # no. Con eso el "gap" deja de ser un misterio y pasa a ser una cuenta.
+    fills_from_utc: str | None = None    # fill de HYPE spot mas antiguo visto
+    fills_to_utc: str | None = None      # el mas reciente
+    hype_fills: int = 0                  # cuantos fills de HYPE spot se vieron
+    covered_qty: float = 0.0             # buys − sells (lo que los fills explican)
+    uncovered_qty: float = 0.0           # saldo − covered (lo que no explican)
+    truncated: bool = False              # se agoto la paginacion (historia mas larga)
+    covered_ppc_usd: float | None = None  # PPC de la porcion cubierta, si existe
+    # R-BOT-DEFINITIVE Fase 1.2 — fills que SI entraron al PPC pero cuyo
+    # timestamp no se pudo leer. Sin este contador la ventana de fechas dice
+    # "desde X" mientras el PPC incluye plata de antes de X, y la linea que
+    # EXPLICA el numero queda mintiendo aunque el numero este bien.
+    fills_sin_fecha: int = 0
+
+    @property
+    def coverage_pct(self) -> float | None:
+        """Porcentaje del saldo on-chain que los fills alcanzan a explicar."""
+        if not self.onchain_balance:
+            return None
+        return round(100.0 * self.covered_qty / self.onchain_balance, 1)
+
+
+def _ms_to_date(ms: int | None) -> str | None:
+    """Epoch en ms -> 'YYYY-MM-DD' UTC. None si no hay dato."""
+    if not ms:
+        return None
+    try:
+        from datetime import datetime, timezone
+        return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc).strftime(
+            "%Y-%m-%d")
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+
 
 def _is_hype_spot(coin: Any, spot_map: dict[str, str] | None) -> bool:
     """True iff the fill's coin is the HYPE spot pair (e.g. 'HYPE' or '@107')."""
@@ -232,6 +272,9 @@ def compute_hype_acquisition(
     buy_qty = sell_qty = 0.0
     buy_notional = sell_notional = 0.0
     hype_fills = 0
+    sin_fecha = 0
+    t_min: int | None = None
+    t_max: int | None = None
     for f in fills:
         if not _is_hype_spot(f.get("coin"), spot_map):
             continue
@@ -245,6 +288,20 @@ def compute_hype_acquisition(
         side = str(f.get("side") or "").upper()
         is_buy = side == "B" or str(f.get("dir") or "").lower().startswith("buy")
         hype_fills += 1
+        # Ojo con este bloque: el fill YA sumo a buy_qty/buy_notional arriba,
+        # o sea que ya esta adentro del PPC. Si ademas no se le puede leer la
+        # fecha, queda plata contada dentro de una ventana temporal que no la
+        # incluye. Antes esto era un `pass` y la ventana mentia en silencio;
+        # ahora se cuenta y se publica en el horizonte.
+        try:
+            t = int(f.get("time") or 0)
+        except (TypeError, ValueError):
+            t = 0
+        if t > 0:
+            t_min = t if t_min is None else min(t_min, t)
+            t_max = t if t_max is None else max(t_max, t)
+        else:
+            sin_fecha += 1
         if is_buy:
             buy_qty += sz
             buy_notional += sz * px
@@ -253,12 +310,19 @@ def compute_hype_acquisition(
             sell_notional += sz * px
 
     balance = _live_hype_balance(w)
+    horizon = {"fills_from_utc": _ms_to_date(t_min),
+               "fills_to_utc": _ms_to_date(t_max),
+               "hype_fills": hype_fills,
+               "fills_sin_fecha": sin_fecha,
+               "truncated": bool(_LAST_FETCH_TRUNCATED)}
 
     if hype_fills == 0:
         return HypeAcquisition(
             known=False, ppc_usd=None, net_acq_usd=None,
             buy_qty=0.0, sell_qty=0.0, onchain_balance=balance,
+            uncovered_qty=float(balance or 0.0),
             reason="sin fills de HYPE spot en el historial (saldo migrado/bridged)",
+            **horizon,
         )
 
     # Reliability gate: the fills must explain the live balance.
@@ -267,29 +331,71 @@ def compute_hype_acquisition(
     # real _fetch_fills); the raw len-vs-cap check stays as a belt-and-braces
     # signal for the legacy fallback path.
     truncated = _LAST_FETCH_TRUNCATED or len(fills) >= _FILLS_CAP * _FILLS_MAX_PAGES
+    horizon["truncated"] = bool(truncated)
+    covered_ppc = buy_notional / buy_qty if buy_qty > 0 else None
+
     if balance is None:
         return HypeAcquisition(
             known=False, ppc_usd=None, net_acq_usd=None,
             buy_qty=buy_qty, sell_qty=sell_qty, onchain_balance=None,
+            covered_qty=net_qty, covered_ppc_usd=covered_ppc,
             reason="no se pudo leer el balance HYPE on-chain para reconciliar",
+            **horizon,
         )
     if balance > 0:
         mismatch = abs(net_qty - balance) / balance
     else:
         mismatch = 0.0 if abs(net_qty) < 1e-9 else 1.0
     if mismatch > _RECONCILE_TOL:
-        extra = " (página de fills truncada en el cap)" if truncated else ""
+        # R-BOT-DEFINITIVE Fase 3.3 — decir QUE pasa, no solo que algo pasa.
+        #
+        # El texto viejo era "fills no reconcilian con el saldo, 32% gap —
+        # PPC no confiable". Es cierto y es inutil: no dice por que faltan
+        # unidades ni si eso es un problema. Hay dos causas posibles y son
+        # muy distintas entre si:
+        #
+        #   1. La paginacion se agoto (truncated): la historia es mas larga
+        #      que lo que se puede leer. Es una limitacion de lectura, y ahi
+        #      SI corresponde decir que el dato es incompleto.
+        #   2. La paginacion termino sola y aun asi el saldo es mayor: esas
+        #      unidades entraron por fuera del libro de spot de HL (bridge,
+        #      migracion, transferencia). No falta informacion por leer:
+        #      esas unidades sencillamente no tienen precio de compra EN HL.
+        #      Eso no es una anomalia ni algo para revisar; es la historia
+        #      del saldo, y el PPC manual existe exactamente por eso.
+        uncovered = balance - net_qty
+        desde = horizon["fills_from_utc"] or "fecha desconocida"
+        # Si hubo fills sin fecha legible, la ventana "desde X" NO cubre todo
+        # lo que entro al PPC. Se dice, porque si no la explicacion del gap
+        # apunta a una ventana que no es la real.
+        if sin_fecha:
+            desde += (f" (+{sin_fecha} fill(s) contados en el PPC con fecha "
+                      f"ilegible, fuera de esa ventana)")
+        cov = f"{net_qty:,.2f} de {balance:,.2f}"
+        pct = 100.0 * net_qty / balance if balance else 0.0
+        if truncated:
+            reason = (
+                f"historial de fills incompleto: se agoto la paginacion de la "
+                f"API y solo se alcanza desde {desde}, que explica {cov} HYPE "
+                f"({pct:.0f}%). El auto-PPC de esa porcion seria parcial, asi "
+                f"que no se publica."
+            )
+        else:
+            reason = (
+                f"los fills spot de HL llegan hasta {desde} y explican {cov} "
+                f"HYPE ({pct:.0f}%); las {uncovered:,.2f} HYPE restantes "
+                f"entraron sin operacion de compra en HL (bridge/migracion), "
+                f"asi que no tienen precio de adquisicion on-chain. No es un "
+                f"error: por eso el PPC en uso es el manual."
+            )
         return HypeAcquisition(
             known=False, ppc_usd=None, net_acq_usd=None,
             buy_qty=buy_qty, sell_qty=sell_qty, onchain_balance=balance,
-            reason=(
-                f"fills no reconcilian con el saldo: net {net_qty:.2f} vs "
-                f"on-chain {balance:.2f} HYPE ({mismatch*100:.0f}% gap){extra} "
-                "— PPC no confiable"
-            ),
+            covered_qty=net_qty, uncovered_qty=uncovered,
+            covered_ppc_usd=covered_ppc, reason=reason, **horizon,
         )
 
-    ppc = buy_notional / buy_qty if buy_qty > 0 else None
+    ppc = covered_ppc
     net_acq = (
         (buy_notional - sell_notional) / net_qty if abs(net_qty) > 1e-9 else None
     )
@@ -297,7 +403,8 @@ def compute_hype_acquisition(
         return HypeAcquisition(
             known=False, ppc_usd=None, net_acq_usd=None,
             buy_qty=buy_qty, sell_qty=sell_qty, onchain_balance=balance,
-            reason="sin compras en el historial — PPC indefinido",
+            covered_qty=net_qty, reason="sin compras en el historial — PPC indefinido",
+            **horizon,
         )
     return HypeAcquisition(
         known=True,
@@ -307,6 +414,10 @@ def compute_hype_acquisition(
         sell_qty=sell_qty,
         onchain_balance=balance,
         reason=None,
+        covered_qty=net_qty,
+        uncovered_qty=balance - net_qty,
+        covered_ppc_usd=covered_ppc,
+        **horizon,
     )
 
 
@@ -407,8 +518,15 @@ def format_hype_acquisition_line(acq: HypeAcquisition) -> str:
             f"adq. neta: ${ov['net_acq_usd']:,.2f} (manual, set {ov['set_date']})"
         )
         if not acq.known:
+            # Fase 3.3: la linea secundaria pasa de alarma sin significado a
+            # explicacion cerrada. Se distingue tipograficamente el caso
+            # "asi es la historia del saldo" (informativo) del caso "no
+            # pudimos leer" (aviso), porque son cosas distintas y hasta ahora
+            # se imprimian con el mismo tono.
+            marca = "⚠️" if acq.truncated else "ℹ️"
             line += (
-                f"\n   ℹ️ auto-PPC n/d: {acq.reason or 'no derivable de fills'}"
+                f"\n   {marca} auto-PPC no calculable: "
+                f"{acq.reason or 'no derivable de fills'}"
             )
         return line
     if not acq.known:
