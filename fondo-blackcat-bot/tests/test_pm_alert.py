@@ -233,8 +233,14 @@ def test_runlock_ladder_and_should_fire_untouched():
 # ─── 8. Single PM monitor + commands registered ─────────────────────────────
 def test_single_pm_monitor_not_duplicated():
     import re
-    with open("bot.py", "r", encoding="utf-8") as f:
-        src = f.read()
+    from pathlib import Path
+    # Ruta ABSOLUTA a proposito: con "bot.py" relativo el test solo pasaba si
+    # pytest se corria parado dentro de fondo-blackcat-bot, y desde la raiz del
+    # repo reventaba con FileNotFoundError. Un test que depende del directorio
+    # desde el que se lo invoca falla por donde estas parado, no por lo que
+    # rompiste, y eso lo vuelve ruido.
+    src = (Path(__file__).resolve().parents[1] / "bot.py").read_text(
+        encoding="utf-8")
     # Exactly ONE PM monitor job definition and ONE scheduler registration.
     assert len(re.findall(r"async def _pm_monitor_job", src)) == 1
     assert src.count('id="pm_monitor"') == 1
