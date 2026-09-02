@@ -152,6 +152,9 @@ COMMANDS: List[BotCommand] = [
     BotCommand("health", "Bot alive on-demand: uptime + capital + BTC (ex-heartbeat)", "debug", "cmd_health"),
     # R-BOT-DEFINITIVE Fase 2 — autodiagnostico completo en una sola pantalla.
     BotCommand("diagnostico", "Autodiagnostico completo: subsistemas, ledger, feeds, backup", "debug", "cmd_diagnostico"),
+    # R-BOT-FINAL — el ciclo backup+restauracion deja de ocurrir solo a las
+    # 04:00 UTC: "¿el backup sirve?" pasa a tener respuesta en el momento.
+    BotCommand("backupcheck", "Backup + restauracion real ahora: integridad + filas vs vivas", "debug", "cmd_backupcheck"),
 ]
 
 

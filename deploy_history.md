@@ -52,7 +52,43 @@ Append-only log per Cowork constitución §6 paso 8.
   estado actual, se reescribe en cada corrida y se escribe DESPUES del
   snapshot, asi que compararla contra la viva solo generaba falsas alarmas.
 
-- **suite**: 1403 -> 1423 passed, verde desde los dos cwd y con orden aleatorio
+### Verificacion en produccion, cerrada (lo que faltaba hace cuatro rondas)
+
+- **commit desplegado**: `bde59e9` · **deploy**:
+  `51bfb3f8-c8c2-4b95-90a5-b35fd4a2dcb7` · leido de la cabecera de
+  `/diagnostico` contra el bot vivo, 2026-09-02 23:04 UTC.
+- **el uptime dejo de mentir**: `/health` 23:02 UTC dice "6m" sobre un boot de
+  las 22:56 UTC, y `/diagnostico` 23:04 dice "up 0h". Antes del fix los mismos
+  dos comandos decian "0m" y "up 21h" del mismo proceso.
+- **los exitos se registran**: 5 de los 14 subsistemas ya dicen "ultimo ok hace
+  0h" (Ledger de cierres, Precios y mercado, Oraculo PM/LTV, Posiciones HL,
+  Vault) 10 minutos despues del boot. Los 9 restantes siguen en "nunca" porque
+  su punto de entrada todavia no corrio en este proceso (backup 04:00, gmail e
+  intel por intervalo, X con 0 llamadas hoy, PPC spot no calculable). Eso es lo
+  correcto: "nunca corrio aun" no es "anda bien".
+- **el corte de invariantes ya no parte palabras**: en produccion se leyo la
+  violacion I5 completa, incluida la frase que explica el hallazgo ("un cero
+  exacto es un dato que falta, no un mercado tranquilo"). Antes moria en "…un
+  cero exacto es un".
+- **los feeds rancios se nombran**: `rancios: capitol_trades (2153h),
+  hypertrad (5h), treasuries_bundle (5h), visa_onchain (5h)`. El caso grave no
+  era ASXN sino **capitol_trades, congelado hace 2153h (~90 dias)** y hasta hoy
+  escondido dentro del numero "rancios 4".
+- **ledger**: las 5 wallets con fills ✅ funding ✅ y `sync hace 0h`, o sea que
+  el sync de boot corrio solo.
+
+### /backupcheck (agregado en esta ronda, fuera del mandato original)
+
+El ciclo backup+restauracion+conteos solo existia dentro del cron de las 04:00
+UTC. La pregunta "¿el backup sirve?" tenia respuesta una vez por dia y siempre
+en pasado — el arreglo del backup vacio quedaba sin poder mirarse hasta la
+madrugada siguiente. `/backupcheck` corre EXACTAMENTE `run_backup` y despues
+`verify_latest`, las mismas dos funciones del cron: un camino de verificacion
+propio solo se verificaria a si mismo. Si el backup de hoy falla NO se verifica
+el tarball de ayer, que contestaria "restaurable ✅" a una pregunta que nadie
+hizo. Comandos 97 -> 98.
+
+- **suite**: 1403 -> 1428 passed, verde desde los dos cwd y con orden aleatorio
 - **guarda de degradacion silenciosa**: 0 swallows sin cubrir en el money path
 - **scan de clases de bug**: C1 0 · C3 0 (los binarios) · C2 6 y C4 1, el mismo
   baseline revisado a mano de la ronda anterior

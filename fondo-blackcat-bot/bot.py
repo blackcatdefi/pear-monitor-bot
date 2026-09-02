@@ -1127,6 +1127,63 @@ async def cmd_diagnostico(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 @authorized
 @with_error_logging
+async def cmd_backupcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-BOT-FINAL (2026-09-02) — backup + restauracion, a pedido.
+
+    POR QUE EXISTE. El ciclo completo (hacer el backup, restaurarlo en un
+    temporal, correr integrity_check y comparar los conteos de filas contra las
+    DBs vivas) solo ocurria dentro del cron de las 04:00 UTC. O sea que la
+    pregunta "¿el backup de anoche sirve?" solo tenia respuesta una vez por dia
+    y siempre en pasado. Cuando se arreglo el backup vacio, esa asimetria
+    volvio a morder: el fix estaba en produccion y no habia forma de mirarlo
+    hasta la proxima madrugada.
+
+    Este comando corre EXACTAMENTE el mismo par de funciones que el cron
+    (`run_backup` y despues `verify_latest`), no una version de prueba. Si
+    /backupcheck dice que el backup se restaura, el de las 04:00 tambien, y al
+    reves. Un camino de verificacion distinto del real no verifica el real.
+
+    Es pesado (comprime y restaura): va a un thread y avisa antes de arrancar.
+    """
+    from modules.backup_verify import format_for_telegram, verify_latest
+    from modules.backup_volume import run_backup
+
+    await update.message.reply_text(
+        "\U0001f9ea Corriendo backup + restauracion real\u2026 "
+        "(comprime y restaura, puede tardar)")
+    loop = asyncio.get_event_loop()
+
+    res = await loop.run_in_executor(None, run_backup)
+    if not res.get("ok"):
+        # El backup fallo: verificar el tarball VIEJO diria "ok" y seria una
+        # respuesta verdadera a una pregunta que nadie hizo.
+        await send_long_message(
+            update,
+            f"\U0001f4e6 el backup FALLO: {str(res.get('reason') or '?')[:200]}\n"
+            f"No se verifica nada: el tarball mas nuevo es el de antes, y "
+            f"decir que ese se restaura bien no dice nada del de hoy.",
+            reply_markup=MAIN_KEYBOARD)
+        return
+
+    ver = await loop.run_in_executor(None, verify_latest)
+    mb = (res.get("size_bytes") or 0) / (1024.0 * 1024.0)
+    cab = ("\U0001f4e6 backup nuevo: "
+           f"`{str(res.get('tarball') or '?')[:60]}` ({mb:.1f} MB)")
+    # ok=True significa "el tarball existe", no "todas las DBs entraron sanas".
+    # Si alguna no se pudo snapshotear se dice aca, porque es justo el caso en
+    # que el resto de la salida se lee como un exito y no lo es.
+    fallos = res.get("db_snapshot_fallos") or []
+    if fallos:
+        cab += ("\n\u26a0\ufe0f " + f"{len(fallos)} DB(s) sin snapshot consistente: "
+                + ", ".join(str(f)[:60] for f in fallos[:3]))
+    veredicto = "\u2705 restaurable" if ver.get("ok") else "\u274c NO restaurable"
+    await send_long_message(update,
+                            f"{cab}\n{veredicto}\n\n{format_for_telegram()}",
+                            reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
 async def cmd_test_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Round 16: fire a test alert through the alerts pipeline."""
     msg = (
@@ -4119,6 +4176,8 @@ HANDLER_MAP = {
     "health": cmd_health,
     # R-BOT-DEFINITIVE Fase 2
     "diagnostico": cmd_diagnostico,
+    # R-BOT-FINAL
+    "backupcheck": cmd_backupcheck,
     "test_alerts": cmd_test_alerts,
     "reload_commands": cmd_reload_commands,
     # Round 17

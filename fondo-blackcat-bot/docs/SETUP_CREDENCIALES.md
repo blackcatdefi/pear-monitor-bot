@@ -62,6 +62,16 @@ Nombres, no valores, y sin poder comprobarlos desde la sesion:
 Para saber cual esta y cual no sin abrir el panel de Railway: `/health` expone
 `pat_status`, que es el bloque que reporta el estado del PAT de GitHub.
 
+**Leido en produccion el 2026-09-02 (`/diagnostico`, bloque
+*Autoactualizacion*):** `❌ push a GitHub — falta GITHUB_TOKEN y/o
+GITHUB_REPO`. O sea que al menos una de esas dos NO esta cargada en el
+servicio. Es la unica lectura del secrets store que se puede hacer sin
+credencial de Railway: el bot reporta el efecto, no el contenido.
+
+Consecuencia practica: la autoactualizacion del bot (push + redeploy solos)
+esta apagada por falta de esas dos variables. El deploy sigue funcionando por
+push a `master` desde la sesion, que es la ruta que se uso en esta ronda.
+
 ## Orden de busqueda para la proxima ronda
 
 1. `~/gh_token.txt` — es lo que viene funcionando; probar `git ls-remote` y, si
