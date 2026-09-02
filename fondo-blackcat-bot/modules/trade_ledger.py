@@ -1056,6 +1056,7 @@ async def sync_wallet(wallet: str) -> int:
     return n
 
 
+@health_registry.tracked("ledger", "sync_all")
 async def sync_all(send: Callable | None = None) -> dict[str, Any]:
     """Sync every ledger wallet (serialized behind one lock — safe to call
     from /reporte, /cierres and the alert loop concurrently).

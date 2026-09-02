@@ -324,3 +324,63 @@ def test_snapshot_fallido_queda_registrado_y_no_se_reporta_como_perfecto(entorno
         assert "intel_memory.db" in res["db_snapshot_fallos"][0]
     finally:
         bv._snapshot_db = monkey
+
+
+# ── R-BOT-FINAL (2026-09-02): el conteo tiene que SALIR, no solo calcularse ──
+#
+# En produccion /diagnostico decia, literal: "15 DBs restauradas". Eso es lo
+# mismo que diria una restauracion de 15 sqlites vacios — que es exactamente el
+# modo de falla que este modulo existe para detectar y el que motivo la regla
+# "un backup que no se restauro no es un backup". El numero que prueba algo es
+# cuantas FILAS volvieron, y estaba calculado, guardado en `resumen`... y no
+# publicado en ningun lado. Un dato que nadie ve no verifica nada.
+
+def test_la_linea_de_telegram_dice_cuantas_filas_volvieron(entorno):
+    data, bv, bk = entorno
+    _db_con_filas(data / "intel_memory.db", "ledger_fills", 500)
+    _db_con_filas(data / "pnl.db", "pnl", 120)
+    bv.run_backup()
+    res = bk.verify_latest()
+    assert res["ok"] is True, res["problemas"]
+    assert res["filas_restauradas_total"] == 620
+    assert res["filas_vivas_total"] == 620
+
+    linea = bk.format_for_telegram()
+    assert "620" in linea, (
+        "la verificacion conto 620 filas restauradas y la linea que lee BCD no "
+        "las muestra: '15 DBs restauradas' es indistinguible de 15 sqlites "
+        "vacios")
+    assert "intel_memory" in linea, "no se ve la DB mas grande ni su conteo"
+
+
+def test_el_conteo_tambien_se_ve_cuando_la_verificacion_falla(entorno):
+    """Si algo salio mal, saber cuantas filas volvieron es lo que dice si el
+    problema es cosmetico o si el tarball esta vacio."""
+    data, bv, bk = entorno
+    _db_con_filas(data / "intel_memory.db", "ledger_fills", 400)
+    bv.run_backup()
+    # La DB viva crece despues del backup: el backup queda por debajo del
+    # minimo de cobertura y la verificacion tiene que protestar.
+    _db_con_filas(data / "intel_memory.db", "ledger_fills", 4000)
+    res = bk.verify_latest()
+    assert res["ok"] is False and res["problemas"]
+    linea = bk.format_for_telegram()
+    assert "400" in linea and "4,400" in linea, linea
+
+
+def test_una_verificacion_vieja_sin_conteos_no_rompe_la_linea(entorno):
+    """Compatibilidad: el JSON escrito por la version anterior no tiene los
+    campos nuevos. Tiene que renderizar igual, sin inventar un cero."""
+    import json
+    data, bv, bk = entorno
+    _db_con_filas(data / "pnl.db", "pnl", 10)
+    bv.run_backup()
+    bk.verify_latest()
+    viejo = bk.last_verification()
+    viejo.pop("filas_restauradas_total", None)
+    viejo.pop("filas_vivas_total", None)
+    bk.VERIFY_LAST_PATH.write_text(json.dumps(viejo), encoding="utf-8")
+    linea = bk.format_for_telegram()
+    assert "Backup verificado" in linea
+    assert "0 filas" not in linea, (
+        "sin dato hay que callarse, no imprimir un cero que parece un hallazgo")

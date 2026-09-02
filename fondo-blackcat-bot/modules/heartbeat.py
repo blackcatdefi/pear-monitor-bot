@@ -9,24 +9,28 @@ BTC) y lo consume el comando on-demand ``/health`` en bot.py. NO existe más
 from __future__ import annotations
 
 import logging
-import time
 from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-_PROCESS_START = time.monotonic()
+# R-BOT-FINAL (2026-09-02) — el uptime NO se mide desde el import de este
+# modulo. bot.py importa heartbeat DENTRO de cmd_health (import perezoso), asi
+# que un time.monotonic() capturado aca arrancaba a contar recien en la PRIMERA
+# invocacion de /health. Resultado en produccion: /health decia "Uptime proceso:
+# 0m" mientras /diagnostico decia "up 21h", sobre el mismo proceso. Un cero
+# plausible que nadie cuestiona y que finge un crash-loop que no existe (o peor:
+# taparia uno real, porque siempre diria 0m recien reiniciado).
+#
+# La unica fuente valida es modules.version_info.START_TIME, que si se fija en
+# el boot porque bot.py la importa a nivel de modulo. Se lee la MISMA funcion
+# que usa /version y /diagnostico para que los tres comandos no puedan
+# contradecirse: si el numero esta mal, esta mal en todos lados a la vez, que es
+# la unica forma de que se note.
 
 
 def _uptime_str() -> str:
-    sec = int(time.monotonic() - _PROCESS_START)
-    d, rem = divmod(sec, 86400)
-    h, rem = divmod(rem, 3600)
-    m, _ = divmod(rem, 60)
-    if d:
-        return f"{d}d {h}h {m}m"
-    if h:
-        return f"{h}h {m}m"
-    return f"{m}m"
+    from modules.version_info import format_uptime
+    return format_uptime()
 
 
 async def build_heartbeat() -> str:

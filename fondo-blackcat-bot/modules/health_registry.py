@@ -40,6 +40,8 @@ GARANTIAS
 """
 from __future__ import annotations
 
+import asyncio
+import functools
 import logging
 import os
 import sqlite3
@@ -59,6 +61,12 @@ DB_PATH = os.path.join(DATA_DIR, "intel_memory.db")
 _self_error = 0
 _self_error_last = ""
 _lock = threading.Lock()
+
+# R-BOT-FINAL (2026-09-02) — contador EN PROCESO de degradaciones por
+# subsistema. No se persiste: solo sirve para que ``tracked`` sepa si, entre que
+# entro y que salio una operacion, alguien llamo a swallowed() adentro. Ver el
+# comentario largo en ``tracked`` para por que hace falta.
+_deg_seq: dict[str, int] = {}
 
 
 # ─── catalogo de subsistemas ────────────────────────────────────────────────
@@ -167,6 +175,13 @@ def mark_degraded(subsystem: str, detail: str, meta: str = "") -> None:
         log.warning("SUBSISTEMA DEGRADADO [%s]: %s", subsystem, detail[:200])
     except Exception as exc:  # noqa: BLE001
         _note_self_error(exc)
+    finally:
+        # Fuera del try de arriba a proposito: aunque la ESCRITURA falle, la
+        # degradacion ocurrio y ``tracked`` no debe declarar exito por eso.
+        try:
+            _deg_seq[subsystem] = _deg_seq.get(subsystem, 0) + 1
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def swallowed(subsystem: str, note: str = "") -> None:
@@ -190,6 +205,98 @@ def swallowed(subsystem: str, note: str = "") -> None:
         _note_self_error(exc)
 
 
+# ─── registro de EXITO ──────────────────────────────────────────────────────
+# R-BOT-FINAL (2026-09-02) — el agujero que tapa esta seccion.
+#
+# La ronda anterior instrumento 89 handlers del money path con swallowed(), y
+# quedo un registro que SOLO sabia anotar fracasos. Nadie llamaba nunca a
+# mark_ok(). Consecuencia en produccion, verificada en /diagnostico: los 14
+# subsistemas decian "ultimo ok nunca" mientras el MISMO reporte mostraba "sync
+# hace 4h" y "ultimo backup hace 18h". O sea: el bot funcionaba y su propio
+# panel de salud no tenia forma de saberlo.
+#
+# Eso no es un detalle cosmetico. Rompe tres cosas concretas:
+#   * stale_subsystems() devolvia SIEMPRE los 14, con lo cual "rancio" no
+#     distinguia nada y dejaba de ser una senal.
+#   * un subsistema que de verdad no corre nunca era indistinguible de uno que
+#     anda perfecto — que es exactamente la ceguera que este registro vino a
+#     eliminar.
+#   * last_ok_utc, el dato que las cinco rondas anteriores extranaron ("¿cuando
+#     fue la ultima vez que esto funciono?"), nunca se escribia.
+#
+# El decorador se aplica al punto de entrada de cada subsistema. Se eligio
+# decorador y no context manager por una razon practica: envolver el cuerpo de
+# funciones de 200 lineas obliga a reindentarlas enteras, y un diff asi esconde
+# errores. Una linea arriba de la firma no esconde nada.
+#
+# EL DETALLE QUE IMPORTA: un exito NO puede borrar una degradacion registrada
+# durante la misma operacion. Si fetch_market_data() devuelve un dict pero
+# adentro un swallowed() ya marco que CoinGecko tiro 429, marcar ok al salir
+# borraria justo el aviso que hay que dar. Por eso se compara el contador
+# _deg_seq del subsistema entre la entrada y la salida: si crecio, la operacion
+# "termino" pero no fue un exito, y la degradacion queda en pie.
+
+
+def _mark_ok_if_clean(subsystem: str, before: int, detail: str,
+                      out: Any = None) -> None:
+    if _deg_seq.get(subsystem, 0) != before:
+        return  # hubo un swallowed() adentro: NO es un exito, no lo pises
+    # Varias de estas funciones no levantan nunca: reportan el fracaso
+    # DEVOLVIENDO {"ok": False, "reason": ...} — run_backup() es el caso
+    # tipico, cuando el tar falla. Retornar sin excepcion no es lo mismo que
+    # haber funcionado, y tomar un ok=False explicito como exito seria repetir
+    # el error que este registro existe para cazar.
+    if isinstance(out, dict) and out.get("ok") is False:
+        mark_degraded(subsystem, f"{detail}: {out.get('reason') or out.get('error') or 'devolvio ok=False'}")
+        return
+    mark_ok(subsystem, detail)
+
+
+def tracked(subsystem: str, detail: str = ""):
+    """Decora el punto de entrada de un subsistema para que anote sus exitos.
+
+    * retorno limpio y sin degradaciones internas -> ``mark_ok``.
+    * retorno limpio pero con un ``swallowed()`` adentro -> no toca nada, la
+      degradacion sobrevive.
+    * excepcion -> ``mark_degraded`` y la excepcion SIGUE VIAJANDO. Este
+      decorador nunca traga nada; solo mira.
+
+    Sirve para funciones sync y async.
+    """
+    def deco(fn):
+        nombre = detail or getattr(fn, "__name__", subsystem)
+
+        if asyncio.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def awrap(*a, **kw):
+                before = _deg_seq.get(subsystem, 0)
+                try:
+                    out = await fn(*a, **kw)
+                except Exception:
+                    mark_degraded(subsystem, f"{nombre}: "
+                                  f"{type(sys.exc_info()[1]).__name__}: "
+                                  f"{sys.exc_info()[1]}")
+                    raise
+                _mark_ok_if_clean(subsystem, before, nombre, out)
+                return out
+            return awrap
+
+        @functools.wraps(fn)
+        def wrap(*a, **kw):
+            before = _deg_seq.get(subsystem, 0)
+            try:
+                out = fn(*a, **kw)
+            except Exception:
+                mark_degraded(subsystem, f"{nombre}: "
+                              f"{type(sys.exc_info()[1]).__name__}: "
+                              f"{sys.exc_info()[1]}")
+                raise
+            _mark_ok_if_clean(subsystem, before, nombre, out)
+            return out
+        return wrap
+    return deco
+
+
 def clear(subsystem: str) -> None:
     try:
         with _lock:
@@ -206,6 +313,7 @@ def clear(subsystem: str) -> None:
 
 def reset_all() -> None:
     """Solo para tests y para /diagnostico --reset."""
+    _deg_seq.clear()
     try:
         with _lock:
             con = _conn()

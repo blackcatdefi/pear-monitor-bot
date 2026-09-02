@@ -576,6 +576,7 @@ async def fetch_wallet(wallet: str, label: str) -> dict[str, Any]:
     }
 
 
+@health_registry.tracked("portfolio", "fetch_all_wallets")
 async def fetch_all_wallets() -> list[dict[str, Any]]:
     if not FUND_WALLETS:
         log.warning("fetch_all_wallets: FUND_WALLETS is empty (no FUND_WALLET_N env vars set)")

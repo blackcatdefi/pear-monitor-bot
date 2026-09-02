@@ -21,6 +21,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+# R-BOT-FINAL: registro de exito por subsistema (ver health_registry.tracked).
+from modules import health_registry
+
 log = logging.getLogger(__name__)
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
@@ -168,6 +171,7 @@ def _snapshot_db(src: Path, dst: Path) -> str | None:
     return None
 
 
+@health_registry.tracked("backup", "run_backup")
 def run_backup() -> dict[str, Any]:
     """Compress data files into a single tarball, prune old, push optional."""
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)

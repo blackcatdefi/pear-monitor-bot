@@ -240,6 +240,7 @@ def _fetch_fills(wallet: str) -> list[dict] | None:
         return None
 
 
+@health_registry.tracked("ppc", "compute_hype_acquisition")
 def compute_hype_acquisition(
     wallet: str | None = None,
     *,

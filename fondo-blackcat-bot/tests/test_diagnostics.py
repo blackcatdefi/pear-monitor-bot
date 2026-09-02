@@ -350,3 +350,79 @@ def test_el_encabezado_no_puede_declarar_salud_que_el_cuerpo_desmiente(diag):
             assert str(nunca) in cabecera and "sin ningun exito" in cabecera, (
                 f"hay {nunca} subsistemas que nunca reportaron un exito y el "
                 f"encabezado no los menciona: se lee como un alta medica")
+
+
+# ── R-BOT-FINAL (2026-09-02): un aviso cortado al medio no es un aviso ──────
+
+def test_una_violacion_larga_no_se_corta_al_medio_de_una_palabra():
+    """En produccion se leyo, textual, "...un cero exacto es un" y ahi moria.
+
+    La frase completa ("un cero exacto es un dato que falta, no un mercado
+    tranquilo") es lo unico que le dice al lector si el hallazgo importa. Un
+    `x[:180]` crudo se comia justo esa parte y dejaba una alarma a medio
+    escribir, sin ninguna marca de que hubiera mas texto.
+    """
+    from modules.diagnostics import _corte
+
+    largo = (
+        "I5 funding exactamente cero en ciclo largo: 27 ciclo(s) de mas de 1h "
+        "con funding_net = 0.00 exacto (el mas largo, 20h). El funding de HL "
+        "se acredita por hora: un cero exacto es un dato que falta, no un "
+        "mercado tranquilo.")
+    out = _corte(largo, 180)
+
+    assert out.endswith("… (recortado)"), (
+        "si se recorta hay que decirlo; si no, el lector no sabe que falta "
+        "texto y toma la frase mutilada por completa")
+    cuerpo = out[:-len("… (recortado)")]
+    assert largo.startswith(cuerpo), "el recorte altero el texto"
+    assert not cuerpo.endswith(" "), "quedo un espacio colgando"
+    # La ultima palabra visible tiene que ser una palabra entera del original.
+    ultima = cuerpo.split()[-1]
+    assert f" {ultima} " in largo or largo.split()[-1] == ultima, (
+        f"se corto al medio de una palabra: {ultima!r}")
+
+
+def test_un_texto_corto_no_se_toca():
+    from modules.diagnostics import _corte
+    assert _corte("todo bien", 180) == "todo bien"
+    assert "recortado" not in _corte("x" * 180, 180)
+
+
+def test_el_render_de_invariantes_usa_el_recorte_honesto():
+    from modules.diagnostics import format_diagnosis
+
+    largo = ("I5 funding exactamente cero en ciclo largo: " + "detalle " * 60
+             + "final")
+    txt = format_diagnosis({
+        "ok": False, "problemas": ["x"],
+        "invariantes": {"ok": False, "total": 1, "limite_filas": 500,
+                        "invariantes": [largo], "recomputo": []},
+    })
+    assert "recortado" in txt, (
+        "la seccion de invariantes volvio a cortar en seco: el bullet termina "
+        "en una palabra cualquiera y parece el fin de la frase")
+
+
+def test_los_feeds_rancios_se_nombran_no_solo_se_cuentan():
+    """"rancios 4" no le sirve a nadie.
+
+    En produccion el bloque de Feeds decia "vivos 22 · rancios 4 · muertos 0" y
+    ahi terminaba. Con ese texto es imposible saber si lo que se cayo alimenta
+    un numero que BCD lee o un adorno — y ASXN, el caso conocido de fuente que
+    devuelve data congelada, quedaba escondido dentro de un "4". Los muertos ya
+    se nombraban desde siempre; que los rancios no, era una asimetria sin
+    ninguna razon.
+    """
+    from modules.diagnostics import format_diagnosis
+
+    txt = format_diagnosis({
+        "ok": True, "problemas": [],
+        "feeds": {"vivos": ["a", "b"], "rancios": ["asxn", "hypurrscan"],
+                  "muertos": [], "retirados": [],
+                  "detalle": {"asxn": {"horas": 31.4},
+                              "hypurrscan": {"horas": 9.0}}},
+    })
+    assert "asxn" in txt and "hypurrscan" in txt, (
+        "los feeds rancios siguen escondidos detras de un numero")
+    assert "31h" in txt, "no se dice hace cuanto que el feed no trae nada"

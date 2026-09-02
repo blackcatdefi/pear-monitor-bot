@@ -2,6 +2,64 @@
 
 Append-only log per Cowork constitución §6 paso 8.
 
+## 2026-09-02 — R-BOT-FINAL (cierre de la verificacion en produccion)
+
+- **base commit**: `02be51c` · **service**: pear-monitor-bot
+  (amusing-acceptance) / branch `master`
+- **ruta de credencial que funciona**: token de GitHub en `~/gh_token.txt`
+  (nombre de archivo, nunca el valor). Sin SSH, sin `gh`, sin CLI de Railway y
+  sin `RAILWAY_TOKEN` en la sesion — el inventario completo, por nombre, quedo
+  en `docs/SETUP_CREDENCIALES.md` para que la proxima ronda no lo rehaga.
+- **por que existio esta ronda**: R-BOT-DEFINITIVE se pusheo pero nunca se
+  verifico contra el bot vivo. Al mirarlo, el deploy SI habia entrado
+  (`02be51c`, deploy `5128de64-5c78-4d30-b561-0a95a9c67ca9`, 21h arriba), y la
+  telemetria nueva destapo en el acto tres cosas que llevaban tiempo invisibles.
+
+### Lo que la verificacion en vivo encontro
+
+1. **`/health` mentia el uptime.** `modules/heartbeat.py` capturaba
+   `time.monotonic()` al importarse, y `bot.py` importa ese modulo DENTRO de
+   `cmd_health`. O sea que el cronometro arrancaba en la primera invocacion de
+   `/health`: decia "0m" y despues "6m" mientras `/diagnostico` decia "up 21h"
+   del mismo proceso. Un uptime de 0m es el sintoma exacto de un crash-loop —
+   este bug lo fabricaba cuando no existia y lo habria tapado si existiera.
+   Ahora el uptime sale de `version_info.START_TIME`, el unico reloj fijado en
+   el boot, compartido por `/health`, `/version` y `/diagnostico`.
+2. **El registro de salud solo sabia anotar fracasos.** La ronda anterior
+   instrumento 89 handlers con `swallowed()` y no dejo ni una llamada a
+   `mark_ok()` en todo el codigo de produccion. Resultado: los 14 subsistemas
+   decian "ultimo ok nunca" mientras el mismo reporte mostraba "sync hace 4h" y
+   "ultimo backup hace 18h". El bot funcionaba y su panel de salud no tenia
+   como saberlo. Se agrego `health_registry.tracked()` en el punto de entrada
+   de los 14, con la condicion que hace que el fix no reintroduzca el bug: un
+   exito NO borra una degradacion ocurrida dentro de la misma operacion, y un
+   `{"ok": False}` devuelto sin excepcion tampoco cuenta como exito.
+3. **El backup se verificaba y no se publicaba el numero que prueba algo.**
+   `/diagnostico` decia "15 DBs restauradas", que es exactamente lo que tambien
+   diria una restauracion de 15 sqlites vacios. Los conteos de filas ya se
+   calculaban; ahora se totalizan y se muestran (backup vs vivas, y las tres
+   DBs mas grandes).
+
+### Otros arreglos de lectura
+
+- Los feeds rancios se **nombran** con horas de atraso, en vez de "rancios 4"
+  (asi ASXN, el caso conocido de data congelada, deja de esconderse en un
+  numero).
+- Las violaciones de invariante ya no se cortan al medio de una palabra: en
+  produccion se leyo "…un cero exacto es un" y ahi moria, justo antes de la
+  parte que explica el hallazgo. Se corta en borde de palabra y se avisa.
+- `subsystem_health` pasa a tabla volatil para el verificador de backup: es
+  estado actual, se reescribe en cada corrida y se escribe DESPUES del
+  snapshot, asi que compararla contra la viva solo generaba falsas alarmas.
+
+- **suite**: 1403 -> 1423 passed, verde desde los dos cwd y con orden aleatorio
+- **guarda de degradacion silenciosa**: 0 swallows sin cubrir en el money path
+- **scan de clases de bug**: C1 0 · C3 0 (los binarios) · C2 6 y C4 1, el mismo
+  baseline revisado a mano de la ronda anterior
+- **sin cambios en logica de trading**, sin nuevos pushes recurrentes,
+  `COMPUTE_PM_STATE` sigue solo en la wallet principal, PPC manual respetado y
+  los nombres de comandos intactos.
+
 ## 2026-09-01 — R-BOT-DEFINITIVE (ronda final de endurecimiento)
 
 - **base commit**: `97d42ef` · **head**: ver commit final de la ronda

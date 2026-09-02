@@ -51,6 +51,9 @@ from config import (
     GMAIL_EMAIL,
 )
 
+# R-BOT-FINAL: registro de exito por subsistema (ver health_registry.tracked).
+from modules import health_registry
+
 log = logging.getLogger(__name__)
 
 # Fallbacks only if LIST yields no \Trash folder (never expected on Gmail).
@@ -655,6 +658,7 @@ def _scan_inbox_sync(max_emails: int = 200) -> dict[str, Any]:
         return {"status": "error", "error": str(exc)}
 
 
+@health_registry.tracked("gmail", "scan_gmail_unread")
 async def scan_gmail_unread(max_emails: int = 200) -> dict[str, Any]:
     """Async wrapper — runs IMAP scan in a thread to avoid blocking."""
     return await asyncio.to_thread(_scan_inbox_sync, max_emails)

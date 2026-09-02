@@ -226,6 +226,7 @@ def recent_fetch_log(n: int = 5) -> list[dict[str, Any]]:
 
 # ─── Tweet persistence ──────────────────────────────────────────────────────
 
+@health_registry.tracked("x_api", "upsert_tweets")
 def upsert_tweets(tweets: list[dict[str, Any]], source: str = "list") -> int:
     """Insert fetched tweets keyed by id; returns count of NEW rows.
 

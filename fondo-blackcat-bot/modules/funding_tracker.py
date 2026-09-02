@@ -226,6 +226,7 @@ class PositionFunding:
     expensive_carry: bool     # True only when PAYING ≥ threshold
 
 
+@health_registry.tracked("funding", "fetch_funding_rates")
 async def fetch_funding_rates() -> dict[str, float]:
     """Return ``{coin: hourly_funding_rate}`` from HL metaAndAssetCtxs.
 

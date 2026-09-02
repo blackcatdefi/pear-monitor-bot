@@ -68,6 +68,7 @@ def _get_default_beta(label: str | None) -> float:
     return 1.0
 
 
+@health_registry.tracked("attribution", "compute_attribution")
 def compute_attribution(
     *,
     label: str | None,

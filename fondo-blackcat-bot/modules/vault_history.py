@@ -74,6 +74,7 @@ def _safe_float(v: Any) -> float:
         return 0.0
 
 
+@health_registry.tracked("vault", "record_vault_snapshot")
 def record_vault_snapshot(
     deposits: Iterable[Any],
     *,

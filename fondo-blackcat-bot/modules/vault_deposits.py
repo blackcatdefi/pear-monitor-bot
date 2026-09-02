@@ -245,6 +245,7 @@ def _safe_int(v: Any) -> int:
         return 0
 
 
+@health_registry.tracked("vault", "fetch_vault_deposits")
 def fetch_vault_deposits(force: bool = False) -> VaultDepositsResult:
     """Read every configured deposit's live equity. NEVER raises.
 

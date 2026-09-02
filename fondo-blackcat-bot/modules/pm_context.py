@@ -68,6 +68,7 @@ def _f(v: Any) -> float:
         return 0.0
 
 
+@health_registry.tracked("pm_state", "select_primary_pm_state")
 def select_primary_pm_state(
     wallets: list[dict[str, Any]] | None,
     market: dict[str, Any] | None = None,

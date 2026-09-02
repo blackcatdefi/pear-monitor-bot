@@ -105,6 +105,7 @@ def estimate_cost_usd(model: str, tokens_in: int, tokens_out: int) -> float:
     return (tokens_in / 1_000_000.0) * in_per_mtok + (tokens_out / 1_000_000.0) * out_per_mtok
 
 
+@health_registry.tracked("cost_tracker", "log_llm_call")
 def log_llm_call(model: str, tokens_in: int, tokens_out: int,
                  source: str = "") -> float:
     """Persist one LLM call. Returns USD estimate. Never raises."""

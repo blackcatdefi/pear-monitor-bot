@@ -491,6 +491,28 @@ def _tick(v: Any) -> str:
     return "\u2754"          # None = sin datos, que NO es lo mismo que sano
 
 
+def _corte(texto: Any, limite: int = 260) -> str:
+    """Recorta SIN partir una palabra, y avisa que recorto.
+
+    R-BOT-FINAL (2026-09-02): las violaciones de invariante se imprimian con
+    un `x[:180]` crudo. En produccion eso dejo en pantalla, literal, "...un
+    cero exacto es un" — la frase se cortaba justo antes de la parte que
+    explica QUE significa el hallazgo. El lector veia una alarma a medio
+    escribir y no tenia como saber si el texto seguia en algun lado.
+
+    Cortar por caracteres es razonable; cortar sin decir que cortaste, y
+    encima al medio de una palabra, convierte un aviso en un acertijo.
+    """
+    s = str(texto)
+    if len(s) <= limite:
+        return s
+    corte = s[:limite]
+    espacio = corte.rfind(" ")
+    if espacio > limite * 0.6:
+        corte = corte[:espacio]
+    return corte.rstrip(" ,;:.") + "\u2026 (recortado)"
+
+
 def format_diagnosis(d: dict[str, Any]) -> str:
     L: list[str] = []
     # "TODO OK" afirmaba mas de lo que detectar_problemas realmente chequea.
@@ -538,9 +560,9 @@ def format_diagnosis(d: dict[str, Any]) -> str:
         L.append(f"  {_tick(inv.get('ok'))} {inv.get('total', 0)} violacion(es)"
                  f" sobre las ultimas {inv.get('limite_filas')} filas")
         for x in (inv.get("invariantes") or [])[:6]:
-            L.append(f"     \u2022 {x[:180]}")
+            L.append(f"     \u2022 {_corte(x)}")
         for x in (inv.get("recomputo") or [])[:6]:
-            L.append(f"     \u2022 {x[:180]}")
+            L.append(f"     \u2022 {_corte(x)}")
 
     led = d.get("ledger") or {}
     if led.get("sync_por_wallet"):
@@ -559,6 +581,19 @@ def format_diagnosis(d: dict[str, Any]) -> str:
                  f"rancios {len(fe.get('rancios') or [])} · "
                  f"muertos {len(fe.get('muertos') or [])} · "
                  f"retirados {len(fe.get('retirados') or [])}")
+        # R-BOT-FINAL (2026-09-02): los rancios se NOMBRAN. La linea decia
+        # "rancios 4" y nada mas, con lo cual era imposible saber si lo que se
+        # cayo alimenta un numero que BCD lee o un adorno. "4" no es
+        # accionable; "asxn (31h)" si. Los muertos ya se nombraban; no habia
+        # ninguna razon para que los rancios no.
+        if fe.get("rancios"):
+            det = fe.get("detalle") or {}
+            partes = []
+            for n in fe["rancios"]:
+                h = (det.get(n) or {}).get("horas")
+                partes.append(f"{n} ({h:.0f}h)" if isinstance(h, (int, float))
+                              else n)
+            L.append(f"  \u26a0\ufe0f rancios: {', '.join(partes)}")
         if fe.get("muertos"):
             L.append(f"  \u274c muertos: {', '.join(fe['muertos'])}")
         if fe.get("retirados"):

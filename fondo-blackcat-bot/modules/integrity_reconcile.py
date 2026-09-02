@@ -336,6 +336,7 @@ def _touch(conn, asset: str, res: ResolveResult) -> None:
         log.warning("integrity_reconcile touch failed: %s", exc)
 
 
+@health_registry.tracked("integrity", "reconcile_persisted_flags")
 def reconcile_persisted_flags(
     positions: list[dict[str, Any]] | None,
     *,

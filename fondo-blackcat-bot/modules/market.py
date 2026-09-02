@@ -267,6 +267,7 @@ async def defillama_stablecoin_supply() -> dict[str, Any]:
 
 
 # ─── Aggregate ──────────────────────────────────────────────────────────────
+@health_registry.tracked("market", "fetch_market_data")
 async def fetch_market_data() -> dict[str, Any]:
     prices, glob, fng, cg, cg_basket, fees, stables = await asyncio.gather(
         coingecko_prices(),

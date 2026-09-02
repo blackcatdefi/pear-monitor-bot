@@ -61,7 +61,16 @@ COBERTURA_MINIMA = 0.5
 # Tablas que se vacian solas (caches, dedup con TTL): un conteo bajo en estas
 # no dice nada. Se listan explicitamente para no inventar excusas despues.
 TABLAS_VOLATILES = {"alert_dedup", "dedup", "rate", "cache", "source_state",
-                    "intel_calls", "x_api_calls"}
+                    "intel_calls", "x_api_calls",
+                    # R-BOT-FINAL: subsystem_health es estado ACTUAL, una fila
+                    # por subsistema, reescrita en cada corrida. Nunca es
+                    # historia y no se restaura: si se pierde, cada subsistema
+                    # la vuelve a escribir la primera vez que corre. Ademas se
+                    # escribe DESPUES del snapshot (el propio run_backup marca
+                    # su exito al terminar), asi que en el tarball siempre va a
+                    # ir una version anterior. Compararla contra la viva solo
+                    # produce falsas alarmas.
+                    "subsystem_health"}
 
 
 # ── DBs que el fondo NO puede recomputar (Fase 5.2) ─────────────────────────
@@ -210,7 +219,13 @@ def verify_latest(*, tarball: Path | None = None) -> dict[str, Any]:
         for db in dbs:
             info = _inspeccionar(db)
             vivo = DATA_DIR / db.name
-            info["filas_backup"] = sum(v for v in info["tablas"].values() if v > 0)
+            # Los totales excluyen las tablas volatiles, de los DOS lados. Si
+            # se contara todo, el total de la viva incluiria dedups y caches
+            # que rotan solos y la comparacion backup/viva dejaria de medir lo
+            # unico que interesa: los datos que NO se pueden recomputar.
+            info["filas_backup"] = sum(
+                v for t, v in info["tablas"].items()
+                if v > 0 and not _es_volatil(t))
             info["filas_vivas"] = None
             info["critica"] = db.name in DBS_CRITICAS
 
@@ -224,9 +239,14 @@ def verify_latest(*, tarball: Path | None = None) -> dict[str, Any]:
             if vivo.exists():
                 vivo_info = _inspeccionar(vivo)
                 info["filas_vivas"] = sum(
-                    v for v in vivo_info["tablas"].values() if v > 0)
+                    v for t, v in vivo_info["tablas"].items()
+                    if v > 0 and not _es_volatil(t))
+                # Las volatiles se excluyen tambien de "faltan tablas": una
+                # tabla de estado creada despues del ultimo backup no es un
+                # backup incompleto, es un backup viejo. Y un backup viejo ya
+                # se reporta como tal en `edad_horas`.
                 faltantes = [t for t in vivo_info["tablas"]
-                             if t not in info["tablas"]]
+                             if t not in info["tablas"] and not _es_volatil(t)]
                 if faltantes:
                     problemas.append(
                         f"{db.name}: al backup le faltan tablas que la DB viva "
@@ -260,11 +280,22 @@ def verify_latest(*, tarball: Path | None = None) -> dict[str, Any]:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    # R-BOT-FINAL (2026-09-02) — los conteos por DB ya se calculaban y se
+    # guardaban en `resumen`, pero no salian por ningun lado: /diagnostico decia
+    # "15 DBs restauradas" y punto. "15 DBs restauradas" es exactamente lo que
+    # tambien diria una restauracion de 15 sqlites vacios, que es el modo de
+    # falla que este modulo existe para detectar. El numero que prueba algo es
+    # cuantas filas volvieron, asi que se agrega y se publica.
+    filas_bk = sum(int(v.get("filas_backup") or 0) for v in detalle.values())
+    filas_vivas = sum(int(v.get("filas_vivas") or 0) for v in detalle.values()
+                      if v.get("filas_vivas") is not None)
     res = {
         "ok": not problemas,
         "tarball": tar_path.name,
         "edad_horas": edad_h,
         "dbs_verificadas": len(detalle),
+        "filas_restauradas_total": filas_bk,
+        "filas_vivas_total": filas_vivas,
         "dbs_criticas_declaradas": len(DBS_CRITICAS),
         "problemas": problemas,
         "detalle": detalle,
@@ -325,16 +356,39 @@ def format_for_telegram() -> str:
                 "probo jamas si se pueden restaurar.")
     h = horas_desde_verificacion()
     edad = f"{h:.0f}h" if h is not None else "?"
+    # Los conteos van en las DOS ramas: si la verificacion fallo, saber cuantas
+    # filas volvieron contra cuantas hay vivas es justo lo que dice si el
+    # problema es cosmetico o si el backup esta vacio.
+    fbk = last.get("filas_restauradas_total")
+    fviv = last.get("filas_vivas_total")
+    if fbk is None:
+        conteo = ""   # verificacion vieja, de antes de que esto se guardara
+    else:
+        pct = (f" ({100.0 * fbk / fviv:.0f}% de las vivas)"
+               if isinstance(fviv, int) and fviv > 0 else "")
+        conteo = f"\n  · {fbk:,} filas restauradas vs {fviv:,} vivas{pct}"
+    top = last.get("resumen") or {}
+    mayores = sorted(
+        ((k, v.get("filas_backup") or 0, v.get("filas_vivas"))
+         for k, v in top.items() if isinstance(v, dict)),
+        key=lambda x: -int(x[1]))[:3]
+    if mayores:
+        conteo += "\n  · " + " · ".join(
+            f"{k.replace('.db','')} {n:,}/{m if m is not None else '?'}"
+            for k, n, m in mayores)
     if last.get("ok"):
         return (f"🧪 *Backup verificado* ✅ hace {edad}\n"
                 f"  · `{last.get('tarball','?')}` "
                 f"({last.get('edad_horas','?')}h de antiguedad)\n"
                 f"  · {last.get('dbs_verificadas',0)} DBs restauradas, "
-                f"integridad ok y conteos coherentes con las vivas")
+                f"integridad ok y conteos coherentes con las vivas"
+                f"{conteo}")
     probs = last.get("problemas") or []
     lines = [f"🧪 *Backup verificado* ❌ hace {edad} — {len(probs)} problema(s)"]
     for p in probs[:5]:
         lines.append(f"  · {p}")
+    if conteo:
+        lines.append(conteo.lstrip("\n"))
     return "\n".join(lines)
 
 

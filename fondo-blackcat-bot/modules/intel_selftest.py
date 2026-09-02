@@ -18,6 +18,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+# R-BOT-FINAL: registro de exito por subsistema (ver health_registry.tracked).
+from modules import health_registry
+
 log = logging.getLogger(__name__)
 
 PER_MODULE_TIMEOUT = 10.0
@@ -161,6 +164,7 @@ def _classify_inner(name: str, data: Any, latency_ms: int) -> dict[str, Any]:
     return {"name": name, "status": "UNKNOWN", "latency_ms": latency_ms, "reason": "no series"}
 
 
+@health_registry.tracked("intel_feeds", "run_selftest")
 async def run_selftest() -> dict[str, Any]:
     """Run all 30 intel30 modules in parallel and return matrix dict."""
     from modules.intel30 import ALL_MODULES
