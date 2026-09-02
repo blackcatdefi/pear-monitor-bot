@@ -129,6 +129,45 @@ def _push_to_github(tarball: Path) -> tuple[bool, str]:
             shutil.rmtree(work, ignore_errors=True)
 
 
+def _snapshot_db(src: Path, dst: Path) -> str | None:
+    """Copia CONSISTENTE de una sqlite viva usando su propia API de backup.
+
+    R-BOT-DEFINITIVE Fase 5.1 — por que esto no era opcional.
+    ---------------------------------------------------------
+    El backup viejo hacia tar.add() del archivo .db tal cual estaba en disco,
+    mientras el bot escribia. Con WAL activo (que es el modo de estas DBs) el
+    .db solo, sin su -wal, puede quedar en un estado que sqlite considera
+    corrupto o simplemente viejo: las ultimas transacciones viven en el -wal,
+    y el glob '*.db' nunca lo incluia.
+
+    El resultado era un backup que se creaba sin errores, pesaba lo esperado,
+    se guardaba con fecha y NO se podia restaurar. Nadie lo iba a descubrir
+    hasta el dia que hiciera falta restaurarlo, que es el peor dia posible.
+
+    sqlite3.Connection.backup() resuelve las dos cosas: toma el snapshot bajo
+    lock, incluye lo que este en el WAL, y produce un archivo que ya es
+    consistente por construccion.
+
+    Devuelve None si salio bien, o el motivo del fallo.
+    """
+    import sqlite3
+    try:
+        src_con = sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=15.0)
+    except sqlite3.Error as e:
+        return f"open_ro: {e!s:.60s}"
+    try:
+        dst_con = sqlite3.connect(str(dst), timeout=15.0)
+        try:
+            src_con.backup(dst_con)
+        finally:
+            dst_con.close()
+    except sqlite3.Error as e:
+        return f"backup_api: {e!s:.60s}"
+    finally:
+        src_con.close()
+    return None
+
+
 def run_backup() -> dict[str, Any]:
     """Compress data files into a single tarball, prune old, push optional."""
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
@@ -137,13 +176,31 @@ def run_backup() -> dict[str, Any]:
     tarball = BACKUP_DIR / name
     files = _files_to_backup()
     bytes_before = sum(p.stat().st_size for p in files if p.exists())
+    stage = DATA_DIR / "_backup_stage"
+    shutil.rmtree(stage, ignore_errors=True)
+    db_fallos: list[str] = []
     try:
+        stage.mkdir(parents=True, exist_ok=True)
         with tarfile.open(tarball, "w:gz") as tar:
             for p in files:
+                if p.suffix == ".db":
+                    snap = stage / p.name
+                    err = _snapshot_db(p, snap)
+                    if err is None and snap.exists():
+                        tar.add(snap, arcname=p.name)
+                        continue
+                    # Si el snapshot falla se guarda el archivo crudo igual —
+                    # algo es mejor que nada — pero el fallo QUEDA REGISTRADO
+                    # en el resultado. Un backup degradado que se reporta como
+                    # perfecto es la misma clase de mentira que el resto de
+                    # esta ronda viene a eliminar.
+                    db_fallos.append(f"{p.name}: {err or 'snapshot vacio'}")
                 tar.add(p, arcname=p.name)
     except (OSError, tarfile.TarError) as e:
         return {"ok": False, "reason": f"tar_fail: {e!s:.80s}",
                 "ts_utc": int(time.time())}
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
     pruned = _prune_old_backups()
     pushed_ok, push_reason = _push_to_github(tarball)
     out = {
@@ -157,6 +214,11 @@ def run_backup() -> dict[str, Any]:
         "pruned_n": pruned,
         "pushed": pushed_ok,
         "push_reason": push_reason,
+        # Fase 5.1: si alguna DB no pudo snapshotearse de forma consistente,
+        # se dice aca y /health lo muestra. 'ok' sigue siendo True porque el
+        # tarball existe, pero 'db_snapshot_fallos' impide que se lea como
+        # un backup restaurable cuando no lo es.
+        "db_snapshot_fallos": db_fallos,
     }
     try:
         with BACKUP_LAST_PATH.open("w", encoding="utf-8") as fh:
