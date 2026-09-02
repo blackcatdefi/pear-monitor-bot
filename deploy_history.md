@@ -2,6 +2,29 @@
 
 Append-only log per Cowork constitución §6 paso 8.
 
+## 2026-09-01 — R-BOT-DEFINITIVE (ronda final de endurecimiento)
+
+- **base commit**: `97d42ef` · **head**: ver commit final de la ronda
+- **service**: pear-monitor-bot (amusing-acceptance) / branch `master`
+- **deploy**: automatico por push a master (no hubo token de Railway en esta
+  sesion, asi que el deploy_id NO se pudo capturar ni verificar desde aca).
+- **suite**: 1300 -> 1402 passed, verde desde los dos cwd y con orden aleatorio
+- **comandos**: 95 -> 97 (`/diagnostico`, `/trackrecord`)
+- **fases**: 0 (autosuficiencia) · 1 (barrido de degradacion silenciosa) ·
+  2 (/health como fuente unica + selftest) · 3 (invariantes + recompute
+  independiente + PPC) · 4 (feeds) · 5 (backup verificable) · 6 (/trackrecord)
+- **hallazgo principal**: el backup nocturno no estaba viejo, no tenia tablas.
+  `tar.add()` sobre el .db crudo con una conexion viva abierta empaqueta un
+  sqlite sin el WAL integrado. Demostrado: 1000 filas, la copia cruda levanta
+  "no such table". Venia informando exito todas las noches.
+- **variables que deben vivir en el secrets store de Railway** (nombres, nunca
+  valores): `GITHUB_TOKEN`, `GITHUB_REPO` (autoactualizacion, Fase 0.3);
+  `FRED_API_KEY`, `ARKHAM_API_KEY` (pendientes de alta por BCD).
+- **variables nuevas, todas con default seguro**: `AUTODIAG_ENABLED`,
+  `AUTODIAG_HORAS` (6), `AUTODIAG_COOLDOWN_H` (24), `VOLUME_ALERT_PCT`.
+- **pendiente de verificacion en vivo**: `/health` con el commit nuevo y la
+  salida real de `/diagnostico` en produccion.
+
 ## 2026-05-08T16:45:21Z — R-INTEL30-PHASE1-VALIDATION (redeploy, env var update)
 
 - **commit**: `6e83adb` (R-INTEL30-PHASE1 hotfix — fix 5 broken endpoints)

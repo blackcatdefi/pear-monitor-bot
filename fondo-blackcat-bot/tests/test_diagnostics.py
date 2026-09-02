@@ -325,3 +325,28 @@ def test_autoactualizacion_nunca_expone_un_valor_de_secreto(diag, monkeypatch):
     assert "ghp_secretito_que_no_debe_salir" not in plano
     assert out["github_token_var"] == "GITHUB_TOKEN"
     assert out["puede_pushear"] is True
+
+
+def test_el_encabezado_no_puede_declarar_salud_que_el_cuerpo_desmiente(diag):
+    """El resumen se lee primero y a veces es lo unico que se lee.
+
+    El encabezado viejo decia "TODO OK" en un arranque limpio, conviviendo con
+    14 subsistemas en "ultimo ok nunca" y dos ❌ visibles tres lineas mas abajo.
+    Afirmaba mas de lo que detectar_problemas chequea: que no haya problemas
+    ACCIONABLES no es que este todo verificado, y "nadie lo probo nunca" no es
+    "anda bien" (misma doctrina que None != True).
+    """
+    d = diag.full_diagnosis()
+    texto = diag.format_diagnosis(d)
+    cabecera = texto.split("\n")[0]
+
+    assert "TODO OK" not in cabecera, (
+        "el encabezado volvio a afirmar salud global sin haberla verificado")
+    if d.get("ok"):
+        assert "SIN PROBLEMAS ACCIONABLES" in cabecera
+        nunca = sum(1 for e in (d["subsistemas"].get("subsystems") or {}).values()
+                    if e.get("stale_hours") is None)
+        if nunca:
+            assert str(nunca) in cabecera and "sin ningun exito" in cabecera, (
+                f"hay {nunca} subsistemas que nunca reportaron un exito y el "
+                f"encabezado no los menciona: se lee como un alta medica")

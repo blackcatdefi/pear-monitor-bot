@@ -493,8 +493,25 @@ def _tick(v: Any) -> str:
 
 def format_diagnosis(d: dict[str, Any]) -> str:
     L: list[str] = []
-    cab = "\u2705 TODO OK" if d.get("ok") else \
-        f"\u274c {len(d.get('problemas') or [])} PROBLEMA(S)"
+    # "TODO OK" afirmaba mas de lo que detectar_problemas realmente chequea.
+    # En un arranque limpio convivia con 14 subsistemas en "ultimo ok nunca" y
+    # dos ❌ visibles tres lineas mas abajo, o sea que el encabezado decia que
+    # estaba todo bien mientras el cuerpo mostraba lo contrario. Un resumen que
+    # no coincide con su propio detalle es la misma clase de dato plausible y
+    # falso que esta ronda vino a eliminar, y encima es el que se lee primero.
+    #
+    # Ahora el encabezado dice exactamente lo que verifico: que no hay
+    # problemas accionables. Los subsistemas que nunca reportaron un exito se
+    # cuentan aparte, porque "nadie lo probo nunca" no es "anda bien".
+    sub = d.get("subsistemas") or {}
+    nunca = sum(1 for e in (sub.get("subsystems") or {}).values()
+                if e.get("stale_hours") is None)
+    if d.get("ok"):
+        cab = "\u2705 SIN PROBLEMAS ACCIONABLES"
+        if nunca:
+            cab += f" · {nunca} subsistema(s) sin ningun exito registrado aun"
+    else:
+        cab = f"\u274c {len(d.get('problemas') or [])} PROBLEMA(S)"
     L.append(f"\U0001f9ea *DIAGNOSTICO* — {cab}")
     L.append(f"commit `{d.get('commit')}` · deploy `{d.get('deploy_id')}` · "
              f"up {d.get('uptime_segundos', 0) // 3600}h · "
@@ -505,7 +522,6 @@ def format_diagnosis(d: dict[str, Any]) -> str:
         for x in d["problemas"]:
             L.append(f"  \u2022 {x}")
 
-    sub = d.get("subsistemas") or {}
     L.append("\n*Subsistemas*")
     for nombre, e in sorted((sub.get("subsystems") or {}).items()):
         h = e.get("stale_hours")
