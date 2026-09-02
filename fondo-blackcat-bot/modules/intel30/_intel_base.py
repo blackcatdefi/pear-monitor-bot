@@ -151,6 +151,16 @@ def _state_db() -> sqlite3.Connection:
         "source TEXT PRIMARY KEY, status TEXT, last_change_utc TEXT, "
         "consecutive_fails INTEGER DEFAULT 0)"
     )
+    # R-BOT-DEFINITIVE Fase 4.2: hasta ahora la tabla solo sabia "como esta
+    # AHORA". Con eso no se puede responder la unica pregunta que importa
+    # cuando una fuente se cae: DESDE CUANDO. Una fuente muerta hace tres
+    # meses y una que fallo en este run se veian exactamente igual.
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(source_state)")}
+        if "last_success_utc" not in cols:
+            conn.execute("ALTER TABLE source_state ADD COLUMN last_success_utc TEXT")
+    except sqlite3.DatabaseError:  # pragma: no cover - DB corrupta
+        pass
     return conn
 
 
@@ -160,18 +170,24 @@ def set_source_state(source: str, status: str) -> tuple[str, str]:
     try:
         with _state_db() as conn:
             row = conn.execute(
-                "SELECT status, consecutive_fails FROM source_state WHERE source=?",
+                "SELECT status, consecutive_fails, last_success_utc "
+                "FROM source_state WHERE source=?",
                 (source,),
             ).fetchone()
             prev_status = row[0] if row else "UNKNOWN"
             prev_fails = row[1] if row else 0
+            prev_ok = row[2] if row else None
             new_fails = prev_fails + 1 if status != LIVE else 0
+            # El exito NO se pisa cuando la fuente falla: se conserva el ultimo
+            # bueno, que es justamente el dato que permite decir "muerta hace N".
+            last_ok = now if status == LIVE else prev_ok
             conn.execute(
-                "INSERT INTO source_state(source, status, last_change_utc, consecutive_fails) "
-                "VALUES(?,?,?,?) "
+                "INSERT INTO source_state(source, status, last_change_utc, "
+                "consecutive_fails, last_success_utc) VALUES(?,?,?,?,?) "
                 "ON CONFLICT(source) DO UPDATE SET status=excluded.status, "
-                "last_change_utc=excluded.last_change_utc, consecutive_fails=?",
-                (source, status, now, new_fails, new_fails),
+                "last_change_utc=excluded.last_change_utc, consecutive_fails=?, "
+                "last_success_utc=excluded.last_success_utc",
+                (source, status, now, new_fails, last_ok, new_fails),
             )
             return prev_status, status
     except Exception:  # noqa: BLE001

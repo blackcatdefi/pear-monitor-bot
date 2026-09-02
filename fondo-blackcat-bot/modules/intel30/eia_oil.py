@@ -35,7 +35,14 @@ WPSR_SERIES = {
 async def fetch_wpsr() -> dict[str, Any]:
     """Latest WPSR observation across the canonical series IDs."""
     if not API_KEY:
-        return {"series": [], "_global_error": "EIA_API_KEY not set"}
+        # R-BOT-DEFINITIVE Fase 4.1: esto NO es una falla, es una fuente sin
+        # configurar, y la diferencia importa. Una falla hay que investigarla;
+        # una clave que falta hay que ponerla, una sola vez. Se marca con
+        # _sin_clave para que el formateador la calle y para que /health la
+        # liste como accion pendiente en vez de como incendio diario.
+        return {"series": [], "_sin_clave": True,
+                "_env_var": "EIA_API_KEY",
+                "_global_error": "EIA_API_KEY not set"}
     out: list[dict[str, Any]] = []
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         for sid, label in WPSR_SERIES.items():
@@ -79,6 +86,10 @@ async def fetch_all() -> dict[str, Any]:
 
 def format_for_telegram(data: dict[str, Any]) -> str:
     lines = ["🛢 *EIA — WPSR Crude/Gas*"]
+    if data.get("_sin_clave"):
+        # Cadena vacia = la seccion no se imprime. El pendiente vive en
+        # /health (feed_registry.env_vars_faltantes), no en el reporte diario.
+        return ""
     if data.get("_global_error"):
         lines.append(f"  ⚠️ {data['_global_error']}")
         lines.append("  → Set EIA_API_KEY env var (free at api.eia.gov)")

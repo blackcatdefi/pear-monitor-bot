@@ -30,6 +30,24 @@ URLS = {
     "ETH": "https://farside.co.uk/eth/",
     "SOL": "https://farside.co.uk/sol/",
 }
+
+# R-BOT-DEFINITIVE Fase 4.1 — ETH y SOL quedan RETIRADOS.
+#
+# Verificado el 2026-09-01 desde el mismo entorno en el que corre el bot:
+# farside.co.uk devuelve 403 con el desafio JS de Cloudflare ("Just a
+# moment...") a cualquier cliente que no sea un navegador real. No es un
+# bloqueo de datacenter que se arregle con headers: ya se probo el stack
+# completo de headers de Chrome mas abajo y sigue dando 403. bitbo, el unico
+# fallback que anda, solo publica BTC. El espejo de ASXN
+# (/api/data/eth-etf-flows y /sol-etf-flows) responde 200 pero quedo
+# congelado el 2026-03-23 — cinco meses de atraso presentados como el flujo
+# del dia serian peor que no tener el dato.
+#
+# La decision, entonces, no es "seguir intentando por si algun dia anda": es
+# dejar de intentar. Un intento que falla todos los dias imprime una linea
+# educada todos los dias, y esa linea es ruido con forma de dato. La razon
+# formal vive en modules/feed_registry.py (farside_eth / farside_sol).
+ACTIVOS = ("BTC",)
 HTTP_TIMEOUT = 12.0
 
 # Browser UA + full header stack to bypass Cloudflare 403 on Farside
@@ -197,7 +215,8 @@ async def fetch_etf(asset: str) -> dict[str, Any]:
 
 
 async def fetch_all() -> dict[str, Any]:
-    tasks = [fetch_etf(a) for a in URLS]
+    # Solo se piden los activos vivos (ver ACTIVOS y feed_registry).
+    tasks = [fetch_etf(a) for a in ACTIVOS]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     out: list[dict[str, Any]] = []
     for r in results:
@@ -205,12 +224,13 @@ async def fetch_all() -> dict[str, Any]:
             out.append({"_error": str(r)})
         else:
             out.append(r)
-    return {"flows": out}
+    retirados = [a for a in URLS if a not in ACTIVOS]
+    return {"flows": out, "retirados": retirados}
 
 
 def format_for_telegram(data: dict[str, Any]) -> str:
     flows = data.get("flows") or []
-    lines = ["💰 *Farside — Spot ETF Flows*"]
+    lines = ["💰 *Flujos ETF spot BTC*"]
     if not flows:
         return "\n".join(lines + ["  ⚠️ sin datos"])
     rendered = 0
@@ -237,8 +257,9 @@ def format_for_telegram(data: dict[str, Any]) -> str:
             lines.append(f"  {arrow} {asset}: ${flow:+,.1f}M ({d}){tag}")
             rendered += 1
     if failed_assets:
-        lines.append(f"  ⚠️ {','.join(failed_assets)} bloqueados (CF1010 datacenter)")
-        lines.append("  → ver: farside.co.uk / sosovalue.com")
+        lines.append(f"  ⚠️ {','.join(failed_assets)} sin dato este run")
+    # ETH/SOL retirados no generan linea: la decision esta tomada y escrita en
+    # feed_registry. Recordarla todos los dias seria el mismo ruido de antes.
     if rendered == 0 and not failed_assets:
         lines.append("  ⚠️ sin datos")
     return "\n".join(lines)

@@ -27,15 +27,72 @@ def _clean_manual_lmec():
 
 
 def test_optional_sources_never_count_as_failures():
+    """Solo lo que de verdad depende de una clave que el fondo no dio de alta."""
     for name, ge in (
         ("arkham_intel", "ARKHAM_API_KEY not set"),
-        ("asxn_data", "html_only@dashboard"),
-        ("hypurrscan", "http_404@/api/auctions"),
+        ("eia_oil", "EIA_API_KEY not set"),
     ):
         entry = st._classify(name, {"_global_error": ge}, 120)
         assert entry["status"] == "OPTIONAL"
         assert entry.get("optional") is True
         assert st._is_healthy(entry) is True
+
+
+def test_asxn_y_hypurrscan_ya_no_pueden_esconderse_en_opcionales():
+    """R-BOT-DEFINITIVE Fase 4.1 — el test que impide repetir el error.
+
+    Las dos fuentes estuvieron meses en OPTIONAL_SOURCES con diagnosticos que
+    sonaban definitivos ('no public API', 'endpoint retired upstream') y eran
+    los dos falsos: ASXN tiene API en otro host (api-data.asxn.xyz) y
+    HypurrScan solo renombro las rutas (estan en su openapi.json). Declararlas
+    opcionales convirtio dos bugs nuestros en 'asi es la vida': fallaban todos
+    los dias y el selftest daba verde igual.
+
+    Si alguien vuelve a meterlas en la lista para que el selftest deje de
+    quejarse, este test se rompe primero.
+    """
+    assert "asxn_data" not in st.OPTIONAL_SOURCES
+    assert "hypurrscan" not in st.OPTIONAL_SOURCES
+    for name in ("asxn_data", "hypurrscan"):
+        entry = st._classify(name, {"_global_error": "http_404"}, 120)
+        assert st._is_healthy(entry) is False, (
+            f"{name} volvio a poder fallar en silencio")
+
+
+def test_un_404_nunca_es_una_fuente_sana():
+    """La segunda puerta trasera, independiente de OPTIONAL_SOURCES.
+
+    _classify_inner mapeaba cualquier _global_error que contuviera '404',
+    'html_only', 'moved' o 'spa_' a DEGRADED, y DEGRADED estaba en
+    HEALTHY_STATUSES. Resultado: una fuente que no devolvio ni un byte
+    contaba como sana. Habia DOS mecanismos tapando la misma falla, asi que
+    sacar uno solo no alcanzaba.
+    """
+    for ge in ("http_404@/api/auctions", "html_only@dashboard",
+               "spa_no_json", "endpoint moved"):
+        entry = st._classify("fred_api", {"_global_error": ge}, 120)
+        assert entry["status"] == "UNAVAILABLE", (
+            f"'{ge}' volvio a clasificarse como {entry['status']}")
+        assert st._is_healthy(entry) is False
+
+
+def test_degraded_sigue_significando_trajo_datos_incompletos():
+    """No se rompe la semantica: DEGRADED sigue existiendo y sigue contando
+    como sano, pero solo para respuestas que SI trajeron algo."""
+    assert "DEGRADED" in st.HEALTHY_STATUSES
+    entry = st._classify("fred_api", {"series": [{"x": 1}], "_partial": "1 de 3"}, 50)
+    assert st._is_healthy(entry) is True
+
+
+def test_toda_fuente_opcional_declara_que_le_falta():
+    """Una fuente solo puede ser opcional por FALTA DE CLAVE, y esa clave
+    tiene que tener nombre. 'Opcional porque no anda' no es una categoria."""
+    import modules.feed_registry as fr
+    for name in st.OPTIONAL_SOURCES:
+        f = fr.get(name)
+        assert bool(f.env_var) or name == "arkham_intel", (
+            f"{name} es opcional pero no declara que variable le falta; sin "
+            f"eso 'opcional' es solo el lugar donde se esconde una fuente rota")
 
 
 def test_required_source_failure_counts_against_total():

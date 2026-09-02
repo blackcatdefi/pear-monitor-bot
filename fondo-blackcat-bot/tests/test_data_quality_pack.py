@@ -130,17 +130,33 @@ def test_vault_autodiscovered_renders(monkeypatch):
 # ─── WI-9e: one-line intel degradation ───────────────────────────────────────
 
 def test_asxn_failure_one_line():
+    """R-BOT-DEFINITIVE Fase 4.1: la regla WI-9e sigue siendo UNA linea sin
+    fragmentos. Lo que cambio es el significado: antes ASXN fallaba SIEMPRE y
+    la linea era permanente; ahora la fuente anda, asi que un fallo es una
+    novedad real y la linea lo dice."""
     from modules.intel30 import asxn_data
     out = asxn_data.format_for_telegram({"_error": "Traceback (most recent call)…"})
-    assert out == "🟪 ASXN: fuente no disponible este run"
     assert len(out.splitlines()) == 1
+    assert "ASXN" in out
+    assert "http" not in out
+    assert "fuente no disponible" not in out, (
+        "esa frase describia una fuente rota para siempre; la fuente se "
+        "arreglo y la linea no puede volver a sonar a estado permanente")
 
 
 def test_hypurrscan_failure_one_line():
     from modules.intel30 import hypurrscan
     out = hypurrscan.format_for_telegram({"auctions": {"_error": "https://hypurrscan.io/ap"}})
-    assert out == "🪶 HypurrScan: fuente no disponible este run"
-    assert "http" not in out
+    assert len(out.splitlines()) == 1
+    assert "HypurrScan" in out
+    assert "http" not in out, "no se pegan URLs cortadas en el reporte"
+
+
+def test_err_corto_nunca_filtra_urls_ni_multilinea():
+    from modules.intel30 import hypurrscan
+    sucio = "HTTPStatusError en https://api.hypurrscan.io/pastAuctions\n  linea 2"
+    corto = hypurrscan.err_corto(sucio)
+    assert "http" not in corto and "\n" not in corto and len(corto) <= 40
 
 
 def test_hl_info_failures_short_no_fragments():

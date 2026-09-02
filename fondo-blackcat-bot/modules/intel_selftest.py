@@ -24,13 +24,30 @@ PER_MODULE_TIMEOUT = 10.0
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 LAST_SELFTEST = DATA_DIR / "selftest_last.json"
 
-# P1.9: sources that are OPTIONAL by design — they have no free public API or
-# require a key the fund hasn't provisioned, so a non-LIVE result is EXPECTED
-# and must NOT count as a selftest failure.
-#   • arkham_intel — ARKHAM_API_KEY not provisioned (free signup optional)
-#   • asxn_data    — no public API (dashboard is a client-rendered SPA)
-#   • hypurrscan   — /api/auctions returns 404 (endpoint retired upstream)
-OPTIONAL_SOURCES = frozenset({"arkham_intel", "asxn_data", "hypurrscan"})
+# P1.9: fuentes OPCIONALES por diseño — no tienen API publica gratuita o
+# necesitan una clave que el fondo no dio de alta, asi que un resultado
+# non-LIVE es ESPERADO y no cuenta como falla del selftest.
+#
+# R-BOT-DEFINITIVE Fase 4.1 — esta lista era el escondite.
+# ---------------------------------------------------------
+# asxn_data y hypurrscan estaban aca con diagnosticos que sonaban definitivos
+# ("no public API", "endpoint retired upstream") y eran los dos falsos:
+#
+#   • asxn_data  — SI hay API publica: api-data.asxn.xyz. El diagnostico viejo
+#                  miraba data.asxn.xyz, que es solo el frontend.
+#   • hypurrscan — el endpoint no se retiro, lo renombraron. Las rutas reales
+#                  estan publicadas en el openapi.json del propio servidor.
+#
+# Declararlas opcionales convirtio dos bugs nuestros en "asi es la vida":
+# fallaban todos los dias, el selftest daba verde igual, y por eso nadie las
+# miro durante meses. Las dos vuelven a ser REQUERIDAS: si fallan, falla el
+# selftest, que es lo que tenia que haber pasado desde el principio.
+#
+# Lo que queda opcional se justifica una por una, y la razon vive en
+# modules/feed_registry.py, no en un comentario suelto.
+#   • arkham_intel — ARKHAM_API_KEY no provisionada (alta gratuita, opcional)
+#   • eia_oil      — EIA_API_KEY no provisionada (alta gratuita; SIN_CLAVE)
+OPTIONAL_SOURCES = frozenset({"arkham_intel", "eia_oil"})
 
 # Statuses that mean "working as expected" for pass-count purposes. OPTIONAL
 # sources are folded in via _is_healthy below regardless of their raw status.
@@ -97,9 +114,20 @@ def _classify_inner(name: str, data: Any, latency_ms: int) -> dict[str, Any]:
                 "reason": data.get("_global_error", "")}
     ge = data.get("_global_error")
     if isinstance(ge, str) and ge:
-        # SPA / no JSON / unreachable
-        if any(token in ge for token in ("spa_", "html_only", "moved", "404")):
-            return {"name": name, "status": "DEGRADED", "latency_ms": latency_ms, "reason": ge[:80]}
+        # R-BOT-DEFINITIVE Fase 4.1 — aca habia una segunda puerta trasera.
+        #
+        # La rama que estaba antes decia: si el mensaje de error contiene
+        # 'spa_', 'html_only', 'moved' o '404', el estado es DEGRADED. Y
+        # DEGRADED figura en HEALTHY_STATUSES. O sea que un 404 — la fuente no
+        # devolvio absolutamente nada — contaba como fuente sana.
+        #
+        # Por eso hypurrscan podia devolver "http_404@/api/auctions" TODOS los
+        # dias y el selftest seguia dando verde aun sin la lista de opcionales:
+        # habia dos mecanismos independientes tapando la misma falla.
+        #
+        # DEGRADED significa "trajo datos, pero incompletos". Si hay
+        # _global_error no trajo nada, y eso es UNAVAILABLE se llame como se
+        # llame el error.
         if "not set" in ge or "API_KEY" in ge:
             return {"name": name, "status": "GRACEFUL_NO_KEY", "latency_ms": latency_ms, "reason": ge[:80]}
         return {"name": name, "status": "UNAVAILABLE", "latency_ms": latency_ms, "reason": ge[:80]}

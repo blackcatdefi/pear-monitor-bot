@@ -198,13 +198,83 @@ class TestAsxn(unittest.TestCase):
         out = asxn_data.format_for_telegram(data)
         self.assertIn("HYPE", out)
 
+    def test_dato_viejo_se_marca_rancio_y_no_se_hace_pasar_por_hoy(self):
+        """R-BOT-DEFINITIVE Fase 4.1 — el hallazgo que justifica la fecha.
+
+        Varios datasets de ASXN responden 200 con JSON impecable pero
+        congelado: /api/data/hl-auctions quedo en 2026-03-05 y los espejos de
+        ETF en 2026-03-23 (verificado 2026-09-01). Un numero de marzo impreso
+        como el buyback de hoy no rompe nada, no loguea nada y es mentira.
+        """
+        from modules.intel30 import asxn_data
+        viejo = asxn_data.format_for_telegram({"data": {
+            "buyback_usd_dia": 1_785_981.0, "buyback_as_of": "2026-03-05",
+            "buyback_dias": 180}, "_error": None})
+        self.assertIn("RANCIO", viejo)
+        self.assertIn("2026-03-05", viejo)
+        fresco = asxn_data.format_for_telegram({"data": {
+            "buyback_usd_dia": 1_785_981.0, "buyback_as_of": "2026-08-31",
+            "buyback_dias": 1}, "_error": None})
+        self.assertNotIn("RANCIO", fresco)
+
+    def test_apunta_al_host_de_datos_y_no_al_frontend(self):
+        """data.asxn.xyz es una SPA de 1 KB: el scrape leia una pagina vacia
+        y devolvia {} con cara de exito."""
+        from modules.intel30 import asxn_data as a
+        self.assertIn("api-data.asxn.xyz", a.API_BASE)
+        self.assertFalse(hasattr(a, "_probe_next_data"), (
+            "el probe de /_next/data no podia funcionar nunca: el sitio no "
+            "es Next.js. Dejarlo era mantener viva una explicacion falsa"))
+        self.assertFalse(hasattr(a, "_parse_dashboard_html"))
+
 
 class TestHypurrscan(unittest.TestCase):
     def test_format_with_auction(self):
+        """Shape real de /pastAuctions + /pastAuctionsPerp (Fase 4.1).
+
+        El test viejo usaba {"currentAuction": {...}}, una forma inventada que
+        la API nunca devolvio: se escribio contra la ruta rota, asi que
+        validaba un renderer que en produccion no se ejecutaba nunca.
+        """
         from modules.intel30 import hypurrscan
-        data = {"auctions": {"data": {"currentAuction": {"name": "FOO", "currentPrice": 250}}, "_error": None}}
+        data = {"auctions": {"data": {
+            "spot": [{"name": "FOO", "usdc": 500.0, "when_utc": "2026-08-31 09:00"}],
+            "perp": [{"coin": "io:GPRO", "dex": "io", "when_utc": "2026-09-01 12:46"}],
+            "twap": [{"size": "2500", "buy": True, "minutes": 30,
+                      "when_utc": "2026-09-01 23:44"}],
+            "spot_total": 482, "perp_total": 270,
+        }, "_error": None}}
         out = hypurrscan.format_for_telegram(data)
         self.assertIn("FOO", out)
+        self.assertIn("io:GPRO", out)
+        self.assertIn("482", out)
+
+    def test_usa_las_rutas_reales_publicadas_en_el_openapi(self):
+        """Las cinco rutas viejas daban 404. Este test fija las buenas."""
+        from modules.intel30 import hypurrscan as h
+        self.assertEqual(h.PATH_AUCTIONS, "/pastAuctions")
+        self.assertEqual(h.PATH_AUCTIONS_PERP, "/pastAuctionsPerp")
+        self.assertTrue(h.PATH_TWAP.startswith("/twap/"))
+        self.assertFalse(hasattr(h, "CANDIDATE_PATHS"), (
+            "la lista de rutas candidatas era el sintoma: cinco caminos "
+            "muertos probados en orden hasta rendirse. Las rutas reales "
+            "estan publicadas, no hay que adivinarlas"))
+
+    def test_un_200_con_shape_raro_no_es_sin_subastas(self):
+        """C4 aplicado a esta fuente: un dict donde se espera lista es un
+        error, no un mercado tranquilo."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+        from modules.intel30 import hypurrscan as h
+
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json = MagicMock(return_value={"unexpected": "envelope"})
+        client = MagicMock()
+        client.get = AsyncMock(return_value=resp)
+        data, err = asyncio.run(h._get_list(client, "/pastAuctions"))
+        self.assertIsNone(data)
+        self.assertIn("shape inesperado", err)
 
 
 class TestHotfixContracts(unittest.TestCase):
@@ -218,9 +288,18 @@ class TestHotfixContracts(unittest.TestCase):
             self.assertIsInstance(urls, list, f"{label} not list")
             self.assertGreaterEqual(len(urls), 2, f"{label} needs ≥2 fallback URLs")
 
-    def test_hypurrscan_probes_multiple_paths(self):
-        from modules.intel30 import hypurrscan
-        self.assertGreaterEqual(len(hypurrscan.CANDIDATE_PATHS), 3)
+    def test_farside_no_reintenta_activos_retirados(self):
+        """Fase 4.1: ETH/SOL quedaron formalmente retirados. La prueba de que
+        la decision es real es que no se pidan por red ni se impriman."""
+        from modules.intel30 import farside_etfs as fe
+        import modules.feed_registry as fr
+        self.assertEqual(tuple(fe.ACTIVOS), ("BTC",))
+        self.assertTrue(fr.is_retired("farside_eth"))
+        self.assertTrue(fr.is_retired("farside_sol"))
+        for k in ("farside_eth", "farside_sol"):
+            self.assertGreater(len(fr.get(k).motivo), 80,
+                               f"{k} se retiro sin explicar por que")
+            self.assertTrue(fr.get(k).desde, f"{k} se retiro sin fecha")
 
     def test_farside_uses_browser_headers(self):
         from modules.intel30 import farside_etfs
@@ -229,17 +308,22 @@ class TestHotfixContracts(unittest.TestCase):
         self.assertIn("Accept", farside_etfs.BROWSER_HEADERS)
         self.assertIn("Sec-Fetch-Mode", farside_etfs.BROWSER_HEADERS)
 
-    def test_asxn_walk_blob_extracts_metrics(self):
+    def test_asxn_lee_metricas_del_api_real(self):
+        """Reemplaza a test_asxn_walk_blob_extracts_metrics.
+
+        Aquel test le pasaba a _walk_blob_for_metrics() un blob de Next.js
+        armado a mano y verificaba que el walker encontrara las claves. El
+        walker andaba perfecto; el problema es que en produccion nunca recibia
+        ese blob, porque data.asxn.xyz no es Next.js. Un test verde sobre un
+        camino que no se ejecuta es exactamente como sobrevivio esta fuente
+        rota durante meses. Ahora se prueba el parser contra el shape REAL de
+        api-data.asxn.xyz.
+        """
         from modules.intel30 import asxn_data
-        blob = {
-            "pageProps": {
-                "stats": {"buyback_total": 12500000.0, "burn_total": 380000.0},
-                "noise": {"unrelated": 42},
-            }
-        }
-        out = asxn_data._walk_blob_for_metrics(blob)
-        self.assertIn("buyback_total", out)
-        self.assertIn("burn_total", out)
+        self.assertFalse(hasattr(asxn_data, "_walk_blob_for_metrics"))
+        self.assertEqual(asxn_data.PATH_BURN, "/api/hype-burn/metrics")
+        self.assertEqual(asxn_data.PATH_STAKING, "/api/hype-staking/metrics")
+        self.assertEqual(asxn_data.PATH_BUYBACKS, "/api/data/hl-buybacks")
 
     def test_bcra_uses_v4_endpoint(self):
         from modules.intel30 import bcra_macro
