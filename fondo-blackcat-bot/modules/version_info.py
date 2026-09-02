@@ -259,4 +259,39 @@ def health_payload(commands_count: int) -> dict:
         "pm_ltv": _pm_ltv_status(),
         # R-LEDGER-FIX (2026-09-01): ledger schema/health telemetry.
         "ledger": _ledger_status_safe(),
+        # ── R-BOT-DEFINITIVE (2026-09-01) ────────────────────────────────
+        # /health pasa a ser LA fuente de verdad: los mismos bloques que ve
+        # /diagnostico, calculados por la misma funcion. Antes habia que
+        # mirar cinco lugares distintos y ninguno decia lo mismo.
+        "autodiagnostico": _autodiagnostico_safe(),
     }
+
+
+def _autodiagnostico_safe() -> dict:
+    """Bloques nuevos de la Fase 2, sin poder tumbar el endpoint de salud.
+
+    Ojo con el modo de fallo: si esto explotara y devolviera {}, /health
+    seguiria respondiendo 200 y pareceria sano. Por eso cuando falla lo DICE
+    y ademas pone ok=None — que no es lo mismo que ok=True.
+    """
+    try:
+        from modules.diagnostics import full_diagnosis
+        d = full_diagnosis()
+        return {
+            "ok": d.get("ok"),
+            "problemas": d.get("problemas") or [],
+            "subsistemas": d.get("subsistemas"),
+            "invariantes": d.get("invariantes"),
+            "feeds": d.get("feeds"),
+            "volumen": d.get("volumen"),
+            "backup": d.get("backup"),
+            "dependencias": d.get("dependencias"),
+            "ppc": d.get("ppc"),
+            "dedup_alertas": d.get("dedup_alertas"),
+            "autoactualizacion": d.get("autoactualizacion"),
+            "generado_utc": d.get("generado_utc"),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": None,
+                "_error": f"{type(exc).__name__}: {exc}"[:200],
+                "problemas": ["el autodiagnostico no se pudo ejecutar"]}

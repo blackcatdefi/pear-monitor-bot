@@ -43,6 +43,8 @@ COMMANDS: List[BotCommand] = [
     BotCommand("dca", "Tiered DCA plan BTC/ETH/HYPE + current zone", "trading", "cmd_dca"),
     BotCommand("pnl", "Realized PnL 7D / 30D / YTD", "trading", "cmd_pnl"),
     BotCommand("cierres", "Ledger trades cerrados: NET/fees/funding + ciclos (R-TRADE-LEDGER)", "trading", "cmd_cierres"),
+    # R-BOT-DEFINITIVE Fase 6 — serie publica por ciclo, lista para compartir.
+    BotCommand("trackrecord", "Track record publico: un ciclo por linea + total all-time", "trading", "cmd_trackrecord"),
     BotCommand("pnlx", "Extended PnL by period + best/worst (R18)", "trading", "cmd_pnlx"),
     BotCommand("pretrade", "5-point pre-trade checklist <SYMBOL>", "trading", "cmd_pretrade"),
     BotCommand("compounding_history", "Compounding events last 30d (R18)", "trading", "cmd_compounding_history"),
@@ -148,6 +150,8 @@ COMMANDS: List[BotCommand] = [
     BotCommand("metrics", "Bot health dashboard (24h)", "debug", "cmd_metrics"),
     # R-SIGNAL-DIET — reemplaza el heartbeat push 6h (mismo snapshot, on-demand)
     BotCommand("health", "Bot alive on-demand: uptime + capital + BTC (ex-heartbeat)", "debug", "cmd_health"),
+    # R-BOT-DEFINITIVE Fase 2 — autodiagnostico completo en una sola pantalla.
+    BotCommand("diagnostico", "Autodiagnostico completo: subsistemas, ledger, feeds, backup", "debug", "cmd_diagnostico"),
 ]
 
 

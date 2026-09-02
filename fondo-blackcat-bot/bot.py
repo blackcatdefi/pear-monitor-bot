@@ -16,6 +16,7 @@ Round 16 additions:
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import os
 import sys
@@ -1087,6 +1088,41 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     from modules.heartbeat import build_heartbeat
     text = await build_heartbeat()
     await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_trackrecord(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-BOT-DEFINITIVE Fase 6 — serie publica de la canasta, lista para pegar.
+
+    Los ciclos salen de la columna `cycle_tag` del ledger, que se escribe una
+    sola vez al reconstruirlo. No se infieren por fecha en el render: si se
+    infirieran, el mismo historico daria numeros distintos segun el dia en que
+    se pidiera.
+    """
+    from modules.track_record import build_track_record, format_track_record
+    loop = asyncio.get_event_loop()
+    tr = await loop.run_in_executor(None, build_track_record)
+    await send_long_message(update, format_track_record(tr),
+                            reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_diagnostico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-BOT-DEFINITIVE Fase 2 — el autodiagnostico completo, a pedido.
+
+    Es la MISMA funcion que usan /health (JSON) y el self-test programado, asi
+    que no puede haber tres respuestas distintas a "como esta el bot". Si
+    /diagnostico dice que algo esta mal, /health dice lo mismo.
+    """
+    from modules.diagnostics import format_diagnosis, full_diagnosis
+    loop = asyncio.get_event_loop()
+    # full_diagnosis abre varias sqlite y hace disk_usage: es sincrono y puede
+    # tardar. Va a un thread para no bloquear el event loop del bot.
+    d = await loop.run_in_executor(None, full_diagnosis)
+    await send_long_message(update, format_diagnosis(d),
+                            reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
@@ -3015,6 +3051,44 @@ async def _selftest_cron_job(application: Application) -> None:
         log.exception("selftest cron job failed")
 
 
+async def _autodiagnostico_job(application: Application) -> None:
+    """R-BOT-DEFINITIVE Fase 2.2 — el chequeo que corre solo.
+
+    Silencioso cuando esta sano. Esa es la regla y no es un detalle de estilo:
+    un chequeo que manda "todo ok" cada seis horas entrena a ignorar sus
+    mensajes, y el dia que mande "algo falla" tambien se va a ignorar. Por eso
+    aca BCD recibe CERO mensajes mientras el bot funcione.
+
+    Cuando algo falla, el dedup es por CONTENIDO del problema: un problema que
+    dura una semana avisa una vez, pero si aparece uno NUEVO mientras el viejo
+    sigue, ese si avisa.
+    """
+    if os.getenv("AUTODIAG_ENABLED", "true").strip().lower() == "false":
+        return
+    chat_id = os.getenv("ALERT_CHAT_ID") or TELEGRAM_CHAT_ID
+    enviados: list[str] = []
+
+    def _notificar(texto: str) -> None:
+        enviados.append(texto)
+
+    try:
+        from modules.diagnostics import run_selftest as diag_selftest
+        loop = asyncio.get_event_loop()
+        res = await loop.run_in_executor(
+            None, functools.partial(diag_selftest, notificar=_notificar))
+        if res.get("ok"):
+            log.info("autodiagnostico: sin problemas")
+        else:
+            log.warning("autodiagnostico: %d problema(s) alerto=%s: %s",
+                        len(res.get("problemas") or []), res.get("alerto"),
+                        res.get("problemas"))
+        for texto in enviados:
+            if chat_id:
+                await send_bot_message(application.bot, chat_id, texto)
+    except Exception:  # noqa: BLE001
+        log.exception("autodiagnostico job failed")
+
+
 async def _backup_volume_job(application: Application) -> None:
     """R-PERFECT Fase 4: daily 04:00 UTC — gzip /app/data, prune 30d, optional GH push."""
     if os.getenv("BACKUP_VOLUME_ENABLED", "true").strip().lower() == "false":
@@ -3024,6 +3098,25 @@ async def _backup_volume_job(application: Application) -> None:
         loop = asyncio.get_event_loop()
         # tarfile is sync; offload to a thread so we don't block the event loop
         result = await loop.run_in_executor(None, run_backup)
+
+        # R-BOT-DEFINITIVE Fase 5.1 — el backup se VERIFICA el mismo dia que
+        # se hace, restaurandolo de verdad en un temporal. Hasta ahora esto no
+        # existia: se comprobaba que el tar.gz se pudiera escribir y se
+        # llamaba a eso "backup ok". Escribir un archivo no prueba nada sobre
+        # poder restaurarlo, y el metodo viejo producia sqlites sin tablas.
+        # No se avisa nada aca: si algo falla lo levanta el autodiagnostico,
+        # que dedupea. Este job no puede volverse una fuente de ruido diario.
+        try:
+            from modules.backup_verify import verify_latest
+            ver = await loop.run_in_executor(None, verify_latest)
+            if ver.get("ok"):
+                log.info("backup verificado restaurable: %s (%d DBs)",
+                         ver.get("tarball"), ver.get("dbs_verificadas", 0))
+            else:
+                log.error("BACKUP NO RESTAURABLE: %s", ver.get("problemas"))
+        except Exception:  # noqa: BLE001
+            log.exception("backup_verify fallo (el backup se hizo igual)")
+
         if not result.get("ok"):
             chat_id = os.getenv("ALERT_CHAT_ID") or os.getenv("AUTHORIZED_USER_ID")
             if chat_id:
@@ -3873,6 +3966,26 @@ async def post_init(application: Application) -> None:
                 coalesce=True,
             )
             log.info("R-PERFECT: /selftest cron ENABLED (4x/day at 00/06/12/18 UTC)")
+
+        # ─── R-BOT-DEFINITIVE Fase 2.2: autodiagnostico ────────────────
+        # Al arranque (con delay, para que los subsistemas hayan corrido al
+        # menos una vez y no reportar "nunca" como si fuera "roto") y despues
+        # cada AUTODIAG_HORAS. Silencioso mientras todo funcione.
+        if os.getenv("AUTODIAG_ENABLED", "true").strip().lower() != "false":
+            _diag_h = int(os.getenv("AUTODIAG_HORAS", "6") or 6)
+            scheduler.add_job(
+                _autodiagnostico_job,
+                "interval",
+                hours=_diag_h,
+                args=[application],
+                id="autodiagnostico",
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now(timezone.utc) + timedelta(minutes=10),
+            )
+            log.info("R-BOT-DEFINITIVE: autodiagnostico ENABLED "
+                     "(boot+10min, luego cada %dh, silencioso si esta sano)",
+                     _diag_h)
         # Daily backup at 04:00 UTC
         if os.getenv("BACKUP_VOLUME_ENABLED", "true").strip().lower() != "false":
             scheduler.add_job(
@@ -3993,6 +4106,8 @@ HANDLER_MAP = {
     "pnl": cmd_pnl,
     # R-TRADE-LEDGER (2026-08-20): permanent closed-trade ledger query
     "cierres": cmd_cierres,
+    # R-BOT-DEFINITIVE Fase 6
+    "trackrecord": cmd_trackrecord,
     "log": cmd_log,
     # Round 16
     "version": cmd_version,
@@ -4002,6 +4117,8 @@ HANDLER_MAP = {
     "metrics": cmd_metrics,
     # R-SIGNAL-DIET — on-demand alive snapshot (ex-heartbeat push)
     "health": cmd_health,
+    # R-BOT-DEFINITIVE Fase 2
+    "diagnostico": cmd_diagnostico,
     "test_alerts": cmd_test_alerts,
     "reload_commands": cmd_reload_commands,
     # Round 17
