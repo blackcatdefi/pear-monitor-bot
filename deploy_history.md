@@ -2,6 +2,51 @@
 
 Append-only log per Cowork constitución §6 paso 8.
 
+## 2026-09-03 03:06 UTC — CERRADO: el funding no existe del lado de HL
+
+El /diagnostico sobre `9d38bd7` cerro el caso que venia abierto seis rondas.
+
+```
+✅ ultimo intento hace 14min · 0 hueco(s) pendiente(s)
+pruebas 33 (sin novedad 33) · filas NUEVAS 0 (eco HL 1061)
+✅ 0 violacion(es) sobre las ultimas 200 filas
+```
+
+Los cuatro elementos que hacen que esto SI se pueda concluir, y que ninguna de
+las lecturas anteriores tenia:
+
+1. **`✅` sin advertencia de build anterior** → el intento lo hizo ESTE build.
+   Es lo que R-FUNDING-BUILD vino a poder decir, y funciono a la primera.
+2. **`0 huecos pendientes`** → los 33 tramos se probaron todos; ninguno quedo
+   cortado por el presupuesto de paginas.
+3. **`sin novedad 33` sin ningun `sin medir`** → los 33 estan MEDIDOS. Las 14
+   viejas salieron del estado `-1` = NO MEDIDO. Nada se dio por probado sin
+   probarlo.
+4. **`eco HL 1061` con `filas NUEVAS 0`** → el transporte anda (un cero en el
+   eco habria sido pedido roto, otro diagnostico) y de esas 1061 filas ninguna
+   era nueva.
+
+**Veredicto: el dato no existe del lado de HL.** No hay resync que lo traiga.
+I5 bajo a nota informativa, money path en 0 violaciones, sin tocar un solo
+numero del fondo y sin apagar el chequeo. Esa es la diferencia entre resolver y
+silenciar.
+
+**Sobre los 7 subsistemas en "ultimo ok nunca": verificado, no es un defecto.**
+Los siete `@health_registry.tracked` llegaron en `bde59e9` (2026-09-02 19:55),
+hace ~7h. Los siete son jobs de baja frecuencia que no volvieron a correr desde
+que se instrumentaron; el backup que figura "hace 23h" corrio ANTES de que el
+decorador existiera. El panel lo dice bien —"sin exito registrado **aun**"— y
+no lo cuenta como problema.
+
+**Prediccion falsable:** el backup diario dispara ~04:00 UTC. Si despues de esa
+hora "Backup sqlite" sigue en `nunca`, hay un problema de cableado real. Si
+pasa a verde, el registro esta bien y los otros seis se llenan solos.
+
+**Pendiente:** 4 feeds muertos y `capitol_trades` rancio hace 2157h (~90 dias,
+que es "muerto" con otro nombre).
+
+Handoff completo del caso en `docs/HANDOFF_FUNDING_2026-09-03.md`.
+
 ## 2026-09-03 — R-FUNDING-BUILD: el panel presentaba la corrida de OTRO build como propia
 
 El /diagnostico de las 02:38, sobre el deploy de `01aa918` recien salido, mostro:
