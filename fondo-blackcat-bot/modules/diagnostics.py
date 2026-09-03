@@ -743,8 +743,20 @@ def format_diagnosis(d: dict[str, Any]) -> str:
             L.append("  \u274c NUNCA se ejecuto — la reparacion no esta "
                      "enganchada al sync")
         else:
-            L.append(f"  \u2705 ultimo intento {_hace(rep.get('horas_desde_intento'))}"
-                     f" · {rep.get('pendientes_total', 0)} hueco(s) pendiente(s)")
+            # R-FUNDING-BUILD: un intento del build ANTERIOR no dice nada sobre
+            # este. Con solo la marca de tiempo, "hace 25min" sobre un deploy
+            # recien salido se lee como "la version nueva ya se ejercito" —
+            # que es justo lo contrario de lo que pasa.
+            vc, va = rep.get("commit_intento"), rep.get("commit_actual")
+            viejo = bool(vc and va and vc != va)
+            # El escape sale afuera del f-string: en 3.10 una barra invertida
+            # adentro de la parte de expresion es SyntaxError.
+            marca = "\u26a0\ufe0f" if viejo else "\u2705"
+            L.append(f"  {marca} ultimo intento "
+                     f"{_hace(rep.get('horas_desde_intento'))}"
+                     + (f" pero con el build ANTERIOR ({vc}, ahora {va}): este "
+                        f"todavia no corrio" if viejo else "")
+                     + f" · {rep.get('pendientes_total', 0)} hueco(s) pendiente(s)")
             # R-FUNDING-NOVEDAD: "filas traidas 564" era el ECO de HL —
             # mayormente filas que YA teniamos, porque la ventana se pide
             # acotada por acreditaciones conocidas. Leido como reparacion decia

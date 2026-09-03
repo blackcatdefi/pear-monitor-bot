@@ -101,6 +101,9 @@
     "modules/trade_ledger.py::_horas_desde_iso::(TypeError, ValueError)::return None":
       "R-FUNDING-LECTURA. No alimenta ningun numero: convierte el timestamp del ultimo intento de reparacion en 'hace Nh' para el panel. El None significa 'no se cuando' y se imprime como '?', que es exactamente lo que hay que decir cuando la marca no parsea. El dato del que depende la decision —si la reparacion corrio o no— no es esta conversion sino la PRESENCIA de la marca, que se lee aparte en ultimo_intento y que None no puede falsear: un timestamp ilegible sigue siendo un timestamp, o sea que corrio.",
 
+    "modules/trade_ledger.py::_commit_actual::Exception::return ''":
+      "R-FUNDING-BUILD. Es metadato del PANEL —que build corrio el backfill— y no entra en ningun numero. La cadena vacia se traduce a None y el panel, sin los dos lados de la comparacion, se CALLA en vez de inventar una advertencia de 'build anterior' (test_sin_saber_el_commit_no_se_inventa_una_advertencia). El swallow es ancho a proposito: no saber el commit no puede tumbar un sync que si mueve plata, y la alternativa —dejar que reviente— cambiaria una linea de panel por la perdida del ledger de esa corrida.",
+
     "modules/vault_deposits.py::_safe_float::(TypeError, ValueError)::return 0.0":
       "Guarda de coercion de un campo de equity de vault. El fallo de transporte y el 200 con shape inesperado — que son los que SI podian borrar equity del NAV — ahora levantan en _as_equity_list(); lo que queda aca es solo un campo vacio.",
 

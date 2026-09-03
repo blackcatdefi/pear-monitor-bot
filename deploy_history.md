@@ -2,6 +2,69 @@
 
 Append-only log per Cowork constitución §6 paso 8.
 
+## 2026-09-03 — R-FUNDING-BUILD: el panel presentaba la corrida de OTRO build como propia
+
+El /diagnostico de las 02:38, sobre el deploy de `01aa918` recien salido, mostro:
+
+```
+✅ ultimo intento hace 25min · 33 hueco(s) pendiente(s)
+pruebas 14 (sin novedad 0 · sin medir 14) · filas NUEVAS 0 (eco HL 564)
+```
+
+Leido de corrido dice "la reparacion nueva ya se ejercito y no trajo nada" —
+que llevaria a concluir que HL no tiene esas filas. Es falso. `sin medir 14`
+prueba lo contrario: las 14 pruebas siguen siendo las del build anterior, con
+`nuevas = -1`, o sea que **el backfill nuevo todavia no corrio ni una vez**.
+Los 25 minutos son de `41d43fa`, con el criterio y el tope viejos — justo la
+conducta que el deploy venia a cambiar.
+
+O sea: dos estados que piden lecturas OPUESTAS —"la version nueva ya corrio" y
+"la version nueva no corrio"— se renderizaban identicos, y la unica forma de
+distinguirlos era deducirlo a mano de otra linea. Es la misma falla de la ronda
+anterior, un escalon mas arriba: no un numero con formato de hallazgo, sino un
+**tilde verde con formato de confirmacion**.
+
+**La causa:** la marca de tiempo no dice QUE codigo la escribio. Un timestamp
+solo nunca puede distinguir "corrio la version nueva" de "corrio la vieja".
+
+**El arreglo.** `sync_all` graba ahora, junto al timestamp, el commit corto del
+build que hizo el intento (`META_ULTIMO_COMMIT` via `_commit_actual()`).
+`funding_repair_status` devuelve los dos lados —`commit_intento` y
+`commit_actual`— y el panel los compara:
+
+```
+⚠️ ultimo intento hace 25min pero con el build ANTERIOR (41d43fa, ahora 01aa918): este todavia no corrio
+```
+
+Tres decisiones que valen mas que el codigo:
+
+- **La advertencia solo sale si se saben los DOS lados** (`vc and va and vc != va`).
+  Gritar "build anterior" sin saberlo seria inventar un hallazgo; la ausencia
+  del dato no es evidencia de discrepancia.
+- **El commit se graba al ESCRIBIR, no al leer.** Resolverlo en
+  `funding_repair_status` haria que siempre coincida consigo mismo y la
+  comparacion nunca detectaria nada. La mutacion M17 existe para eso.
+- **`_commit_actual` traga todo y devuelve `""`.** No saber el commit no puede
+  tumbar un sync que si mueve plata. Queda aceptado por escrito en el
+  allowlist de degradacion silenciosa — la guarda lo detecto sola y obligo a
+  justificarlo, que es para lo que esta.
+
+**Ademas:** `_hace()` con resolucion de minutos ya venia de la ronda anterior;
+aca se le sumo que el panel imprima `?` y no `hace 0` cuando no hay dato.
+
+**Bug propio, misma ronda:** la primera version puso `\u26a0\ufe0f` adentro de
+la parte de expresion de un f-string. En Python 3.10 eso es `SyntaxError` (PEP
+701 recien lo permite en 3.12) y volteo los 9 tests del modulo de lectura. El
+escape sale afuera, a una variable.
+
+**Verificacion:** suite 1532 · guarda 8/8 · scan TOTAL 7 (C1 0 · C2 6 · C3 0 ·
+C4 1) sin cambios · **mutaciones 20/20**, con cinco nuevas: no grabar el build,
+resolverlo al leer, comparar con `or`, tilde siempre, y nunca avisar.
+
+**Lo que sigue sin estar confirmado:** que los 27 ciclos se limpien. La
+discriminacion todavia depende del proximo /diagnostico, pero ahora el panel
+puede decir por si solo si el build que corrio es este.
+
 ## 2026-09-03 — R-FUNDING-NOVEDAD: el "564" no era reparacion, era el eco del pedido
 
 **RETRACTACION de la entrada de las 02:08.** Ahi escribi, en negrita, "el dato

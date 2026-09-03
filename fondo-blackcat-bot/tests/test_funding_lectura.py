@@ -265,3 +265,83 @@ def test_abajo_de_una_hora_el_panel_dice_minutos():
     assert "hace 6h" in _render({**base, "horas_desde_intento": 6.0}), "6h"
     # Sin dato NO se inventa un cero, que se leeria como "recien corrio".
     assert "hace" not in _render({**base, "horas_desde_intento": None})
+
+
+# ─── el build que corrio ────────────────────────────────────────────────────
+
+def test_un_intento_del_build_ANTERIOR_no_se_presenta_como_propio():
+    """R-FUNDING-BUILD — lo que el panel de las 02:38 no supo decir.
+
+    Mostro "✅ ultimo intento hace 25min" sobre un deploy recien salido. Suena
+    a que la reparacion de ESE build ya se ejercito. No: los 25 minutos eran
+    del build anterior, con el criterio y el tope viejos, o sea con la conducta
+    exacta que el deploy venia a cambiar. Lo tuve que deducir a mano de otra
+    linea del panel.
+
+    Dos estados que piden lecturas opuestas —"la version nueva ya corrio" y
+    "la version nueva no corrio todavia"— no pueden renderizarse igual. La
+    marca de tiempo sola no alcanza: no dice QUE codigo la escribio.
+    """
+    txt = _render({"ultimo_intento": "2026-09-03T02:13:00+00:00",
+                   "horas_desde_intento": 0.42, "pendientes_total": 33,
+                   "commit_intento": "41d43fa", "commit_actual": "01aa918",
+                   "pruebas": 14, "sin_novedad": 0, "sin_medir": 14,
+                   "filas_nuevas": 0, "filas_eco": 564})
+    assert "build ANTERIOR" in txt, txt
+    assert "41d43fa" in txt and "01aa918" in txt, txt
+    assert "\u2705 ultimo intento" not in txt, (
+        f"el tilde dice 'esto ya corrio' y no corrio: {txt}")
+
+
+def test_cuando_el_build_coincide_no_se_agrega_ruido():
+    """La advertencia tiene que significar algo. Si apareciera siempre seria
+    la alarma que suena siempre, que es la que se deja de mirar."""
+    txt = _render({"ultimo_intento": "2026-09-03T02:40:00+00:00",
+                   "horas_desde_intento": 0.05, "pendientes_total": 0,
+                   "commit_intento": "01aa918", "commit_actual": "01aa918",
+                   "pruebas": 14, "sin_novedad": 14, "sin_medir": 0,
+                   "filas_nuevas": 0, "filas_eco": 564})
+    assert "build ANTERIOR" not in txt, txt
+    assert "\u2705 ultimo intento" in txt, txt
+
+
+def test_sin_saber_el_commit_no_se_inventa_una_advertencia():
+    """Si falta cualquiera de los dos lados no hay comparacion posible.
+
+    Gritar "build anterior" sin saberlo seria inventar un hallazgo; callarse es
+    lo correcto, porque la ausencia del dato no es evidencia de discrepancia.
+    """
+    base = {"ultimo_intento": "2026-09-03T02:40:00+00:00",
+            "horas_desde_intento": 0.05, "pendientes_total": 0, "pruebas": 0,
+            "sin_novedad": 0, "sin_medir": 0, "filas_nuevas": 0, "filas_eco": 0}
+    for extra in ({}, {"commit_actual": "01aa918"}, {"commit_intento": "41d43fa"}):
+        txt = _render({**base, **extra})
+        assert "build ANTERIOR" not in txt, (extra, txt)
+
+
+def test_la_corrida_deja_grabado_QUE_build_la_hizo(tl, monkeypatch):
+    """El render de arriba no sirve de nada si nadie escribe el dato.
+
+    Los tres tests anteriores le pasan ``commit_intento`` a mano al panel. Si
+    ``sync_all`` no lo persistiera, todos seguirian en verde y en produccion la
+    comparacion nunca se haria: el panel volveria a la marca de tiempo sola,
+    que es exactamente el estado del que vengo. Por eso este corre el
+    ``sync_all`` de verdad y lee la base.
+    """
+    import modules.version_info as vi
+    monkeypatch.setattr(vi, "GIT_COMMIT_SHA", "41d43fabcdef")
+
+    asyncio.run(_sync_con_backfill(tl))
+
+    est = tl.funding_repair_status()
+    assert est["commit_intento"] == "41d43fa", \
+        f"la corrida no dejo grabado su build: {est}"
+
+    # Un deploy nuevo mueve SOLO el lado "actual": la marca guardada sigue
+    # siendo la del build que efectivamente corrio, que es lo que hace
+    # detectable la discrepancia.
+    monkeypatch.setattr(vi, "GIT_COMMIT_SHA", "01aa918fedcba")
+    est = tl.funding_repair_status()
+    assert est["commit_intento"] == "41d43fa", est
+    assert est["commit_actual"] == "01aa918", est
+    assert "build ANTERIOR" in _render(est), _render(est)

@@ -1062,6 +1062,35 @@ async def backfill_funding_gaps(wallet: str, max_gaps: int = GAP_MAX_POR_CORRIDA
 META_ULTIMO_INTENTO = "funding_backfill_last_run"
 META_ULTIMO_ERROR = "funding_backfill_last_error"
 
+# R-FUNDING-BUILD (2026-09-03) — QUE BUILD FUE EL QUE CORRIO
+# =========================================================
+# El panel de las 02:38 decia "✅ ultimo intento hace 25min" sobre un deploy
+# recien salido. Suena a que la reparacion de ESTE build ya corrio. No habia
+# corrido: los 25 minutos eran del build ANTERIOR, con el criterio viejo y el
+# tope viejo, o sea con la conducta que este deploy vino a cambiar.
+#
+# Lo tuve que deducir a mano de otra linea (`sin medir 14`, que solo puede
+# pasar si ninguna prueba nueva se escribio). Eso es la definicion del defecto
+# que vengo persiguiendo: dos estados que piden lecturas opuestas —"la version
+# nueva ya se ejercito" y "la version nueva no corrio todavia"— renderizados
+# igual. La marca de tiempo sola no alcanza porque no dice QUE codigo la
+# escribio.
+META_ULTIMO_COMMIT = "funding_backfill_last_commit"
+
+
+def _commit_actual() -> str:
+    """Commit corto del build que esta corriendo, o "" si no se sabe.
+
+    Devolver "" es un "no se", no un valor plausible: el panel solo compara
+    cuando tiene los dos lados, asi que una cadena vacia calla la comparacion
+    en vez de inventar que coinciden o que difieren.
+    """
+    try:
+        from modules.version_info import GIT_COMMIT_SHA
+        return str(GIT_COMMIT_SHA or "")[:7]
+    except Exception:  # noqa: BLE001 - saber el commit no puede tumbar un sync
+        return ""
+
 
 def funding_repair_status() -> dict[str, Any]:
     """Que hizo la reparacion de tramos mudos, y si de verdad llego a correr.
@@ -1098,6 +1127,10 @@ def funding_repair_status() -> dict[str, Any]:
         "ultimo_intento": _meta_get(META_ULTIMO_INTENTO),
         "horas_desde_intento": _horas_desde_iso(_meta_get(META_ULTIMO_INTENTO)),
         "ultimo_error": _meta_get(META_ULTIMO_ERROR) or None,
+        # R-FUNDING-BUILD: cual corrio y cual esta corriendo. Si difieren, el
+        # "hace N min" es de OTRO codigo y no dice nada sobre este.
+        "commit_intento": _meta_get(META_ULTIMO_COMMIT) or None,
+        "commit_actual": _commit_actual() or None,
         "pruebas": pruebas,
         # R-FUNDING-NOVEDAD: las tres son distintas y por eso se publican las
         # tres. "sin_novedad" son tramos probados irreparables; "sin_medir" son
@@ -1500,6 +1533,10 @@ async def sync_all(send: Callable | None = None) -> dict[str, Any]:
         # hay nada que hacer" de "nunca se ejecuto", que desde el panel se ven
         # identicas y llevan a conclusiones opuestas.
         _meta_set(META_ULTIMO_INTENTO, datetime.now(timezone.utc).isoformat())
+        # R-FUNDING-BUILD: con QUE codigo. "Hace 25 min" sobre un deploy nuevo
+        # se lee como "la version nueva ya se ejercito", y puede ser el intento
+        # del build anterior — el que tenia justo la conducta que se cambio.
+        _meta_set(META_ULTIMO_COMMIT, _commit_actual())
         fallas: list[str] = []
         for w in result["ok"]:
             try:
