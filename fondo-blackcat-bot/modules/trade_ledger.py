@@ -284,6 +284,26 @@ def _conn() -> sqlite3.Connection:
             updated_at TEXT NOT NULL
         )
     """)
+    # R-FUNDING-HUECO (2026-09-03): registro de los huecos de funding que ya
+    # se volvieron a pedir a HL, con cuantas filas trajo el reintento.
+    #
+    # Existe por una sola razon, y es la que decide si una cruz roja se puede
+    # cerrar: si HL contesta la ventana y sigue sin traer nada, ese hueco es
+    # IRREPARABLE, y repetir el pedido en cada sync es gastar presupuesto de
+    # rate limit para volver a confirmar lo mismo. Sin este registro no hay
+    # forma de distinguir "todavia no lo intentamos" de "ya lo intentamos y no
+    # existe" — y son los dos estados que mandan a lugares opuestos: uno a
+    # reparar, el otro a dejar de reportarlo como falla.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS ledger_funding_probe (
+            wallet TEXT NOT NULL,
+            a INTEGER NOT NULL,
+            b INTEGER NOT NULL,
+            probed_at TEXT NOT NULL,
+            found INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (wallet, a, b)
+        )
+    """)
     # Migration for DBs created before R-LEDGER-FIX (Railway volume keeps the
     # old file): add margin_open if the table predates it.
     cols = {r["name"] for r in con.execute("PRAGMA table_info(ledger_positions)")}
@@ -756,6 +776,156 @@ async def _fetch_funding_paged(wallet: str, start_ms: int) -> list[dict[str, Any
     return out
 
 
+async def _fetch_funding_window(wallet: str, a: int, b: int) -> list[dict[str, Any]]:
+    """``userFunding`` acotado por los DOS extremos.
+
+    El paginado normal manda solo ``startTime`` y avanza para adelante. Aca se
+    manda tambien ``endTime`` porque no se esta poniendo al dia: se esta
+    releyendo un tramo puntual que ya quedo atras del cursor.
+    """
+    from modules.portfolio import _info
+    out: list[dict[str, Any]] = []
+    cursor = max(0, int(a))
+    fin = int(b)
+    for i in range(MAX_PAGES):
+        if i:
+            await asyncio.sleep(PAGE_PAUSE_SEC)
+        page = await _page(
+            lambda c=cursor: _info({"type": "userFunding", "user": wallet,
+                                    "startTime": int(c), "endTime": fin}),
+            wallet, "funding_gap", cursor, i, out)
+        if not page:
+            break
+        out.extend(page)
+        if len(page) < FUNDING_PAGE_CAP:
+            break
+        nuevo = max(int(e.get("time", 0) or 0) for e in page)
+        if nuevo <= cursor:
+            log.warning("LEDGER funding-gap cursor stalled at %d for %s",
+                        nuevo, wallet[:6])
+            break
+        cursor = nuevo
+    return out
+
+
+def funding_gaps(wallet: str, limit: int = 200) -> list[tuple[int, int]]:
+    """Tramos MUDOS que hay que volver a pedir, ya fusionados.
+
+    R-FUNDING-HUECO — POR QUE ESTO TIENE QUE EXISTIR
+    ================================================
+    ``funding_cursor_ms`` solo avanza. Es la decision correcta para ponerse al
+    dia y es exactamente la que vuelve permanente cualquier hueco: una vez que
+    el cursor paso por encima de una franja sin haberla traido, ningun sync
+    posterior vuelve a mirarla. El agujero no se cierra con el tiempo — se
+    fosiliza.
+
+    Eso es cierto independientemente de QUE lo abrio (un dia sin correr, una
+    respuesta rara contada como "no hay datos", un restore). Por eso la
+    reparacion se escribe antes de saber la causa: la causa cambia como se
+    evita el proximo, no como se arregla el que ya esta.
+
+    Un tramo entra aca solo si hay una posicion CERRADA que estuvo abierta
+    durante el silencio. Sin eso, "no hay funding" es lo correcto —  no habia
+    posicion que lo devengara— y volver a pedirlo seria gastar rate limit en
+    confirmar un cero legitimo.
+    """
+    con = _conn()
+    try:
+        rows = [dict(r) for r in con.execute(
+            "SELECT wallet, coin, open_ts, close_ts FROM ledger_positions "
+            "WHERE wallet=? AND funding_net=0 AND close_ts-open_ts > 3600000 "
+            "ORDER BY close_ts DESC LIMIT ?", (wallet, limit))]
+        crudos: list[tuple[int, int]] = []
+        for r in rows:
+            a, b = int(r["open_ts"]), int(r["close_ts"])
+            hay = con.execute(
+                "SELECT COUNT(*) n FROM ledger_funding "
+                "WHERE wallet=? AND time BETWEEN ? AND ?",
+                (wallet, a, b)).fetchone()
+            if int(hay["n"] or 0):
+                continue  # el tramo no esta mudo: no es este el problema
+            prev = con.execute(
+                "SELECT MAX(time) t FROM ledger_funding WHERE wallet=? AND time<?",
+                (wallet, a)).fetchone()["t"]
+            post = con.execute(
+                "SELECT MIN(time) t FROM ledger_funding WHERE wallet=? AND time>?",
+                (wallet, b)).fetchone()["t"]
+            # Los bordes acotan el pedido. Si falta alguno se usa el propio
+            # ciclo: pedir de mas es barato, pedir de menos deja el hueco.
+            crudos.append((int(prev) if prev is not None else a,
+                           int(post) if post is not None else b))
+        ya = {(int(r["a"]), int(r["b"]))
+              for r in con.execute(
+                  "SELECT a, b FROM ledger_funding_probe WHERE wallet=? AND found=0",
+                  (wallet,))}
+    finally:
+        con.close()
+    return [g for g in _fusionar(crudos) if g not in ya]
+
+
+def _fusionar(vs: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Une los tramos que se tocan.
+
+    Los 27 ciclos de produccion caen en UN silencio de 24h. Sin esto serian 27
+    relecturas de la misma ventana: 27 llamadas de peso 20 para traer el mismo
+    payload, que es la forma mas directa de convertir la reparacion en el
+    proximo 429.
+    """
+    if not vs:
+        return []
+    vs = sorted(vs)
+    out = [list(vs[0])]
+    for a, b in vs[1:]:
+        if a <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return [(a, b) for a, b in out]
+
+
+def _anotar_probe(wallet: str, a: int, b: int, found: int) -> None:
+    con = _conn()
+    try:
+        con.execute(
+            "INSERT INTO ledger_funding_probe (wallet, a, b, probed_at, found) "
+            "VALUES (?,?,?,?,?) ON CONFLICT(wallet, a, b) DO UPDATE SET "
+            "probed_at=excluded.probed_at, found=excluded.found",
+            (wallet, int(a), int(b),
+             datetime.now(timezone.utc).isoformat(), int(found)))
+        con.commit()
+    finally:
+        con.close()
+
+
+async def backfill_funding_gaps(wallet: str, max_gaps: int = 3) -> dict[str, Any]:
+    """Vuelve a pedirle a HL los tramos mudos y reconstruye.
+
+    Acotado a ``max_gaps`` por corrida a proposito: cada pagina pesa 20 contra
+    el presupuesto de 1200/min por IP, el mismo que ya tropezo antes. Los
+    tramos que sobran quedan para la proxima — un hueco viejo no se vuelve mas
+    urgente por esperar un sync mas, y una reparacion que dispara 429s se
+    convierte en el problema que venia a resolver.
+
+    Una falla de red NO se traga: ``_page`` levanta ``LedgerSyncError`` y esto
+    la deja propagar, igual que el sync normal.
+    """
+    huecos = await asyncio.to_thread(funding_gaps, wallet)
+    res: dict[str, Any] = {"gaps": len(huecos), "probed": 0, "rows": 0}
+    if not huecos:
+        return res
+    for a, b in huecos[:max_gaps]:
+        filas = await _fetch_funding_window(wallet, a, b)
+        n = await asyncio.to_thread(_store_funding, wallet, filas)
+        await asyncio.to_thread(_anotar_probe, wallet, a, b, len(filas))
+        res["probed"] += 1
+        res["rows"] += n
+        log.info("LEDGER funding-gap %s [%d..%d]: HL devolvio %d fila(s), "
+                 "%d nuevas", wallet[:6], a, b, len(filas), n)
+    if res["rows"]:
+        await asyncio.to_thread(rebuild_wallet_positions, wallet)
+    return res
+
+
 def _store_fills(wallet: str, fills: list[dict[str, Any]]) -> int:
     con = _conn()
     try:
@@ -1119,6 +1289,24 @@ async def sync_all(send: Callable | None = None) -> dict[str, Any]:
                     "Los cierres de esta wallet pueden faltar o quedar con "
                     "funding incompleto en el proximo reporte.",
                     "ledger_sync", w, "failed", send))
+        # R-FUNDING-HUECO: recien DESPUES de que cada wallet se puso al dia se
+        # intenta cerrar los tramos mudos que quedaron atras del cursor. El
+        # orden importa: al dia primero, arqueologia despues — si el sync
+        # normal fallo, el hueco puede ser de esta corrida y todavia no hay
+        # nada que reparar.
+        for w in result["ok"]:
+            try:
+                r = await backfill_funding_gaps(w)
+                if r["probed"]:
+                    result.setdefault("gaps", {})[w] = r
+            except Exception as exc:  # noqa: BLE001
+                # No degrada el sync: la wallet YA se sincronizo bien. Que la
+                # relectura de un tramo viejo falle no puede volver a poner en
+                # rojo lo que si funciono, pero tampoco se calla — sin este
+                # log la reparacion podria no correr nunca sin que se note.
+                health_registry.swallowed("ledger", "sync_all")
+                log.warning("LEDGER funding-gap backfill fallo para %s: %s",
+                            w[:6], exc)
         try:
             ensure_report_cursor_seeded()
         except Exception:  # noqa: BLE001

@@ -336,6 +336,19 @@ def _check_i5(con, rows: list[dict[str, Any]]
             {"n": len(otra_moneda), "coin_ciclo": str(peor["coin"]),
              "coins_funding": monedas}))
 
+    # R-FUNDING-HUECO: un tramo que YA se le volvio a pedir a HL y que volvio
+    # vacio esta probado irreparable. Mantenerlo en rojo seria la cruz que no
+    # se puede cerrar — el mismo defecto que se saco de la linea de redeploy y
+    # del horizonte del funding. Baja a nota, con la fecha de la prueba.
+    silencio, probados = _sacar_probados_vacios(con, silencio)
+    if probados:
+        notas.append(
+            f"funding: {probados} ciclo(s) largos caen en tramos que ya se le "
+            f"volvieron a pedir a HL y volvieron VACIOS. El dato no existe del "
+            f"lado de HL, asi que no hay resync que lo traiga — deja de "
+            f"contar como violacion para no dejar una cruz que nadie puede "
+            f"cerrar.")
+
     if silencio:
         peor, hueco_h = max(silencio, key=lambda t: t[1])
         horas = max((int(r["close_ts"]) - int(r["open_ts"])) / 3_600_000
@@ -423,6 +436,40 @@ def _partir_por_forma(con, dentro: list[dict[str, Any]]) -> tuple[
             silencio.append((r, _silencio_horas(con, w, a, b)))
 
     return redondeo, otra_moneda, silencio
+
+
+def _sacar_probados_vacios(con, silencio: list[tuple[dict[str, Any], float]]
+                           ) -> tuple[list[tuple[dict[str, Any], float]], int]:
+    """Separa los ciclos cuyo tramo mudo ya se reintento y volvio vacio.
+
+    Ante la falta de evidencia se reporta la falla, no se la excusa: un tramo
+    baja a nota SOLO si hay una prueba registrada que volvio vacia. Sin
+    pruebas, todos los ciclos siguen siendo violacion.
+
+    La guarda de la tabla ausente NO se alcanza desde el llamador actual:
+    ``trade_ledger._conn()`` hace ``CREATE TABLE IF NOT EXISTS`` de todo el
+    esquema en cada conexion, asi que incluso sobre una DB vieja la tabla ya
+    existe —vacia— cuando llega aca. Se deja igual porque la conexion entra
+    por parametro y un llamador futuro podria pasar una que no venga de ese
+    bootstrap. Por eso su test es unitario: un test que dropea la tabla no
+    prueba nada, la conexion siguiente la vuelve a crear.
+    """
+    if "ledger_funding_probe" not in _tables(con):
+        return silencio, 0
+    vacios = [(str(r["wallet"]), int(r["a"]), int(r["b"]))
+              for r in con.execute(
+                  "SELECT wallet, a, b FROM ledger_funding_probe WHERE found=0")]
+    if not vacios:
+        return silencio, 0
+    quedan: list[tuple[dict[str, Any], float]] = []
+    n = 0
+    for r, h in silencio:
+        w, a, b = str(r["wallet"]), int(r["open_ts"]), int(r["close_ts"])
+        if any(pw == w and pa <= a and b <= pb for pw, pa, pb in vacios):
+            n += 1
+        else:
+            quedan.append((r, h))
+    return quedan, n
 
 
 def _silencio_horas(con, wallet: str, a: int, b: int) -> float:

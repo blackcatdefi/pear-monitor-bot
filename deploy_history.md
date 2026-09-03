@@ -2,6 +2,76 @@
 
 Append-only log per Cowork constitución §6 paso 8.
 
+## 2026-09-03 — R-FUNDING-HUECO (el cursor solo avanza, asi que el hueco se fosiliza)
+
+- **base commit**: `92c4f2c` · **service**: pear-monitor-bot
+  (amusing-acceptance) / branch `master`
+- **entrada**: `/diagnostico` de las 01:32 UTC, deploy `a4223866`. La ronda
+  anterior partio el agujero en tres formas y produccion contesto cual es:
+  **tramo mudo**. 27 ciclos, el mas largo de 20h, sin NI UNA acreditacion de
+  ninguna moneda en todo el intervalo, con **24h de silencio** entre la ultima
+  previa y la primera posterior. No es el nombre de la moneda ni el redondeo:
+  es el paginado de `userFunding`.
+
+### El defecto es estructural y no depende de la causa
+
+`funding_cursor_ms` solo avanza. Una vez que paso por arriba de una ventana
+sin traerla, ningun sync posterior la vuelve a mirar. El agujero no se cierra
+con el tiempo — se fosiliza. Eso vale sea cual sea el motivo por el que la
+ventana se salteo (un 429, un corte, una pagina de 500 que se creyo completa),
+y por eso la reparacion se pudo escribir sin saber todavia cual de los tres
+fue.
+
+### Lo que se construyo
+
+| pieza | donde | que hace |
+| --- | --- | --- |
+| `funding_gaps(wallet)` | `trade_ledger.py` | saca los tramos mudos, acotados por los bordes REALES del silencio (no por el ciclo), y los **fusiona**: 27 ciclos adentro de un mismo silencio son **1** pedido |
+| `_fetch_funding_window(w,a,b)` | `trade_ledger.py` | `userFunding` acotado por los **dos** extremos (`startTime` y `endTime`), paginado de a 500 |
+| `ledger_funding_probe` | esquema | registro `(wallet,a,b,probed_at,found)`. Sin esto no hay forma de distinguir *"todavia no lo intentamos"* de *"ya lo intentamos y no existe"* |
+| `backfill_funding_gaps` | `sync_all` | corre adentro del lock, `max_gaps=3` por corrida para no quemar el rate limit, y **reconstruye** las posiciones si trajo filas |
+| `_sacar_probados_vacios` | `ledger_invariants.py` | el tramo probado-vacio baja de ❌ a `ℹ` nota |
+
+### La regla que gobierna el diseño
+
+Una falla que no se puede cerrar entrena a ignorar el panel entero — es la
+misma leccion de R-RAILWAY-VARS (la cruz permanente de `RAILWAY_TOKEN`). Asi
+que la violacion nueva tiene salida por los dos lados: o se repara sola y
+desaparece, o HL prueba que el dato no existe y baja a nota. **Una falla de
+red no cuenta como prueba**: el probe se anota DESPUES de tener respuesta, no
+antes. Un default silencioso en el camino del dinero nunca es una degradacion
+aceptable.
+
+### Verificacion — 12 mutaciones, dos de ellas VACUAS al primer intento
+
+- **M7, "no reconstruir despues de traer las filas"**: no hacia fallar ningun
+  test. Que el chequeo se calle NO alcanza — I5 lee `ledger_funding` directo,
+  asi que se calla apenas entran las filas, aunque `ledger_positions.funding_net`
+  siga en 0.00. Y ese es el numero que va al track record: el P&L quedaria mal
+  **con el panel en verde**, que es peor que el estado del que salimos. Test
+  nuevo que la agarra: `test_el_funding_reparado_llega_a_la_fila_del_ciclo`
+  (`funding_net == -2.0`, `net_pnl == 96.0`).
+- **M12, "sin tabla de probes se excusa todo"**: el test que la tenia que
+  agarrar dropeaba `ledger_funding_probe` y despues llamaba al chequeo. No
+  probaba nada — `_conn()` hace `CREATE TABLE IF NOT EXISTS` de todo el
+  esquema en **cada** conexion, asi que la tabla estaba de vuelta antes de que
+  el chequeo la mirara. Se reescribio como test unitario contra una conexion
+  cruda, y el docstring de `_sacar_probados_vacios` ahora dice que esa rama no
+  se alcanza desde el llamador actual, en vez de afirmar lo contrario.
+- Un tercer defecto era del propio fixture: `_fills()` insertaba `dir=''` y
+  `_is_perp_fill` filtra por ahi, asi que `reconcile_positions` devolvia `[]`.
+  El test de `funding_net` estaba midiendo nada. Era defecto del test, no de
+  produccion — produccion tiene 27 ciclos reconstruidos.
+- **12/12** mutaciones detectadas · suite **1507 passed** (1489 + 18 nuevos) ·
+  guarda de degradacion silenciosa **8/8** · `bug_class_scan` sin cambios en
+  **TOTAL 7 (C1 0 · C2 6 · C3 0 · C4 1)**.
+
+### Lo que esta ronda NO puede afirmar todavia
+
+Que los 27 ciclos se reparen. La reparacion pide de vuelta 3 huecos por sync;
+si HL devuelve las filas, la violacion desaparece; si vuelve vacio, baja a
+nota. **Cual de los dos pasa lo dice el proximo `/diagnostico`, no yo.**
+
 ## 2026-09-03 — R-I5-FORMA (el bot contesto, y contesto que mi hipotesis era falsa)
 
 - **base commit**: `180e553` · **service**: pear-monitor-bot
