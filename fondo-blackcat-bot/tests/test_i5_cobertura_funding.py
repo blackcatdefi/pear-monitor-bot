@@ -151,7 +151,7 @@ def test_la_violacion_nombra_la_wallet_porque_es_donde_se_arregla(ledger):
     assert v.row.get("wallet") == W
 
 
-def test_cero_adentro_de_la_ventana_con_datos_es_un_agujero_real(ledger):
+def test_cero_rodeado_de_acreditaciones_es_un_agujero_real(ledger):
     """El caso que el chequeo viejo TAPABA.
 
     Hay funding de antes y de despues del ciclo, y del ciclo no. Eso no lo
@@ -165,7 +165,7 @@ def test_cero_adentro_de_la_ventana_con_datos_es_un_agujero_real(ledger):
     con.close()
 
     vs, notas = li.check_con_notas()
-    assert _hay(vs, "adentro de la ventana"), (
+    assert _hay(vs, "tramo mudo"), (
         f"un cero rodeado de acreditaciones es un agujero y tiene que gritar: "
         f"{_inv(vs)}")
     assert not notas
@@ -258,7 +258,7 @@ def test_la_ventana_no_se_parte_por_moneda(ledger):
     con.close()
 
     vs = li.check_invariants()
-    assert _hay(vs, "adentro de la ventana"), _inv(vs)
+    assert _hay(vs, "tramo mudo"), _inv(vs)
 
 
 def test_cada_wallet_se_juzga_con_su_propia_ventana(ledger):
@@ -271,9 +271,153 @@ def test_cada_wallet_se_juzga_con_su_propia_ventana(ledger):
     con.close()
 
     vs = li.check_invariants()
-    assert _hay(vs, "adentro de la ventana"), _inv(vs)
-    sin = [v for v in vs if "sin ninguna acreditacion" in v.invariant]
+    assert _hay(vs, "tramo mudo"), _inv(vs)
+    sin = [v for v in vs if "wallet sin ninguna acreditacion" in v.invariant]
     assert len(sin) == 1 and sin[0].row.get("wallet") == W2, _inv(vs)
+
+
+# ─── 3bis. la FORMA del agujero (R-I5-FORMA) ────────────────────────────────
+#
+# Produccion contesto que los 27 ciclos caen enteros adentro de la ventana, o
+# sea que la hipotesis del horizonte era falsa para esas filas. Pero "adentro
+# de la ventana" es una etiqueta sobre el MIN/MAX de la wallet: no dice nada
+# sobre que hay adentro del intervalo del ciclo. Tres causas distintas caian
+# todas en ese mismo cartel, y cada una se arregla en otro archivo.
+
+def test_si_hay_acreditaciones_de_su_moneda_no_falta_ningun_dato(ledger):
+    """El falso positivo mas caro: acreditaciones que EXISTEN y suman cero.
+
+    Una posicion chica paga polvo que redondea a 0.00. R4 ya coteja guardado
+    contra recomputo, asi que el numero esta bien calculado. Llamarlo agujero
+    manda a buscar un dato que esta ahi, y ningun resync lo iba a callar.
+    """
+    con = ledger()
+    _pos(con, open_ts=T0, close_ts=T0 + 40 * H)
+    _fund(con, T0 - DIA)                       # ventana abre antes
+    _fund(con, T0 + 10 * H, usdc=0.0)          # ADENTRO, y suma cero
+    _fund(con, T0 + 20 * H, usdc=0.0)
+    _fund(con, T0 + 60 * H)                    # y cierra despues
+    con.close()
+
+    vs, notas = li.check_con_notas()
+    assert not any("I5" in v.invariant for v in vs), (
+        f"las filas estan y suman cero: no falta ningun dato: {_inv(vs)}")
+    assert any("polvo de redondeo" in n for n in notas), notas
+
+
+def test_sin_filas_de_su_moneda_pero_con_otras_acusa_al_nombre(ledger):
+    """La wallet SI cobraba en esa franja, pero para otra moneda.
+
+    Eso descarta la ingesta: el paginado trajo esas horas. Lo que no cuadra es
+    el nombre con el que cada lado guarda la moneda. Mandarlo al paginado
+    seria releer bien lo que ya esta bien leido.
+    """
+    con = ledger()
+    _pos(con, coin="ETH", open_ts=T0, close_ts=T0 + 40 * H)
+    _fund(con, T0 - DIA, coin="BTC")
+    _fund(con, T0 + 10 * H, coin="BTC")        # ADENTRO, otra moneda
+    _fund(con, T0 + 20 * H, coin="SOL")
+    _fund(con, T0 + 60 * H, coin="BTC")
+    con.close()
+
+    vs = li.check_invariants()
+    v = next((v for v in vs if "cobrando en el mismo rato" in v.invariant), None)
+    assert v is not None, (
+        f"con acreditaciones de otras monedas adentro del intervalo el "
+        f"sospechoso es el nombre, no el paginado: {_inv(vs)}")
+    assert not _hay(vs, "tramo mudo"), (
+        f"un tramo con acreditaciones no es mudo: {_inv(vs)}")
+    assert "BTC" in v.detail and "SOL" in v.detail, (
+        f"sin las otras monedas la violacion no se puede cotejar: {v.detail}")
+    assert v.row.get("coin_ciclo") == "ETH"
+
+
+def test_sin_ninguna_fila_de_la_wallet_acusa_al_paginado(ledger):
+    con = ledger()
+    _pos(con, open_ts=T0, close_ts=T0 + 40 * H)
+    _fund(con, T0 - DIA)
+    _fund(con, T0 + 60 * H)
+    con.close()
+
+    vs = li.check_invariants()
+    v = next((v for v in vs if "tramo mudo" in v.invariant), None)
+    assert v is not None, _inv(vs)
+    assert "userFunding" in v.detail, (
+        f"tiene que nombrar donde se arregla: {v.detail}")
+
+
+def test_el_silencio_se_mide_entre_borde_y_borde_no_por_el_ciclo(ledger):
+    """El largo del ciclo dice cuanto del hueco VIMOS; el hueco real va de la
+    ultima acreditacion previa a la primera posterior. Reportar el del ciclo
+    subestima el problema justo cuando se lo compara contra el paginado."""
+    con = ledger()
+    _pos(con, open_ts=T0, close_ts=T0 + 40 * H)   # el ciclo dura 40h
+    _fund(con, T0 - 10 * H)
+    _fund(con, T0 + 70 * H)                        # el silencio dura 80h
+    con.close()
+
+    v = next(v for v in li.check_invariants() if "tramo mudo" in v.invariant)
+    assert v.row.get("hueco_h") == 80.0, v.row
+    assert "80h" in v.detail, v.detail
+
+
+def test_sin_borde_posterior_no_se_inventa_un_numero(ledger):
+    """Guarda defensiva de ``_silencio_horas``, probada como unidad A PROPOSITO.
+
+    El primer intento de este test armaba una DB y miraba las violaciones. No
+    media nada: por como esta definido el bucket "dentro" (``MIN <= open`` y
+    ``close <= MAX``) los dos bordes SIEMPRE existen cuando se llega aca —
+    ``close <= MAX`` garantiza una fila en ``close`` o despues. O sea que el
+    camino sin borde es inalcanzable desde el llamador de hoy, y el test
+    pasaba con la guarda rota. Una mutacion que devolvia 99.0 no lo hacia
+    fallar; por eso se reescribio contra el helper.
+
+    La guarda igual se queda: protege contra que un futuro toque al predicado
+    de "dentro" convierta un borde ausente en un largo inventado, que despues
+    se lee como evidencia contra el paginado.
+    """
+    con = ledger()
+    _fund(con, T0 - DIA)              # hay borde previo, no posterior
+    assert li._silencio_horas(con, W, T0, T0 + 40 * H) == 0.0
+    assert li._silencio_horas(con, W2, T0, T0 + 40 * H) == 0.0   # ni uno
+    con.close()
+
+
+def test_el_bucket_mudo_solo_mira_la_wallet_del_ciclo(ledger):
+    """Acreditaciones de OTRA wallet en el mismo rato no tapan el silencio."""
+    con = ledger()
+    _pos(con, wallet=W, open_ts=T0, close_ts=T0 + 40 * H)
+    _fund(con, T0 - DIA, wallet=W)
+    _fund(con, T0 + 60 * H, wallet=W)
+    _fund(con, T0 + 20 * H, wallet=W2)     # adentro, pero de otra wallet
+    con.close()
+
+    vs = li.check_invariants()
+    assert _hay(vs, "tramo mudo"), (
+        f"el funding de otra wallet no es evidencia sobre esta: {_inv(vs)}")
+    assert not _hay(vs, "cobrando en el mismo rato"), _inv(vs)
+
+
+def test_las_tres_formas_conviven_sin_pisarse(ledger):
+    """Guarda contra el arreglo de mas: colapsar los buckets en el primero que
+    matchea volveria a dar un solo cartel para tres causas."""
+    con = ledger()
+    # redondeo (BTC en W): acreditaciones propias que suman cero
+    _pos(con, coin="BTC", open_ts=T0, close_ts=T0 + 40 * H)
+    _fund(con, T0 - DIA, coin="BTC")
+    _fund(con, T0 + 5 * H, usdc=0.0, coin="BTC")
+    # nombre (ETH en W): sin filas propias, con filas de BTC adentro
+    _pos(con, coin="ETH", open_ts=T0 + 100 * H, close_ts=T0 + 140 * H)
+    _fund(con, T0 + 110 * H, coin="BTC")
+    # mudo (SOL en W): ni una fila de la wallet en el intervalo
+    _pos(con, coin="SOL", open_ts=T0 + 200 * H, close_ts=T0 + 240 * H)
+    _fund(con, T0 + 300 * H, coin="BTC")
+    con.close()
+
+    vs, notas = li.check_con_notas()
+    assert _hay(vs, "cobrando en el mismo rato"), _inv(vs)
+    assert _hay(vs, "tramo mudo"), _inv(vs)
+    assert any("polvo de redondeo" in n for n in notas), notas
 
 
 # ─── 4. las notas no se disfrazan de fallas ─────────────────────────────────

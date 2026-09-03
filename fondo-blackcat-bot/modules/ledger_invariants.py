@@ -244,10 +244,47 @@ def _check_i5(con, rows: list[dict[str, Any]]
     * **wallet sin NINGUNA acreditacion guardada** — el bug D1 en su forma
       pura. Grita, y grita por wallet, que es donde se arregla.
     * **ciclo entero adentro de la ventana con datos** — tenemos funding de
-      antes y de despues de ese ciclo, y del ciclo no. Eso si es un agujero.
+      antes y de despues de ese ciclo, y del ciclo no. Eso si es un agujero,
+      y la segunda vuelta (abajo) dice de que FORMA.
     * **ciclo que cae fuera (o a caballo) de la ventana** — NO es violacion.
       Se reporta como nota, con la fecha del borde, para que la proxima ronda
       no vuelva a investigar lo mismo.
+
+    LA SEGUNDA VUELTA (R-I5-FORMA, 2026-09-03, misma jornada)
+    ========================================================
+    Produccion contesto: los 27 caen ENTEROS adentro de la ventana. O sea que
+    la hipotesis del horizonte era falsa para estas filas — bien, para eso el
+    chequeo pregunta en vez de suponer. Pero "es un agujero" TAMPOCO alcanza,
+    y por el mismo motivo por el que no alcanzaba "un cero exacto es un dato
+    que falta": nombra un sintoma y calla la unica pregunta cuya respuesta
+    cambia el arreglo. La ventana se mide por wallet con MIN/MAX; que el ciclo
+    caiga adentro de ese rango NO dice nada sobre que hay dentro del ciclo.
+
+    Hay tres formas distintas detras del mismo 0.00, con tres arreglos que no
+    se parecen en nada, y separarlas cuesta una query:
+
+    * **HAY filas de funding para (wallet, coin) en el intervalo.** Entonces
+      no falta ningun dato: las acreditaciones existen y suman cero. Es polvo
+      de redondeo sobre una posicion chica, y R4 ya lo confirma cotejando el
+      guardado contra el recomputo. NO es violacion. Que el chequeo anterior
+      lo tratara como agujero es un falso positivo que ninguna cantidad de
+      resync habria callado.
+    * **No hay para esa moneda, PERO si para otras en el mismo intervalo.**
+      La wallet estaba pagando funding en esa franja horaria; lo que no cuadra
+      es la moneda. Eso apunta al nombre con el que se guarda cada lado
+      (``ledger_fills.coin`` contra ``ledger_funding.coin``), no a la
+      ingesta. La violacion nombra las otras monedas, que es el dato con el
+      que se compara.
+    * **No hay ninguna para la wallet en todo el intervalo.** El funding de HL
+      se acredita cada hora: veinte horas de silencio para una wallet con
+      posicion abierta no es un mercado tranquilo. Eso si apunta a la ingesta
+      de ``userFunding``, y la violacion reporta el largo real del silencio
+      —de la ultima acreditacion previa a la primera posterior— porque ese
+      numero es el que se compara contra el paginado.
+
+    Ninguna de las tres se puede adivinar desde la sesion: la DB corre en
+    Railway. Igual que la ronda anterior, el chequeo se escribe para que el
+    bot conteste solo.
     """
     LARGO_MS = 3_600_000
     ventanas = _ventanas_de_funding(con)
@@ -282,18 +319,53 @@ def _check_i5(con, rows: list[dict[str, Any]]
             f"que reporto 0.00 en todas las patas.",
             {"wallet": w, "n": len(rs)}))
 
-    if dentro:
-        horas = max((int(r["close_ts"]) - int(r["open_ts"])) / 3_600_000
-                    for r in dentro)
+    redondeo, otra_moneda, silencio = _partir_por_forma(con, dentro)
+
+    if otra_moneda:
+        monedas = sorted({c for _, cs in otra_moneda for c in cs})[:6]
+        peor = max(otra_moneda,
+                   key=lambda t: int(t[0]["close_ts"]) - int(t[0]["open_ts"]))[0]
         out.append(Violation(
-            "I5 funding cero adentro de la ventana con datos",
-            f"{len(dentro)} ciclo(s) de mas de 1h con funding_net = 0.00 "
-            f"exacto (el mas largo, {horas:.0f}h) cuyo intervalo cae ENTERO "
-            f"adentro del tramo del que si tenemos acreditaciones. Hay "
-            f"funding de antes y de despues, y del ciclo no: es un agujero, "
-            f"no un horizonte.",
-            {"n": len(dentro),
-             "ejemplos": [f"{r['coin']}@{r['close_ts']}" for r in dentro[:5]]}))
+            "I5 funding cero con la wallet cobrando en el mismo rato",
+            f"{len(otra_moneda)} ciclo(s) de mas de 1h con funding_net = 0.00 "
+            f"sin NINGUNA fila para su moneda, aunque la wallet si tiene "
+            f"acreditaciones en ese mismo intervalo para: "
+            f"{', '.join(monedas)}. La franja horaria se leyo bien; lo que no "
+            f"cuadra es el nombre de la moneda entre ledger_fills "
+            f"(guarda '{peor['coin']}') y ledger_funding. No es la ingesta.",
+            {"n": len(otra_moneda), "coin_ciclo": str(peor["coin"]),
+             "coins_funding": monedas}))
+
+    if silencio:
+        peor, hueco_h = max(silencio, key=lambda t: t[1])
+        horas = max((int(r["close_ts"]) - int(r["open_ts"])) / 3_600_000
+                    for r, _ in silencio)
+        cuanto = (f"{hueco_h:.0f}h" if hueco_h > 0
+                  else "sin acreditacion previa ni posterior")
+        out.append(Violation(
+            # El nombre NO puede contener "sin ninguna acreditacion": esa
+            # frase ya identifica a la violacion de wallet entera, y dos
+            # etiquetas que se contienen entre si vuelven ambiguo tanto el
+            # filtro de los tests como la lectura del panel.
+            "I5 funding cero en un tramo mudo de la wallet",
+            f"{len(silencio)} ciclo(s) de mas de 1h con funding_net = 0.00 "
+            f"exacto (el mas largo, {horas:.0f}h) en los que la wallet no "
+            f"tiene NI UNA acreditacion, de ninguna moneda, en todo el "
+            f"intervalo. El funding de HL se acredita cada hora, asi que eso "
+            f"es un silencio de {cuanto} entre la ultima previa y la primera "
+            f"posterior: apunta al paginado de userFunding, no al nombre de "
+            f"la moneda.",
+            {"n": len(silencio), "hueco_h": round(hueco_h, 1),
+             "ejemplos": [f"{r['coin']}@{r['close_ts']}" for r, _ in silencio[:5]]}))
+
+    if redondeo:
+        horas = max((int(r["close_ts"]) - int(r["open_ts"])) / 3_600_000
+                    for r, _ in redondeo)
+        notas.append(
+            f"funding: {len(redondeo)} ciclo(s) largos (el mayor {horas:.0f}h) "
+            f"con 0.00 SI tienen acreditaciones guardadas para su moneda en su "
+            f"intervalo — existen y suman cero. Es polvo de redondeo sobre "
+            f"posicion chica, no un dato que falte, y ningun resync lo cambia.")
 
     if fuera:
         bordes = sorted({v[0] for w, v in ventanas.items()})
@@ -305,6 +377,73 @@ def _check_i5(con, rows: list[dict[str, Any]]
             f"es reparable con un resync — no cuenta como violacion.")
 
     return out, notas
+
+
+def _partir_por_forma(con, dentro: list[dict[str, Any]]) -> tuple[
+        list[tuple[dict[str, Any], int]],
+        list[tuple[dict[str, Any], list[str]]],
+        list[tuple[dict[str, Any], float]]]:
+    """Mira ADENTRO del intervalo de cada ciclo sospechoso.
+
+    Devuelve ``(redondeo, otra_moneda, silencio)``. La distincion no es
+    cosmetica: cada bucket manda a arreglar un archivo distinto, y el chequeo
+    anterior los imprimia a los tres con el mismo texto.
+
+    Una sola query por ciclo, con agregacion condicional: la PK de
+    ``ledger_funding`` es ``(wallet, time, coin)``, asi que el filtro
+    wallet+rango entra por prefijo de indice y el conteo por moneda sale del
+    mismo barrido.
+    """
+    redondeo: list[tuple[dict[str, Any], int]] = []
+    otra_moneda: list[tuple[dict[str, Any], list[str]]] = []
+    silencio: list[tuple[dict[str, Any], float]] = []
+
+    for r in dentro:
+        w, coin = str(r["wallet"]), str(r["coin"])
+        a, b = int(r["open_ts"]), int(r["close_ts"])
+        fila = con.execute(
+            "SELECT COUNT(*) n_w, "
+            "       SUM(CASE WHEN coin=? THEN 1 ELSE 0 END) n_c, "
+            "       GROUP_CONCAT(DISTINCT coin) coins "
+            "FROM ledger_funding WHERE wallet=? AND time BETWEEN ? AND ?",
+            (coin, w, a, b)).fetchone()
+        n_w = int(fila["n_w"] or 0)
+        n_c = int(fila["n_c"] or 0)
+
+        if n_c > 0:
+            # Hay acreditaciones para esta misma moneda y suman cero. R4 ya
+            # coteja guardado contra recomputo, asi que el 0.00 esta bien
+            # calculado: no falta nada.
+            redondeo.append((r, n_c))
+        elif n_w > 0:
+            crudo = str(fila["coins"] or "")
+            otras = sorted({c for c in crudo.split(",") if c and c != coin})
+            otra_moneda.append((r, otras))
+        else:
+            silencio.append((r, _silencio_horas(con, w, a, b)))
+
+    return redondeo, otra_moneda, silencio
+
+
+def _silencio_horas(con, wallet: str, a: int, b: int) -> float:
+    """Horas entre la ultima acreditacion ANTES de ``a`` y la primera DESPUES
+    de ``b``. Es el largo real del hueco, que es lo que se compara contra el
+    paginado; el largo del ciclo solo dice cuanto de ese hueco vimos.
+
+    Devuelve 0.0 si falta alguno de los dos bordes — ahi el hueco no esta
+    acotado y decir un numero seria inventarlo.
+    """
+    prev = con.execute(
+        "SELECT MAX(time) t FROM ledger_funding WHERE wallet=? AND time<?",
+        (wallet, a)).fetchone()
+    post = con.execute(
+        "SELECT MIN(time) t FROM ledger_funding WHERE wallet=? AND time>?",
+        (wallet, b)).fetchone()
+    t0 = prev["t"] if prev is not None else None
+    t1 = post["t"] if post is not None else None
+    if t0 is None or t1 is None:
+        return 0.0
+    return max(0.0, (int(t1) - int(t0)) / 3_600_000)
 
 
 def _fecha_ms(ms: int) -> str:

@@ -2,6 +2,79 @@
 
 Append-only log per Cowork constitución §6 paso 8.
 
+## 2026-09-03 — R-I5-FORMA (el bot contesto, y contesto que mi hipotesis era falsa)
+
+- **base commit**: `180e553` · **service**: pear-monitor-bot
+  (amusing-acceptance) / branch `master`
+- **entrada**: `/diagnostico` de las 01:18 UTC, deploy `d3d19f28`. El 429 de
+  CoinGecko no volvio (*Precios y mercado* ✅ hace 0h) — R-429-RETRY-AFTER
+  cerrado. Queda **❌ 1 PROBLEMA**, y es el que yo mismo escribi.
+
+### Lo que contesto produccion
+
+Textual: *"27 ciclo(s) de mas de 1h con funding_net = 0.00 exacto (el mas
+largo, 20h) cuyo intervalo cae ENTERO adentro del tramo del que si tenemos
+acreditaciones."*
+
+O sea que la hipotesis del horizonte —fills que llegan mas atras que
+funding— **es falsa para estas 27 filas**. Cero cayeron en la nota. Eso es
+exactamente para lo que se escribio el chequeo de la ronda anterior: la DB
+corre en Railway y desde la sesion no se consulta, asi que la pregunta se
+delego al bot en vez de adivinarla. Contesto en contra de lo que yo esperaba,
+que es la unica forma en la que un chequeo asi sirve de algo.
+
+### El defecto de esta ronda: mi propio mensaje concluyo de mas
+
+`"es un agujero, no un horizonte"` es verdad y **no alcanza**, por el mismo
+motivo por el que no alcanzaba `"un cero exacto es un dato que falta"`. La
+ventana se calcula con `MIN/MAX(time)` **por wallet**. Que el ciclo caiga
+adentro de ese rango no dice absolutamente nada sobre que hay adentro del
+intervalo del ciclo — es, otra vez, una conclusion sobre una lectura que no se
+hizo. Tercera aparicion de la misma familia en el repo.
+
+Descartado por lectura de codigo, no por conjetura: `rebuild_wallet_positions`
+recomputa `funding_net` de **todas** las posiciones de la wallet en cada sync
+(sin `LIMIT`, con `ON CONFLICT … DO UPDATE SET funding_net=excluded…`), asi que
+no es una carrera entre el rebuild y la ingesta. Y R4 no aporta evidencia
+independiente: usa el **mismo** filtro `wallet AND coin AND time BETWEEN`, asi
+que su silencio es tautologico respecto de un desajuste de nombre de moneda.
+
+### Tres causas, un solo cartel, tres arreglos distintos
+
+| adentro del intervalo | que significa | donde se arregla |
+|---|---|---|
+| hay filas de **su** moneda | existen y suman cero → polvo de redondeo | **nada**: es nota |
+| no de su moneda, si de otras | la franja se leyo bien, falla el nombre | `ledger_fills.coin` vs `ledger_funding.coin` |
+| ni una fila de la wallet | silencio real con posicion abierta | paginado de `userFunding` |
+
+El primero es un **falso positivo**: acreditaciones que estan, suman 0.00, y
+ningun resync las iba a cambiar. Se estaba llamando agujero a un dato completo.
+
+La violacion del tramo mudo reporta el largo del silencio **borde a borde**
+(ultima acreditacion previa → primera posterior), no el largo del ciclo: el
+ciclo solo dice cuanto del hueco vimos, y es el numero que se compara contra
+el paginado.
+
+### Verificacion
+
+- suite **1489 passed** (eran 1482) · guarda de degradacion silenciosa 8/8 ·
+  `bug_class_scan` sin cambios (C1 0 · C2 6 · C3 0 · C4 1)
+- **8/8 mutaciones detectadas**. La M6 salio **vacua en el primer intento**:
+  `test_sin_borde_posterior_no_se_inventa_un_numero` armaba una DB y miraba
+  violaciones, pero por como esta definido el bucket "dentro"
+  (`MIN <= open` y `close <= MAX`) los dos bordes **siempre** existen al
+  llegar ahi — el camino era inalcanzable y el test pasaba con la guarda
+  devolviendo 99.0. Reescrito contra el helper como unidad, y el docstring
+  dice por que. Misma clase que la contaminacion por R1 de la ronda anterior.
+
+### Lo que esta ronda NO puede afirmar todavia
+
+Cual de las tres formas explica los 27. La respuesta sigue estando en un solo
+lugar y sigue sin ser consultable desde la sesion. Se lee en el proximo
+`/diagnostico`: si sale "cobrando en el mismo rato" el arreglo es de nombres y
+la violacion ya trae las monedas para cotejar; si sale "tramo mudo" es del
+paginado y trae el largo del silencio; si baja a nota, nunca hubo agujero.
+
 ## 2026-09-03 — R-I5-COBERTURA + R-429-RETRY-AFTER (los dos problemas que dejo el deploy anterior)
 
 - **base commit**: `eb4d718` · **service**: pear-monitor-bot
