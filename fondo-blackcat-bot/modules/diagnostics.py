@@ -432,6 +432,42 @@ def _b_autoactualizacion() -> dict[str, Any]:
     }
 
 
+# R-RAILWAY-VARS (2026-09-02) — inventario de claves del servicio.
+#
+# Sin credencial de Railway no hay forma de abrir el panel de Variables ni de
+# leerlo por API: durante cinco rondas seguidas la pregunta "¿que claves estan
+# cargadas?" se contesto por conjetura, o mirando un deploy_history de hace
+# meses. Este bloque la contesta desde adentro del proceso, que es el unico
+# lugar donde la respuesta es de primera mano.
+#
+# La unica regla: se publica el NOMBRE y un booleano. El valor no se lee, no se
+# corta, no se hashea y no se muestra ni en parte. Un prefijo tambien es un
+# secreto.
+CLAVES_DE_SERVICIO: tuple[tuple[str, str], ...] = (
+    ("GITHUB_TOKEN", "autoactualizacion (push del bot)"),
+    ("GITHUB_REPO", "opcional: fuerza el destino del push"),
+    ("FRED_API_KEY", "series macro"),
+    ("ARKHAM_API_KEY", "intel on-chain"),
+)
+
+
+def _b_claves() -> dict[str, Any]:
+    """Presencia por nombre de las claves del servicio. Nunca el valor.
+
+    `bool(getenv(...).strip())` y nada mas: una variable creada con el valor
+    vacio se reporta ausente, que es lo que de verdad significa para el codigo
+    que despues la usa. Decir "existe" de una variable vacia seria un ✅ que no
+    sostiene nada.
+    """
+    return {
+        "claves": [
+            {"nombre": n, "para": para,
+             "presente": bool(os.getenv(n, "").strip())}
+            for n, para in CLAVES_DE_SERVICIO
+        ],
+    }
+
+
 BLOQUES: dict[str, Callable[[], Any]] = {
     "subsistemas": _b_subsistemas,
     "ledger": _b_ledger,
@@ -445,6 +481,7 @@ BLOQUES: dict[str, Callable[[], Any]] = {
     "ppc": _b_ppc,
     "dedup_alertas": _b_dedup,
     "autoactualizacion": _b_autoactualizacion,
+    "claves": _b_claves,
 }
 
 
@@ -741,6 +778,15 @@ def format_diagnosis(d: dict[str, Any]) -> str:
                     else " — automatico por push a master"
                     if au.get("autodeploy_por_push")
                     else " — sin RAILWAY_TOKEN y sin evidencia de auto-deploy"))
+
+    cl = d.get("claves") or {}
+    if not cl.get("_error") and cl.get("claves"):
+        L.append("")
+        L.append("*Claves de servicio*")
+        L.append("  (presencia por nombre; el valor no se lee ni se muestra)")
+        for k in cl["claves"]:
+            L.append(f"  {_tick(k.get('presente'))} {k.get('nombre')}"
+                     f" — {k.get('para')}")
 
     x = d.get("x") or {}
     if not x.get("_error"):

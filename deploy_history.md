@@ -63,7 +63,38 @@ antes filtraba, un remoto mal armado como
 `/` y por lo tanto pasaba el unico filtro que existia, llevando el PAT a
 `/diagnostico` y a los logs. Las tres mutaciones fallan ahora.
 
-- **suite**: 1428 -> 1446 passed, verde desde los dos cwd y con orden aleatorio
+### Bloque nuevo: *Claves de servicio*
+
+El mandato pedia, ademas, informar cuales de las cuatro claves del servicio
+existen. Sin credencial de Railway eso no se podia mirar — y es la quinta ronda
+seguida que se traba en el mismo punto, contestando por conjetura o leyendo un
+deploy_history de meses atras. La respuesta de primera mano existe en un solo
+lugar: adentro del proceso que corre en Railway. Ahora la publica:
+`/diagnostico` lista `GITHUB_TOKEN`, `GITHUB_REPO`, `FRED_API_KEY` y
+`ARKHAM_API_KEY` por nombre con ✅/❌. Nunca el valor, ni un prefijo, ni la
+longitud —un prefijo tambien es un secreto— y una variable creada en blanco se
+reporta ausente, que es lo que significa para el codigo que la usa.
+
+### Verificacion en produccion
+
+- **commit desplegado**: `05473c3` · **deploy**:
+  `127f0d98-9548-44e2-ab20-08f6c7c7aab8` · boot 2026-09-03T00:20:42 UTC ·
+  comandos 98. El auto-deploy por push entro solo, sin token de Railway.
+- **bloque *Autoactualizacion*, textual, 00:32 UTC**:
+
+```
+*Autoactualizacion*
+  ❌ push a GitHub — falta GITHUB_TOKEN
+     destino: blackcatdefi/pear-monitor-bot (default)
+  ✅ redeploy en Railway — automatico por push a master
+```
+
+  Las tres correcciones se ven a la vez: la linea roja nombra **una** variable
+  y es la unica que de verdad falta; el destino se conoce igual (`default`,
+  porque el contenedor de Railway no trae remoto `origin` — el caso que el
+  fallback anticipaba); y el redeploy quedo verde por evidencia observada.
+
+- **suite**: 1428 -> 1453 passed, verde desde los dos cwd y con orden aleatorio
 - **guardas**: 8 passed, 0 swallows sin cubrir en el money path
 - **scan de clases de bug**: C1 0 · C3 0 · C2 6 · C4 1 (baseline intacto)
 - **sin cambios en logica de trading**, sin jobs recurrentes nuevos, sin tocar

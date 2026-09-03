@@ -60,8 +60,15 @@ Nombres, no valores, y sin poder comprobarlos desde la sesion:
 * `FRED_API_KEY` — serie macro. Presencia no verificable desde la sesion.
 * `ARKHAM_API_KEY` — intel on-chain. Presencia no verificable desde la sesion.
 
-Para saber cual esta y cual no sin abrir el panel de Railway: `/health` expone
-`pat_status`, que es el bloque que reporta el estado del PAT de GitHub.
+Para saber cual esta y cual no sin abrir el panel de Railway hay dos lecturas.
+`/health` expone `pat_status`, y desde R-RAILWAY-VARS `/diagnostico` trae el
+bloque ***Claves de servicio***, que lista las cuatro por nombre con ✅/❌. Ese
+bloque cierra el hueco que este archivo venia documentando: la respuesta a
+"¿que claves estan cargadas?" ahora es de primera mano, la da el proceso que
+corre en Railway, y no depende de ninguna credencial. Publica el nombre y un
+booleano — nunca el valor, ni un prefijo, ni la longitud. Una variable creada
+con el valor en blanco se reporta **ausente**, que es lo que significa para el
+codigo que despues la usa.
 
 **Leido en produccion el 2026-09-02 (`/diagnostico`, bloque
 *Autoactualizacion*):** `❌ push a GitHub — falta GITHUB_TOKEN y/o
