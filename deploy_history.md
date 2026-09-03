@@ -2,6 +2,45 @@
 
 Append-only log per Cowork constitución §6 paso 8.
 
+## 2026-09-03 02:08 UTC — el readout contesto: la hipotesis estructural era CORRECTA
+
+- **deploy**: `f684c40` / `6f2d6758` — primer panel con el bloque nuevo.
+- Lectura textual: `ultimo intento hace 0h · 33 hueco(s) pendiente(s) ·
+  pruebas 14 (vacias 0) · filas traidas 564`.
+
+### Que quedo probado
+
+**El dato existia del lado de HL todo el tiempo.** 14 pedidos, **cero
+vacios**, 564 filas recuperadas. O sea que el funding nunca falto: el cursor
+paso por encima de esas ventanas y, por ser forward-only, no las volvio a
+mirar jamas. Bastaba con volver a preguntar. La conjetura de R-FUNDING-HUECO
+—"el agujero no se cierra con el tiempo, se fosiliza"— era correcta, y recien
+ahora hay evidencia y no razonamiento.
+
+De paso: toda la maquinaria de "probado vacio baja a nota" no se ejercito ni
+una vez en produccion (`vacias 0`). Queda como seguro, no como camino vivo.
+
+### Por que la violacion sigue diciendo 27
+
+Cola, no falla. Quedan 33 huecos y el backfill hace 3 por wallet por sync
+(tope puesto para no disparar 429 en el money path). Las 564 filas que ya
+entraron son de huecos de OTRAS wallets; los intervalos de esos 27 ciclos
+siguen en la cola. Se verifica en que el chequeo los sigue clasificando como
+*tramo mudo*: si les hubieran entrado filas habrian cambiado de categoria —
+la taxonomia de R-I5-FORMA se paga sola aca.
+
+Converge solo: cada hueco reparado desaparece de la cola porque la pasada
+siguiente ve funding en ese intervalo y lo saltea.
+
+### La observacion que discrimina en el proximo panel
+
+Pendientes **por debajo de 33** y ciclos **por debajo de 27**. Si las filas
+siguen subiendo y los 27 no se mueven, el problema deja de ser la cola y pasa
+a ser que la reconstruccion no persiste — otro bug, y uno que el test
+`test_el_funding_reparado_llega_a_la_fila_del_ciclo` deberia haber agarrado.
+No se toca nada hasta verlo: el mecanismo se esta probando solo y cambiar
+`max_gaps` ahora seria ruido encima de un experimento en curso.
+
 ## 2026-09-03 — R-FUNDING-LECTURA + R-429-TECHO (mande un arreglo que no podia observar)
 
 - **base commit**: `012dae8` · **service**: pear-monitor-bot
