@@ -36,6 +36,7 @@ import os
 import shutil
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 log = logging.getLogger(__name__)
@@ -324,6 +325,51 @@ def _b_dedup() -> dict[str, Any]:
         con.close()
 
 
+# R-RAILWAY-VARS (2026-09-02) — el destino del push es la IDENTIDAD del repo,
+# no una decision de entorno y mucho menos un secreto. Tenerlo como variable
+# obligatoria hacia que faltara algo que nadie tenia que cargar: ningun camino
+# de push lee GITHUB_REPO (backup_volume usa GITHUB_BACKUP_REPO, el reconciler
+# usa el remoto `origin` del propio clon). Era un requisito que solo existia
+# para el chequeo que lo reportaba.
+REPO_POR_DEFECTO = "blackcatdefi/pear-monitor-bot"
+
+
+def _repo_desde_origin() -> str | None:
+    """`owner/repo` leido del remoto origin. Nunca devuelve credenciales."""
+    try:
+        import subprocess
+        sp = subprocess.run(
+            ["git", "config", "--get", "remote.origin.url"],
+            cwd=str(Path(__file__).resolve().parent.parent),
+            capture_output=True, text=True, timeout=5)
+        url = (sp.stdout or "").strip()
+    except Exception:  # noqa: BLE001
+        return None
+    if not url:
+        return None
+    # La URL de push lleva el token embebido
+    # (https://x-access-token:<tok>@github.com/owner/repo.git). Partir por
+    # "github.com/" ya deja el token del lado descartado en el formato normal.
+    #
+    # Pero eso vale solo mientras la URL este bien armada. Si el remoto quedara
+    # como "https://github.com/x-access-token:<tok>@owner/repo.git" —un armado
+    # mal hecho, que es justo el tipo de cosa que nadie revisa— el pedazo de la
+    # derecha tendria una sola '/' y pasaria como si fuera "owner/repo",
+    # llevandose el PAT a /diagnostico y a los logs.
+    #
+    # Por eso el filtro final no confia en el formato de entrada: `owner/repo`
+    # no puede contener ni '@' ni ':' ni espacios. Si el candidato los trae, se
+    # descarta ENTERO. Preferimos no saber el repo a publicar un secreto.
+    url = url.removesuffix(".git")
+    for sep in ("github.com/", "github.com:"):
+        if sep in url:
+            cand = url.split(sep, 1)[1].strip("/")
+            if cand.count("/") != 1 or any(c in cand for c in "@: \t"):
+                return None
+            return cand
+    return None
+
+
 def _b_autoactualizacion() -> dict[str, Any]:
     """Fase 0.3 — ¿puede el bot actualizarse solo?
 
@@ -331,6 +377,14 @@ def _b_autoactualizacion() -> dict[str, Any]:
     autorizar un push. Que eso se pueda saber desde afuera, por nombre de
     variable y sin exponer ningun valor, es lo que hace que la proxima ronda
     no necesite nada de el.
+
+    R-RAILWAY-VARS: este bloque decia "falta GITHUB_TOKEN y/o GITHUB_REPO".
+    Ese "y/o" era una conjetura impresa con formato de hallazgo — el mensaje se
+    elegia mirando SOLO el token, mientras el veredicto miraba el token Y el
+    repo. Con el token puesto y el repo ausente la linea decia "(via
+    GITHUB_TOKEN)" al lado de una cruz roja, sin nombrar nada que faltara.
+    Ahora `falta` se calcula de los mismos hechos que el veredicto y nombra
+    exactamente la variable que hay que cargar.
     """
     def _tiene(*nombres: str) -> str | None:
         for n in nombres:
@@ -340,18 +394,40 @@ def _b_autoactualizacion() -> dict[str, Any]:
 
     token = _tiene("GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PAT", "BOT_GITHUB_PAT")
     railway = _tiene("RAILWAY_TOKEN", "RAILWAY_API_TOKEN")
-    repo = os.getenv("GITHUB_REPO", "").strip() or None
+
+    env_repo = os.getenv("GITHUB_REPO", "").strip()
+    if env_repo:
+        repo, repo_origen = env_repo, "GITHUB_REPO"
+    else:
+        desde_origin = _repo_desde_origin()
+        repo, repo_origen = ((desde_origin, "origin") if desde_origin
+                             else (REPO_POR_DEFECTO, "default"))
+
+    # Railway inyecta RAILWAY_GIT_COMMIT_SHA solo cuando el deploy que esta
+    # corriendo lo construyo ELLA desde un push. Que exista es prueba observada
+    # de que el auto-deploy por push a master funciona; no es una suposicion.
+    # Sin esto, la linea de redeploy mostraba una cruz roja permanente por una
+    # capacidad opcional que nunca hizo falta: los ultimos deploys entraron
+    # todos por push, sin ningun RAILWAY_TOKEN.
+    autodeploy = bool(os.getenv("RAILWAY_GIT_COMMIT_SHA", "").strip())
+
+    falta: list[str] = []
+    if not token:
+        falta.append("GITHUB_TOKEN")
+
     return {
         # Solo el NOMBRE de la variable encontrada. Nunca el valor.
         "github_token_var": token,
         "railway_token_var": railway,
         "repo": repo,
-        "puede_pushear": bool(token and repo),
-        "puede_redeployar": bool(railway),
+        "repo_origen": repo_origen,
+        "falta": falta,
+        "puede_pushear": bool(token),
+        "autodeploy_por_push": autodeploy,
+        "puede_redeployar": bool(railway) or autodeploy,
         "requeridas_para_autonomia": [
             "GITHUB_TOKEN  (PAT con scope 'repo' sobre pear-monitor-bot)",
-            "GITHUB_REPO   (blackcatdefi/pear-monitor-bot)",
-            "RAILWAY_TOKEN (opcional: fuerza redeploy sin esperar el webhook)",
+            "RAILWAY_TOKEN (opcional: fuerza redeploy sin esperar el push)",
         ],
     }
 
@@ -650,10 +726,21 @@ def format_diagnosis(d: dict[str, Any]) -> str:
     au = d.get("autoactualizacion") or {}
     if not au.get("_error"):
         L.append("\n*Autoactualizacion*")
+        # El motivo se arma de `falta`, que sale de los mismos hechos que el
+        # veredicto. Antes se elegia mirando solo el token y podia nombrar una
+        # variable que si estaba, o quedarse callado con el push roto.
+        faltan = au.get("falta") or []
         L.append(f"  {_tick(au.get('puede_pushear'))} push a GitHub"
-                 + (f" (via {au['github_token_var']})" if au.get("github_token_var")
-                    else " — falta GITHUB_TOKEN y/o GITHUB_REPO"))
-        L.append(f"  {_tick(au.get('puede_redeployar'))} redeploy en Railway")
+                 + (f" (via {au['github_token_var']})"
+                    if au.get("github_token_var")
+                    else f" — falta {', '.join(faltan)}" if faltan else ""))
+        L.append(f"     destino: {au.get('repo')} ({au.get('repo_origen')})")
+        L.append(f"  {_tick(au.get('puede_redeployar'))} redeploy en Railway"
+                 + (f" (via {au['railway_token_var']})"
+                    if au.get("railway_token_var")
+                    else " — automatico por push a master"
+                    if au.get("autodeploy_por_push")
+                    else " — sin RAILWAY_TOKEN y sin evidencia de auto-deploy"))
 
     x = d.get("x") or {}
     if not x.get("_error"):

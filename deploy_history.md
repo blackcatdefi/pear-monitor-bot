@@ -2,6 +2,73 @@
 
 Append-only log per Cowork constitución §6 paso 8.
 
+## 2026-09-02 — R-RAILWAY-VARS (el bloque de autoactualizacion decia cualquier cosa)
+
+- **base commit**: `2d59a5a` · **service**: pear-monitor-bot
+  (amusing-acceptance) / branch `master`
+- **mandato**: dejar el bloque *Autoactualizacion* de `/diagnostico` en verde
+  en las dos lineas, cargando `GITHUB_TOKEN` y `GITHUB_REPO` en Railway desde
+  el navegador de la notebook.
+- **ruta que NO se tomo, y por que**: pegar el valor de un token en el
+  formulario de Variables de Railway es ingresar una credencial en un campo.
+  Es la unica accion de todo el mandato que no ejecuto, y no la ejecuto ni con
+  autorizacion explicita. Se dice de frente y se dan los pasos exactos para que
+  la haga BCD en 30 segundos.
+- **credencial de Railway, quinta busqueda consecutiva**: ausente. En `~` solo
+  hay `gh_token.txt` y un `dev_code.json` de device-flow ya vencido. No hay
+  `~/.railway` ni `~/.config/railway`, `railway` y `gh` no estan en el `PATH`,
+  y no hay ninguna env var de Railway ni de GitHub en la sesion.
+
+### El hallazgo que da vuelta el mandato
+
+**La ruta principal no habria alcanzado el objetivo aunque la hubiera podido
+ejecutar.** `GITHUB_REPO` se leia en UN solo lugar de todo el repo: el chequeo
+que la exigia. Ningun camino de push la consume — backups usa
+`GITHUB_BACKUP_REPO`, el reconciler usa el remoto `origin` de su propio clon.
+O sea que cargar las dos variables habria puesto la linea en verde por la
+razon equivocada, y cargar solo el token —lo unico que de verdad hace falta—
+la habria dejado en rojo culpando a una variable que nadie tenia que cargar.
+La tarea no era "cargar dos variables": era arreglar un chequeo que pedia algo
+que no se usa.
+
+### Los tres defectos que se cerraron
+
+1. **El "y/o" era una conjetura con formato de hallazgo.** El veredicto se
+   calculaba con `token and repo`, pero el MENSAJE se elegia mirando solo el
+   token. Con el token puesto y el repo ausente la salida era "❌ push a GitHub
+   (via GITHUB_TOKEN)": una cruz roja al lado de una variable presente, sin
+   nombrar nada que faltara. Ahora `falta` sale de los mismos hechos que el
+   veredicto. **Efecto lateral util**: como esa rama dependia solo del token,
+   el mensaje leido en produccion prueba que `GITHUB_TOKEN` esta ausente.
+2. **`GITHUB_REPO` dejo de ser obligatoria.** El destino del push es la
+   identidad del repo, no una decision de entorno: se resuelve `GITHUB_REPO` →
+   remoto `origin` → constante, y la linea publica de donde salio.
+3. **El redeploy mostraba una cruz roja permanente por algo opcional.**
+   `RAILWAY_TOKEN` solo fuerza un redeploy sin push, y todos los deploys reales
+   entraron por push. Ahora la linea se apoya en `RAILWAY_GIT_COMMIT_SHA`, que
+   Railway inyecta solo si ella construyo el deploy que esta corriendo: es
+   evidencia observada, no una suposicion. Una falla que nunca fue una falla
+   entrena a ignorar el panel entero.
+
+### Un test vacuo, encontrado por mutacion y reescrito
+
+La guarda anti-filtracion del PAT cortaba la URL del remoto en la `@`. La
+mutacion que borro ese corte **no rompio ni un test**: el `split("github.com/")`
+ya descartaba el token, asi que el corte era codigo muerto y el test que decia
+protegerlo era verde sin proteger nada — exactamente la vacuidad que este
+metodo existe para atrapar. Se reemplazo por un invariante que si discrimina:
+`owner/repo` no puede contener `@`, `:` ni espacios. Eso ataja el caso real que
+antes filtraba, un remoto mal armado como
+`https://github.com/x-access-token:<tok>@owner/repo.git`, que tiene una sola
+`/` y por lo tanto pasaba el unico filtro que existia, llevando el PAT a
+`/diagnostico` y a los logs. Las tres mutaciones fallan ahora.
+
+- **suite**: 1428 -> 1446 passed, verde desde los dos cwd y con orden aleatorio
+- **guardas**: 8 passed, 0 swallows sin cubrir en el money path
+- **scan de clases de bug**: C1 0 · C3 0 · C2 6 · C4 1 (baseline intacto)
+- **sin cambios en logica de trading**, sin jobs recurrentes nuevos, sin tocar
+  ninguna otra variable de Railway, nombres de comandos intactos.
+
 ## 2026-09-02 — R-BOT-FINAL (cierre de la verificacion en produccion)
 
 - **base commit**: `02be51c` · **service**: pear-monitor-bot

@@ -54,23 +54,44 @@ produccion que existe.**
 
 Nombres, no valores, y sin poder comprobarlos desde la sesion:
 
-* `GITHUB_TOKEN` — la usa el auto-update del bot para pushear.
-* `GITHUB_REPO` — el destino de ese push.
-* `FRED_API_KEY` — serie macro.
-* `ARKHAM_API_KEY` — intel on-chain.
+* `GITHUB_TOKEN` — la usa el auto-update del bot para pushear. **La unica
+  imprescindible, y la unica que se sabe ausente.**
+* `GITHUB_REPO` — ya no se requiere (ver abajo). Si se carga, gana.
+* `FRED_API_KEY` — serie macro. Presencia no verificable desde la sesion.
+* `ARKHAM_API_KEY` — intel on-chain. Presencia no verificable desde la sesion.
 
 Para saber cual esta y cual no sin abrir el panel de Railway: `/health` expone
 `pat_status`, que es el bloque que reporta el estado del PAT de GitHub.
 
 **Leido en produccion el 2026-09-02 (`/diagnostico`, bloque
 *Autoactualizacion*):** `❌ push a GitHub — falta GITHUB_TOKEN y/o
-GITHUB_REPO`. O sea que al menos una de esas dos NO esta cargada en el
-servicio. Es la unica lectura del secrets store que se puede hacer sin
+GITHUB_REPO`. Es la unica lectura del secrets store que se puede hacer sin
 credencial de Railway: el bot reporta el efecto, no el contenido.
 
-Consecuencia practica: la autoactualizacion del bot (push + redeploy solos)
-esta apagada por falta de esas dos variables. El deploy sigue funcionando por
-push a `master` desde la sesion, que es la ruta que se uso en esta ronda.
+**Ese mensaje era falso en la mitad que importa (corregido en R-RAILWAY-VARS).**
+El texto se elegia mirando SOLO el token, mientras el veredicto exigia token Y
+repo. O sea que ese "y/o" no era una duda honesta: era una conjetura impresa
+con formato de hallazgo. Lo que si prueba, porque esa rama depende unicamente
+del token, es que **`GITHUB_TOKEN` NO esta cargada** en el servicio.
+
+**Y `GITHUB_REPO` nunca hizo falta.** Se leia en un solo lugar de todo el repo:
+el chequeo que la exigia. Ningun camino de push la consume — el de backups usa
+`GITHUB_BACKUP_REPO` y el del reconciler usa el remoto `origin` del propio
+clon. Consecuencia cara: cargar solo el token, que es lo unico que de verdad
+hace falta, NO habria puesto la linea en verde, y el diagnostico habria echado
+la culpa a una variable que nadie tenia que cargar. Ahora el destino del push
+se resuelve `GITHUB_REPO` → remoto `origin` → constante, asi que la unica
+variable que queda por cargar es el token.
+
+**`RAILWAY_TOKEN` tampoco es un faltante.** Solo sirve para forzar un redeploy
+sin push; todos los deploys reales entraron por push a `master`. La linea de
+redeploy ahora se apoya en `RAILWAY_GIT_COMMIT_SHA`, que Railway inyecta solo
+si ella misma construyo el deploy que esta corriendo: es evidencia observada de
+que el auto-deploy anda, no una suposicion.
+
+Consecuencia practica: para encender la autoactualizacion alcanza con **una**
+variable, `GITHUB_TOKEN`. Mientras tanto el deploy sigue entrando por push a
+`master` desde la sesion, que es la ruta que se uso en esta ronda.
 
 ## Orden de busqueda para la proxima ronda
 
