@@ -78,21 +78,37 @@ def _tables(con) -> set[str]:
 # ─── 3.1 INVARIANTES ────────────────────────────────────────────────────────
 
 def check_invariants(limit: int = 200) -> list[Violation]:
+    """Solo las violaciones. Envoltorio fino sobre ``check_con_notas``.
+
+    Existe para no romper a ningun llamador ni test que ya espera una lista.
+    """
+    return check_con_notas(limit)[0]
+
+
+def check_con_notas(limit: int = 200) -> tuple[list[Violation], list[str]]:
     """Verifica los invariantes del money path sobre las filas guardadas.
 
-    Devuelve la lista de violaciones (vacia = todo cierra). NUNCA levanta por
-    un problema de datos; si el propio chequeo no puede correr, eso SI se
-    reporta como violacion, porque "no pude verificar" no es "esta bien".
+    Devuelve ``(violaciones, notas)``. Una violacion es algo que esta MAL. Una
+    nota es un hecho que explica por que algo que PARECE mal no lo es, y que
+    igual hay que poder leer: si se descarta en silencio, la proxima ronda
+    vuelve a investigar lo mismo desde cero. Ese fue el costo real de las
+    ultimas cinco rondas y por eso las notas viajan hasta /diagnostico.
+
+    NUNCA levanta por un problema de datos; si el propio chequeo no puede
+    correr, eso SI se reporta como violacion, porque "no pude verificar" no es
+    "esta bien".
     """
     out: list[Violation] = []
+    notas: list[str] = []
     try:
         con = _conn()
     except Exception as exc:  # noqa: BLE001
-        return [Violation("acceso", f"no se pudo abrir el ledger: {exc}"[:200])]
+        return ([Violation("acceso",
+                           f"no se pudo abrir el ledger: {exc}"[:200])], notas)
     try:
         tabs = _tables(con)
         if "ledger_positions" not in tabs:
-            return [Violation("acceso", "no existe ledger_positions")]
+            return ([Violation("acceso", "no existe ledger_positions")], notas)
 
         rows = [dict(r) for r in con.execute(
             "SELECT * FROM ledger_positions ORDER BY close_ts DESC LIMIT ?",
@@ -157,27 +173,9 @@ def check_invariants(limit: int = 200) -> list[Violation]:
                 f"estar contado en los dos", {"a": a, "b": b}))
 
         # I5 — una posicion de perp abierta mas de una hora TIENE funding.
-        # El funding de HL se acredita cada hora: un ciclo de 40 horas con
-        # funding exactamente 0.00 no es un mercado tranquilo, es el dato que
-        # falta. Este es el invariante que habria gritado durante el deploy
-        # que reporto 0.00 en todas las patas.
-        sospechosos = [
-            r for r in rows
-            if _f(r["funding_net"]) == 0.0
-            and (int(r["close_ts"]) - int(r["open_ts"])) > 3_600_000
-        ]
-        if sospechosos:
-            horas = max((int(r["close_ts"]) - int(r["open_ts"])) / 3_600_000
-                        for r in sospechosos)
-            out.append(Violation(
-                "I5 funding exactamente cero en ciclo largo",
-                f"{len(sospechosos)} ciclo(s) de mas de 1h con funding_net "
-                f"= 0.00 exacto (el mas largo, {horas:.0f}h). El funding de "
-                f"HL se acredita por hora: un cero exacto es un dato que "
-                f"falta, no un mercado tranquilo.",
-                {"n": len(sospechosos),
-                 "ejemplos": [f"{r['coin']}@{r['close_ts']}"
-                              for r in sospechosos[:5]]}))
+        out_i5, notas_i5 = _check_i5(con, rows)
+        out.extend(out_i5)
+        notas.extend(notas_i5)
 
         # I6 — la ventana de reporte no se solapa ni deja huecos.
         out.extend(_check_cursores(con))
@@ -189,7 +187,133 @@ def check_invariants(limit: int = 200) -> list[Violation]:
             con.close()
         except Exception:  # noqa: BLE001
             pass
-    return out
+    return out, notas
+
+
+# ─── I5 y la ventana de cobertura del funding ───────────────────────────────
+
+def _ventanas_de_funding(con) -> dict[str, tuple[int, int]]:
+    """Por wallet, el intervalo [primera, ultima] acreditacion GUARDADA.
+
+    Es por wallet y no por (wallet, coin) a proposito: el funding se trae de
+    ``userFunding`` con UN cursor por wallet, para todas las monedas juntas.
+    Una moneda que no aparece en la tabla no tiene ventana propia — tiene la
+    de su wallet, y adentro de esa ventana la ausencia de acreditaciones si
+    significa algo.
+    """
+    return {
+        str(r["wallet"]): (int(r["a"]), int(r["b"]))
+        for r in con.execute(
+            "SELECT wallet, MIN(time) a, MAX(time) b "
+            "FROM ledger_funding GROUP BY wallet")
+        if r["a"] is not None
+    }
+
+
+def _check_i5(con, rows: list[dict[str, Any]]
+              ) -> tuple[list[Violation], list[str]]:
+    """Un perp abierto mas de una hora TIENE funding — donde hay con que verlo.
+
+    EL INVARIANTE ORIGINAL Y POR QUE SIGUE VIVO
+    ===========================================
+    El funding de HL se acredita cada hora. Un ciclo de 40 horas con
+    funding_net = 0.00 EXACTO no es un mercado tranquilo: es el dato que
+    falta. Este chequeo es el que habria gritado durante el deploy que reporto
+    0.00 en todas las patas, cuando un 429 de ``userFunding`` se tragaba y se
+    convertia en ceros prolijos.
+
+    EL DEFECTO QUE ESTE BLOQUE CORRIGE (R-I5-COBERTURA, 2026-09-03)
+    ==============================================================
+    El texto que se imprimia era: "un cero exacto es un dato que falta, no un
+    mercado tranquilo". Eso AFIRMA una causa que el chequeo nunca verifico.
+    Hay una tercera posibilidad que no es ninguna de las dos: que el ciclo sea
+    ANTERIOR a la primera acreditacion que tenemos guardada de esa wallet.
+    ``userFillsByTime`` alcanza un horizonte distinto que ``userFunding``, asi
+    que el ledger reconstruye ciclos viejos desde fills que si llegan, con
+    funding que no llega. Ahi el 0.00 no es un dato que falta por un bug: es
+    un dato que no existe de nuestro lado y que ningun resync va a traer.
+
+    La consecuencia de no distinguirlo es cara y conocida: una cruz roja
+    permanente sobre filas que nadie puede reparar. Una falla que no se puede
+    cerrar entrena a ignorar el panel entero — es exactamente lo que hacia la
+    linea de redeploy antes de R-RAILWAY-VARS.
+
+    Asi que el chequeo ahora parte los sospechosos en tres, y solo dos son
+    violaciones:
+
+    * **wallet sin NINGUNA acreditacion guardada** — el bug D1 en su forma
+      pura. Grita, y grita por wallet, que es donde se arregla.
+    * **ciclo entero adentro de la ventana con datos** — tenemos funding de
+      antes y de despues de ese ciclo, y del ciclo no. Eso si es un agujero.
+    * **ciclo que cae fuera (o a caballo) de la ventana** — NO es violacion.
+      Se reporta como nota, con la fecha del borde, para que la proxima ronda
+      no vuelva a investigar lo mismo.
+    """
+    LARGO_MS = 3_600_000
+    ventanas = _ventanas_de_funding(con)
+
+    sin_datos: dict[str, list[dict[str, Any]]] = {}
+    dentro: list[dict[str, Any]] = []
+    fuera: list[dict[str, Any]] = []
+
+    for r in rows:
+        if _f(r["funding_net"]) != 0.0:
+            continue
+        if (int(r["close_ts"]) - int(r["open_ts"])) <= LARGO_MS:
+            continue
+        w = str(r["wallet"])
+        v = ventanas.get(w)
+        if v is None:
+            sin_datos.setdefault(w, []).append(r)
+        elif v[0] <= int(r["open_ts"]) and int(r["close_ts"]) <= v[1]:
+            dentro.append(r)
+        else:
+            fuera.append(r)
+
+    out: list[Violation] = []
+    notas: list[str] = []
+
+    for w, rs in sorted(sin_datos.items()):
+        out.append(Violation(
+            "I5 wallet sin ninguna acreditacion de funding",
+            f"{w[:8]}: {len(rs)} ciclo(s) de mas de 1h con funding_net = 0.00 "
+            f"y CERO filas en ledger_funding para esta wallet. No es que el "
+            f"funding sea chico: no se leyo nunca. Es la forma pura del bug "
+            f"que reporto 0.00 en todas las patas.",
+            {"wallet": w, "n": len(rs)}))
+
+    if dentro:
+        horas = max((int(r["close_ts"]) - int(r["open_ts"])) / 3_600_000
+                    for r in dentro)
+        out.append(Violation(
+            "I5 funding cero adentro de la ventana con datos",
+            f"{len(dentro)} ciclo(s) de mas de 1h con funding_net = 0.00 "
+            f"exacto (el mas largo, {horas:.0f}h) cuyo intervalo cae ENTERO "
+            f"adentro del tramo del que si tenemos acreditaciones. Hay "
+            f"funding de antes y de despues, y del ciclo no: es un agujero, "
+            f"no un horizonte.",
+            {"n": len(dentro),
+             "ejemplos": [f"{r['coin']}@{r['close_ts']}" for r in dentro[:5]]}))
+
+    if fuera:
+        bordes = sorted({v[0] for w, v in ventanas.items()})
+        borde = _fecha_ms(bordes[0]) if bordes else "?"
+        notas.append(
+            f"funding: {len(fuera)} ciclo(s) largos con 0.00 quedan fuera del "
+            f"tramo con acreditaciones (la primera guardada es del {borde}). "
+            f"Los fills llegan mas atras que el funding, asi que ese cero no "
+            f"es reparable con un resync — no cuenta como violacion.")
+
+    return out, notas
+
+
+def _fecha_ms(ms: int) -> str:
+    from datetime import datetime, timezone
+    try:
+        return datetime.fromtimestamp(int(ms) / 1000,
+                                      timezone.utc).strftime("%Y-%m-%d")
+    except (OSError, OverflowError, ValueError):
+        return str(ms)
 
 
 def _f(v: Any) -> float:
@@ -354,13 +478,19 @@ def recompute_from_fills(limit: int = 200) -> list[Violation]:
 # ─── API para /diagnostico y el self-test ───────────────────────────────────
 
 def run_all(limit: int = 200) -> dict[str, Any]:
-    """Corre invariantes + recomputo. Devuelve un resumen serializable."""
-    inv = check_invariants(limit)
+    """Corre invariantes + recomputo. Devuelve un resumen serializable.
+
+    ``notas`` NO entra en ``total`` ni en ``ok``: una nota explica algo que
+    parece roto y no lo esta. Sumarla al total la volveria una falla, que es
+    justo el error que las notas existen para no repetir.
+    """
+    inv, notas = check_con_notas(limit)
     rec = recompute_from_fills(limit)
     return {
         "ok": not inv and not rec,
         "invariantes": [str(v) for v in inv],
         "recomputo": [str(v) for v in rec],
+        "notas": list(notas),
         "total": len(inv) + len(rec),
         "limite_filas": limit,
     }

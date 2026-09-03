@@ -676,6 +676,11 @@ def format_diagnosis(d: dict[str, Any]) -> str:
             L.append(f"     \u2022 {_corte(x)}")
         for x in (inv.get("recomputo") or [])[:6]:
             L.append(f"     \u2022 {_corte(x)}")
+        # Las notas van con "ℹ" y no con "•": explican algo que PARECE roto y
+        # no lo esta. Si se vieran igual que una violacion el bloque volveria
+        # a decir "hay un problema" cuando lo que hay es un limite conocido.
+        for x in (inv.get("notas") or [])[:4]:
+            L.append(f"     \u2139 {_corte(x)}")
 
     led = d.get("ledger") or {}
     if led.get("sync_por_wallet"):

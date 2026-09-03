@@ -1,8 +1,41 @@
-"""Async HTTP helper with retry/backoff."""
+"""Async HTTP helper with retry/backoff.
+
+R-429-RETRY-AFTER (2026-09-03) — POR QUE ESTE ARCHIVO CAMBIO
+===========================================================
+Produccion reporto ``Precios y mercado — coingecko_global — 429 Too Many
+Requests``. El 429 en si no es un bug nuestro: la IP de salida de Railway es
+compartida y CoinGecko rate-limitea el endpoint keyless. Lo que SI era nuestro
+son dos defectos de la politica de reintentos, y los dos empujaban en la
+direccion equivocada:
+
+1. **Se ignoraba ``Retry-After``.** Un 429 casi siempre viene con la cabecera
+   que dice cuanto hay que esperar. Reintentabamos a los 2s y a los 4s contra
+   una ventana que pedia mas: los tres intentos caian ADENTRO del castigo, o
+   sea que el reintento no era una segunda chance, era mas trafico durante la
+   penalizacion. Por eso los tres fallaban.
+
+2. **Se dormia despues del ULTIMO intento.** El bucle esperaba el backoff
+   completo y recien ahi levantaba. Con 3 intentos eso son 8 segundos de
+   latencia del reporte tirados a la basura para no hacer absolutamente nada
+   con ellos.
+
+Ademas el backoff era exactamente igual para todos los llamadores, asi que
+varias tareas que arrancan juntas reintentaban en lockstep y volvian a chocar.
+El jitter rompe esa sincronizacion.
+
+Lo que NO cambia: una falla real sigue levantando. Servir un payload cacheado
+en silencio esta explicitamente prohibido por la doctrina de
+``health_registry`` — "un default silencioso en el money path NUNCA es una
+degradacion aceptable" — asi que el ❌ del subsistema se mantiene cuando de
+verdad no se pudo leer. Esto reduce la probabilidad del 429, no la esconde.
+"""
 from __future__ import annotations
 
 import asyncio
+import email.utils
 import logging
+import random
+import time
 from typing import Any
 
 import httpx
@@ -10,6 +43,67 @@ import httpx
 log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
+
+# Techo del backoff. CoinGecko a veces manda Retry-After: 60. Un reporte no
+# puede quedarse 60 segundos colgado de una fuente de contexto, asi que se
+# espera hasta el techo y se reintenta igual; si el servidor sigue castigando,
+# la falla se reporta, que es la respuesta honesta.
+MAX_BACKOFF_SEC = 30.0
+
+# Fraccion de jitter aplicada al backoff calculado (±25%). Sin esto, varias
+# corrutinas que arrancan juntas reintentan en el mismo instante y se vuelven
+# a pisar entre ellas.
+JITTER = 0.25
+
+
+def _retry_after_sec(exc: Exception) -> float | None:
+    """Segundos que pide el servidor, o None si no lo dice.
+
+    ``Retry-After`` admite dos formatos por RFC: segundos ("120") o una fecha
+    HTTP. Los dos se ven en la practica y por eso se aceptan los dos; un valor
+    que no parsea se ignora en vez de romper el reintento.
+    """
+    resp = getattr(exc, "response", None)
+    raw = None
+    try:
+        raw = (resp.headers or {}).get("Retry-After") if resp is not None else None
+    except Exception:  # noqa: BLE001 - una cabecera rara no puede tumbar el retry
+        return None
+    if not raw:
+        return None
+    raw = str(raw).strip()
+    try:
+        seg = float(raw)
+    except ValueError:
+        pass
+    else:
+        # Un negativo en la forma numerica esta MAL formado. Tomarlo como 0
+        # seria reintentar al instante — exactamente el comportamiento que
+        # este modulo existe para no tener durante un castigo. Una FECHA
+        # pasada, en cambio, si significa "ya podes": esa se recorta a 0 mas
+        # abajo, y por eso los dos formatos no se tratan igual.
+        return seg if seg >= 0 else None
+    try:
+        cuando = email.utils.parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if cuando is None:
+        return None
+    return max(0.0, cuando.timestamp() - time.time())
+
+
+def _backoff(exc: Exception, attempt: int, base: float) -> float:
+    """Cuanto esperar antes del proximo intento.
+
+    ``Retry-After`` gana sobre el exponencial: es el unico dato que viene del
+    lado que esta contando, y adivinar contra el es lo que hacia que los tres
+    intentos cayeran adentro de la misma ventana de castigo.
+    """
+    pedido = _retry_after_sec(exc)
+    espera = pedido if pedido is not None else base * (2 ** attempt)
+    espera = min(espera, MAX_BACKOFF_SEC)
+    espera *= 1.0 + random.uniform(-JITTER, JITTER)
+    return max(0.0, espera)
 
 
 async def request_json(
@@ -21,7 +115,11 @@ async def request_json(
     timeout: httpx.Timeout | float = DEFAULT_TIMEOUT,
     **kwargs: Any,
 ) -> Any:
-    """Perform an HTTP request and return parsed JSON, with exponential backoff."""
+    """Perform an HTTP request and return parsed JSON, with backoff.
+
+    Honours ``Retry-After`` on the responses that carry it, jitters the wait,
+    and never sleeps after the final attempt.
+    """
     last_exc: Exception | None = None
     for attempt in range(max_retries):
         try:
@@ -31,9 +129,17 @@ async def request_json(
                 return resp.json()
         except (httpx.HTTPError, asyncio.TimeoutError) as exc:
             last_exc = exc
-            wait = base_backoff * (2 ** attempt)
+            ultimo = attempt == max_retries - 1
+            if ultimo:
+                # Dormir aca no compra nada: no queda ningun intento que
+                # aprovechar la espera. Solo agrega latencia al fallo.
+                log.warning("HTTP %s %s failed (attempt %d/%d): %s — sin "
+                            "reintentos restantes",
+                            method, url, attempt + 1, max_retries, exc)
+                break
+            wait = _backoff(exc, attempt, base_backoff)
             log.warning(
-                "HTTP %s %s failed (attempt %d/%d): %s — retrying in %ss",
+                "HTTP %s %s failed (attempt %d/%d): %s — retrying in %.1fs",
                 method, url, attempt + 1, max_retries, exc, wait,
             )
             await asyncio.sleep(wait)

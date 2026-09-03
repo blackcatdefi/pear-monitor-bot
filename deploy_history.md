@@ -2,6 +2,132 @@
 
 Append-only log per Cowork constitución §6 paso 8.
 
+## 2026-09-03 — R-I5-COBERTURA + R-429-RETRY-AFTER (los dos problemas que dejo el deploy anterior)
+
+- **base commit**: `eb4d718` · **service**: pear-monitor-bot
+  (amusing-acceptance) / branch `master`
+- **archivos**: `modules/ledger_invariants.py`, `modules/diagnostics.py`,
+  `utils/http.py`, `tests/test_i5_cobertura_funding.py` (nuevo),
+  `tests/test_http_retry_after.py` (nuevo)
+- **suite**: 1482 passed (antes 1453). Guarda de degradacion silenciosa
+  8 passed / 0 money-path sin cubrir. `bug_class_scan` sin cambios:
+  C1 0 · C2 6 · C3 0 · C4 1.
+
+### El contexto: GITHUB_TOKEN entro y el mandato anterior cerro
+
+BCD cargo la variable a mano en Railway. `/diagnostico` del 3-sep 00:54 UTC
+mostro las dos lineas en verde por primera vez:
+
+```
+*Autoactualizacion*
+  ✅ push a GitHub (via GITHUB_TOKEN)
+     destino: blackcatdefi/pear-monitor-bot (default)
+  ✅ redeploy en Railway — automatico por push a master
+```
+
+Ese mismo reporte dejo dos problemas abiertos. Esta ronda son esos dos.
+
+### Defecto 1 — I5 afirmaba una causa que nunca verifico
+
+La linea que salia era:
+
+> 27 ciclo(s) de mas de 1h con funding_net = 0.00 exacto (el mas largo, 20h).
+> El funding de HL se acredita por hora: un cero exacto es un dato que falta,
+> no un mercado tranquilo.
+
+La primera oracion es un hecho contado. **La segunda es una conjetura impresa
+con formato de hallazgo** — la misma familia que "falta GITHUB_TOKEN y/o
+GITHUB_REPO" de la ronda anterior y que "rancios 4".
+
+El chequeo miraba dos columnas de `ledger_positions` y de ahi concluia sobre
+el estado de `ledger_funding`, **una tabla que no leia**. Existe una tercera
+posibilidad que no es ninguna de las dos que el texto ofrecia: que el ciclo
+sea anterior a la primera acreditacion guardada. `userFillsByTime` y
+`userFunding` alcanzan horizontes distintos, asi que el ledger reconstruye
+ciclos viejos desde fills que si llegan, con funding que no llega.
+
+**Por que importaba de verdad, en las dos direcciones:**
+
+* Esos ciclos **no se pueden reparar**. Ningun resync los va a llenar porque
+  el dato no existe de nuestro lado. Era una cruz roja permanente sobre filas
+  que nadie puede tocar — exactamente lo que hacia la linea de redeploy antes
+  de R-RAILWAY-VARS, y se corrige por la misma razon: una falla que no se
+  puede cerrar entrena a ignorar el panel entero.
+* Y al reves, **el bug real quedaba tapado**: un agujero de funding nuevo se
+  sumaba a un contador que ya venia en 27 y no lo notaba nadie.
+
+Ahora `_check_i5` lee `ledger_funding` y parte los sospechosos en tres, y solo
+dos son violaciones:
+
+| Caso | Veredicto | Por que |
+|---|---|---|
+| wallet sin NINGUNA fila de funding | ❌ violacion, por wallet | la forma pura del bug D1: no se leyo nunca |
+| ciclo entero adentro del tramo con datos | ❌ violacion | hay funding antes y despues, y del ciclo no: es un agujero |
+| ciclo fuera (o a caballo) del tramo | ℹ nota, no violacion | los fills llegan mas atras que el funding; no es reparable |
+
+La ventana es **por wallet, no por (wallet, coin)**, porque `userFunding` se
+trae con un cursor por wallet para todas las monedas juntas. Si se partiera
+por moneda, cualquier moneda sin acreditaciones propias caeria siempre en
+"fuera de cobertura" y el agujero real quedaria excusado para siempre. Hay un
+test que fija justo eso.
+
+Las notas viajan hasta `/diagnostico` con `ℹ` y no con `•`, no suman al
+`total` y no ponen `ok` en falso. Si sumaran, el arreglo seria cosmetico: el
+bloque seguiria diciendo "hay un problema" por un limite conocido. Y si se
+descartaran en silencio, la proxima ronda volveria a investigar lo mismo desde
+cero — que es el costo que se viene pagando hace cinco rondas.
+
+### Defecto 2 — la politica de reintentos empeoraba el 429
+
+`Precios y mercado — coingecko_global — 429 Too Many Requests`. El 429 **no es
+un bug nuestro**: la IP de salida de Railway es compartida y el endpoint de
+CoinGecko es keyless. Lo que si era nuestro es que los tres intentos fallaran,
+y eso no era mala suerte:
+
+1. **`Retry-After` se ignoraba.** El servidor dice cuanto falta para salir del
+   castigo; nosotros adivinabamos 2s y 4s. Los tres intentos caian adentro de
+   la misma ventana: reintentar no era una segunda chance, era mas trafico
+   durante la penalizacion, que es como se extiende.
+2. **Se dormia despues del ultimo intento.** El bucle esperaba el backoff
+   entero y recien ahi levantaba: 8 segundos de latencia del reporte gastados
+   sin ningun intento que los aprovechara.
+3. Sin jitter, las corrutinas que arrancan juntas reintentaban en lockstep.
+
+Los tres se ven igual en un log — el primero parece "la API esta caida" y el
+segundo "la red esta lenta".
+
+Detalle que costo un test: un `Retry-After` **numerico negativo** esta mal
+formado y ahora cae al exponencial en vez de tomarse como 0. Tomarlo como 0
+seria reintentar al instante, o sea el comportamiento que este cambio existe
+para no tener. Una **fecha** en el pasado, en cambio, si significa "ya podes"
+y se recorta a 0: los dos formatos no se tratan igual a proposito.
+
+**Lo que deliberadamente NO se hizo:** servir el ultimo valor bueno del cache
+cuando la lectura falla. La doctrina de `health_registry` lo prohibe de forma
+explicita — "un default silencioso en el money path NUNCA es una degradacion
+aceptable", y nombra "un payload cacheado" entre los valores plausibles que
+tapan una falla. El ❌ del subsistema se mantiene cuando de verdad no se pudo
+leer. Este cambio baja la probabilidad del 429; no lo esconde.
+
+### Anti-vacuidad por mutacion
+
+13 mutaciones, todas rompen al menos un test:
+
+* **I5** — MUT-1 no mirar la cobertura · MUT-2 ventana por moneda · MUT-3 la
+  nota suma al total · MUT-4 la nota se renderiza como violacion · MUT-5 el
+  ciclo a caballo cuenta como adentro · MUT-6 la violacion no nombra la wallet.
+* **HTTP** — MUT-A ignorar `Retry-After` · MUT-B dormir al final · MUT-C sin
+  jitter · MUT-D sin techo · MUT-E no parsear el formato fecha · MUT-F
+  negativo como cero · MUT-G perder la ultima excepcion al cortar el bucle.
+
+### Lo que esta ronda NO puede afirmar todavia
+
+Cuantos de los 27 ciclos son nota y cuantos son agujero real. La respuesta
+existe en un solo lugar —la DB que corre en Railway— y desde la sesion no hay
+forma de consultarla. Por eso el chequeo se escribio para que **el bot conteste
+solo**, igual que el bloque *Claves de servicio* de la ronda anterior. Se lee
+en el proximo `/diagnostico`.
+
 ## 2026-09-02 — R-RAILWAY-VARS (el bloque de autoactualizacion decia cualquier cosa)
 
 - **base commit**: `2d59a5a` · **service**: pear-monitor-bot

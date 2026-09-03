@@ -52,13 +52,16 @@ produccion que existe.**
 
 ## Variables del servicio (`amusing-acceptance`)
 
-Nombres, no valores, y sin poder comprobarlos desde la sesion:
+Nombres, no valores. Desde R-RAILWAY-VARS la presencia SI se puede leer: la
+reporta el propio bot en ***Claves de servicio*** (ver abajo). Estado leido en
+produccion el **2026-09-03**:
 
-* `GITHUB_TOKEN` — la usa el auto-update del bot para pushear. **La unica
-  imprescindible, y la unica que se sabe ausente.**
-* `GITHUB_REPO` — ya no se requiere (ver abajo). Si se carga, gana.
-* `FRED_API_KEY` — serie macro. Presencia no verificable desde la sesion.
-* `ARKHAM_API_KEY` — intel on-chain. Presencia no verificable desde la sesion.
+* `GITHUB_TOKEN` — ✅ la usa el auto-update del bot para pushear. **La unica
+  imprescindible. CARGADA el 2026-09-03 por BCD a mano en el panel**; desde
+  entonces la autoactualizacion esta en verde.
+* `GITHUB_REPO` — ❌ ausente, y no se requiere (ver abajo). Si se carga, gana.
+* `FRED_API_KEY` — ✅ presente. Serie macro.
+* `ARKHAM_API_KEY` — ❌ ausente. Intel on-chain, degradacion conocida.
 
 Para saber cual esta y cual no sin abrir el panel de Railway hay dos lecturas.
 `/health` expone `pat_status`, y desde R-RAILWAY-VARS `/diagnostico` trae el
@@ -80,6 +83,11 @@ El texto se elegia mirando SOLO el token, mientras el veredicto exigia token Y
 repo. O sea que ese "y/o" no era una duda honesta: era una conjetura impresa
 con formato de hallazgo. Lo que si prueba, porque esa rama depende unicamente
 del token, es que **`GITHUB_TOKEN` NO esta cargada** en el servicio.
+
+**Cerrado el 2026-09-03.** BCD cargo `GITHUB_TOKEN` en el panel y redeployo. El
+mismo bloque ahora lee, textual: `✅ push a GitHub (via GITHUB_TOKEN)` y
+`✅ redeploy en Railway — automatico por push a master`. Con `GITHUB_REPO`
+todavia ausente, que es la prueba de campo de que nunca hizo falta.
 
 **Y `GITHUB_REPO` nunca hizo falta.** Se leia en un solo lugar de todo el repo:
 el chequeo que la exigia. Ningun camino de push la consume — el de backups usa
