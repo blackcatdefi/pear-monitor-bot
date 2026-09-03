@@ -2,6 +2,77 @@
 
 Append-only log per Cowork constitución §6 paso 8.
 
+## 2026-09-03 — R-FUNDING-LECTURA + R-429-TECHO (mande un arreglo que no podia observar)
+
+- **base commit**: `012dae8` · **service**: pear-monitor-bot
+  (amusing-acceptance) / branch `master`
+- **entrada**: `/diagnostico` de las 01:49 UTC, deploy `417b19ea`. **2
+  problemas**, y los dos son correcciones a rondas MIAS de la misma jornada.
+
+### Problema 1 — la violacion de funding salio identica, palabra por palabra
+
+27 ciclos, el mas largo de 20h, mismo texto que a las 01:32. Ni se reparo ni
+bajo a nota. Y con el panel de entonces no habia forma de saber cual de estas
+tres cosas paso:
+
+| se ve como | lo que en realidad seria | el arreglo que pide |
+| --- | --- | --- |
+| violacion intacta | el backfill nunca corrio | engancharlo al scheduler |
+| violacion intacta | corrio y fallo (el `log.warning` vive en Railway, que el panel no lee) | el bug del pedido |
+| violacion intacta | corrio bien y no encontro ningun hueco | el detector no ve lo que el chequeo si ve |
+
+**Las tres son indistinguibles desde afuera y llevan a arreglos opuestos.**
+Mande una reparacion al money path sin ningun modo de leer si se ejecutaba:
+una conjetura con formato de arreglo, que es exactamente el defecto que vengo
+persiguiendo hace cuatro rondas — esta vez en mi propio codigo.
+
+Esta ronda **no arregla el hueco**: hace que el proximo `/diagnostico` pueda
+decir cual de las tres es. Bloque nuevo *Reparacion de funding (tramos mudos)*
+con ultimo intento, huecos pendientes, pruebas hechas / vacias / filas traidas
+y ultimo error. La marca del intento se escribe **aunque no haya nada que
+reparar** —es lo unico que separa "no hay trabajo" de "nunca corrio"— y el
+error se **persiste** hasta el panel y se **limpia** solo cuando deja de
+pasar, para no volver a fabricar una cruz que nadie puede cerrar.
+
+### Problema 2 — el 429 volvio, y la ronda anterior no lo habia arreglado
+
+`MAX_BACKOFF_SEC` es 30. CoinGecko pide 60. O sea que R-429-RETRY-AFTER
+arreglo *"ignorabamos Retry-After"* y siguio ignorandolo, solo que despues de
+leerlo: leia los 60, los recortaba a 30 y reintentaba **adentro** del castigo.
+Ese intento no podia salir bien por construccion, y encima era trafico durante
+la penalizacion, que es lo que la alarga.
+
+Ahora, si el servidor pide mas que el techo, no se reintenta: se corta y se
+reporta. Esperar menos de lo que pidio el unico que esta contando no es una
+segunda chance, es insistir.
+
+**El error de metodo, que importa mas que el parche:** declare el 429
+"confirmado arreglado" con UN `/diagnostico` limpio. Un panel verde entre dos
+castigos no es evidencia de que algo se arreglo — es evidencia de que en ese
+momento no estaba fallando.
+
+### Verificacion
+
+- Un test existente afirmaba lo contrario de lo que ahora hace el codigo
+  (*"se espera hasta el techo y se reintenta igual"*). No se toco para que
+  pasara: se **dio vuelta con el motivo escrito**, porque produccion refuto su
+  premisa al dia siguiente.
+- Se descarto escribir los tests del readout contra una copia del bloque de
+  `sync_all`. Un test contra una copia del bucle pasa aunque el bucle real se
+  borre; se mockea la red y el telegram y se ejecuta la funcion de produccion.
+- **13/13** mutaciones detectadas · suite **1518 passed** · guarda de
+  degradacion silenciosa **8/8** · `bug_class_scan` **TOTAL 7** sin cambios.
+- La guarda de degradacion **rechazo** el primer intento: `_horas_desde_iso`
+  devolvia `None` sin declarar nada. Se acepto en el allowlist con la razon
+  escrita — no alimenta ningun numero, y el dato del que depende la decision
+  es la PRESENCIA de la marca, que un timestamp ilegible no puede falsear.
+
+### Lo que esta ronda NO puede afirmar
+
+Ni que el hueco se repare ni que el 429 no vuelva. Lo unico que se puede
+afirmar es que el proximo `/diagnostico` va a poder distinguir los tres
+estados en vez de mostrar el mismo texto para todos.
+
 ## 2026-09-03 — R-FUNDING-HUECO (el cursor solo avanza, asi que el hueco se fosiliza)
 
 - **base commit**: `92c4f2c` · **service**: pear-monitor-bot

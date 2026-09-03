@@ -102,6 +102,13 @@ def _b_ledger() -> dict[str, Any]:
             "horas_desde_sync": _hours_since_iso(h.get("updated_at")),
         }
     out["sync_por_wallet"] = salud
+    # R-FUNDING-LECTURA: sin esto, "la violacion sigue igual" no distingue
+    # entre no corrio / fallo / corrio y no hay nada que pedir.
+    try:
+        from modules.trade_ledger import funding_repair_status
+        out["reparacion_funding"] = funding_repair_status()
+    except Exception as exc:  # noqa: BLE001
+        out["reparacion_funding"] = {"_error": f"{type(exc).__name__}: {exc}"[:160]}
     return out
 
 
@@ -591,6 +598,18 @@ def detectar_problemas(d: dict[str, Any]) -> list[str]:
         if not h.get("ok"):
             p.append(f"ledger incompleto en {w}: "
                      f"{str(h.get('detail') or '')[:100]}")
+
+    # R-FUNDING-LECTURA: una reparacion que nunca corre, o que falla en cada
+    # corrida, deja la violacion de funding intacta para siempre y sin decir
+    # por que. Eso es un problema en si mismo, aparte de la violacion.
+    rep = led.get("reparacion_funding") or {}
+    if rep and not rep.get("_error"):
+        if not rep.get("ultimo_intento"):
+            p.append("la reparacion de tramos mudos de funding NUNCA se "
+                     "ejecuto: los huecos no se van a cerrar solos")
+        elif rep.get("ultimo_error"):
+            p.append(f"la reparacion de funding esta fallando: "
+                     f"{str(rep['ultimo_error'])[:140]}")
     return p
 
 
@@ -691,6 +710,28 @@ def format_diagnosis(d: dict[str, Any]) -> str:
                      f" funding {_tick(h.get('funding_ok'))}"
                      + (f" · sync hace {hh:.0f}h" if isinstance(hh, (int, float))
                         else " · sin sync"))
+
+    rep = led.get("reparacion_funding") or {}
+    if rep:
+        L.append("\n*Reparacion de funding (tramos mudos)*")
+        if rep.get("_error"):
+            L.append(f"  \u274c no se pudo leer: {rep['_error']}")
+        elif not rep.get("ultimo_intento"):
+            # "Nunca corrio" NO es "no hay nada que reparar". Se dice con esas
+            # palabras porque las dos dejan la violacion intacta y llevan a
+            # arreglos opuestos.
+            L.append("  \u274c NUNCA se ejecuto — la reparacion no esta "
+                     "enganchada al sync")
+        else:
+            hh = rep.get("horas_desde_intento")
+            cuando = f"hace {hh:.0f}h" if isinstance(hh, (int, float)) else "?"
+            L.append(f"  \u2705 ultimo intento {cuando} · "
+                     f"{rep.get('pendientes_total', 0)} hueco(s) pendiente(s)")
+            L.append(f"  pruebas {rep.get('pruebas', 0)} "
+                     f"(vacias {rep.get('vacias', 0)}) · "
+                     f"filas traidas {rep.get('filas_traidas', 0)}")
+        if rep.get("ultimo_error"):
+            L.append(f"  \u26a0\ufe0f ultimo error: {_corte(rep['ultimo_error'])}")
 
     fe = d.get("feeds") or {}
     if not fe.get("_error"):

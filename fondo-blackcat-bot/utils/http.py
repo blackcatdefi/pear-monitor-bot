@@ -28,6 +28,24 @@ en silencio esta explicitamente prohibido por la doctrina de
 ``health_registry`` — "un default silencioso en el money path NUNCA es una
 degradacion aceptable" — asi que el ❌ del subsistema se mantiene cuando de
 verdad no se pudo leer. Esto reduce la probabilidad del 429, no la esconde.
+
+R-429-TECHO (2026-09-03, misma jornada) — LA CORRECCION A LO DE ARRIBA
+=====================================================================
+El 429 volvio, y volvio porque quedaba un tercer defecto que la ronda anterior
+no vio: ``MAX_BACKOFF_SEC`` es 30 y CoinGecko pide 60. O sea que arreglamos
+"ignorabamos Retry-After" y despues lo ignorabamos igual, solo que con mas
+estilo: leiamos los 60, los recortabamos a 30 y reintentabamos ADENTRO del
+castigo. El intento extra no solo fallaba — era trafico durante la
+penalizacion, que es lo que la alarga.
+
+Ahora, si el servidor pide mas que el techo, no se reintenta: se corta y se
+reporta. Esperar menos de lo que pidio el unico que esta contando no es una
+segunda chance, es insistir.
+
+Y una nota sobre el metodo, que importa mas que el parche: la ronda anterior
+declaro el 429 "cerrado" con UN /diagnostico limpio. Un solo panel verde entre
+dos castigos no es evidencia de que algo se arreglo — es evidencia de que en
+ese momento no estaba fallando. No es lo mismo.
 """
 from __future__ import annotations
 
@@ -136,6 +154,22 @@ async def request_json(
                 log.warning("HTTP %s %s failed (attempt %d/%d): %s — sin "
                             "reintentos restantes",
                             method, url, attempt + 1, max_retries, exc)
+                break
+            # R-429-TECHO: si el servidor pidio MAS de lo que estamos
+            # dispuestos a esperar, reintentar es futil por definicion — el
+            # proximo intento cae adentro del castigo que el propio servidor
+            # acaba de declarar. Y no es neutro: ese intento es trafico extra
+            # durante la penalizacion, o sea justo lo que la extiende. La
+            # ronda anterior capo el backoff en 30s contra un Retry-After de
+            # 60 y llamo al 429 "arreglado" con un solo /diagnostico limpio de
+            # evidencia. No estaba arreglado: estaba entre dos castigos.
+            pedido = _retry_after_sec(exc)
+            if pedido is not None and pedido > MAX_BACKOFF_SEC:
+                log.warning(
+                    "HTTP %s %s: 429 con Retry-After %.0fs > techo %.0fs — se "
+                    "corta el reintento (esperar menos garantiza otro rechazo "
+                    "y alarga el castigo)",
+                    method, url, pedido, MAX_BACKOFF_SEC)
                 break
             wait = _backoff(exc, attempt, base_backoff)
             log.warning(

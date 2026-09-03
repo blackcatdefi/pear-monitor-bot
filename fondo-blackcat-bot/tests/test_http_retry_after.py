@@ -139,15 +139,50 @@ def test_un_retry_after_ilegible_cae_al_exponencial_y_no_rompe(
         f"sin esperar ni explotar: {dormidas}")
 
 
-def test_una_espera_desmedida_se_recorta_al_techo(monkeypatch, dormidas):
-    """Retry-After: 600 no puede colgar un reporte diez minutos. Se espera
-    hasta el techo y se reintenta igual; si el castigo sigue, se reporta."""
+def test_si_el_servidor_pide_MAS_que_el_techo_no_se_reintenta(
+        monkeypatch, dormidas):
+    """R-429-TECHO — ESTE TEST DECIA LO CONTRARIO Y ESTABA MAL.
+
+    La version anterior afirmaba: "se espera hasta el techo y se reintenta
+    igual; si el castigo sigue, se reporta". Suena prudente y es falso.
+    ``MAX_BACKOFF_SEC`` es 30 y CoinGecko pide 60, asi que ese reintento cae
+    SIEMPRE adentro del castigo: no puede salir bien. Y no es gratis — es un
+    request mas durante la penalizacion, que es justo lo que la alarga.
+
+    O sea que la ronda del Retry-After arreglo "ignorabamos la cabecera" y
+    siguio ignorandola, solo que despues de leerla. El 429 volvio al dia
+    siguiente y por eso este test se da vuelta.
+    """
     monkeypatch.setattr(uh.httpx, "AsyncClient", _cliente([
         _err(429, {"Retry-After": "600"}),
+        _resp(200),      # nunca se llega: reintentar aca seria insistir
+    ]))
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(uh.get_json("https://x.test"))
+    assert dormidas == [], (
+        f"se durmio para reintentar adentro de una ventana que el servidor ya "
+        f"dijo que es mas larga: {dormidas}")
+
+
+def test_justo_en_el_techo_todavia_se_reintenta(monkeypatch, dormidas):
+    """La frontera importa: si el corte fuera >= en vez de >, un Retry-After
+    igual al techo perderia un reintento que si podia salir bien."""
+    monkeypatch.setattr(uh.httpx, "AsyncClient", _cliente([
+        _err(429, {"Retry-After": str(int(uh.MAX_BACKOFF_SEC))}),
         _resp(200),
     ]))
-    asyncio.run(uh.get_json("https://x.test"))
+    assert asyncio.run(uh.get_json("https://x.test")) == {"data": {}}
     assert dormidas == [uh.MAX_BACKOFF_SEC], dormidas
+
+
+def test_el_corte_no_se_traga_el_error(monkeypatch, dormidas):
+    """Cortar temprano no puede volverse un `return {}`: el subsistema tiene
+    que quedar en rojo con el motivo, no en verde por no haber insistido."""
+    monkeypatch.setattr(uh.httpx, "AsyncClient", _cliente([
+        _err(429, {"Retry-After": "600"})]))
+    with pytest.raises(httpx.HTTPStatusError) as ei:
+        asyncio.run(uh.get_json("https://x.test"))
+    assert ei.value.response.status_code == 429
 
 
 def test_sin_cabecera_el_backoff_sigue_siendo_exponencial(monkeypatch, dormidas):

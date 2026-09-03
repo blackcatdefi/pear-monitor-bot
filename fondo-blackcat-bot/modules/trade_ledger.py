@@ -926,6 +926,78 @@ async def backfill_funding_gaps(wallet: str, max_gaps: int = 3) -> dict[str, Any
     return res
 
 
+# ─── lectura del estado de la reparacion ────────────────────────────────────
+#
+# R-FUNDING-LECTURA (2026-09-03) — POR QUE ESTO EXISTE
+# ===================================================
+# La ronda anterior mando la reparacion a produccion y el /diagnostico
+# siguiente mostro la MISMA violacion, palabra por palabra. Con el panel de
+# entonces no habia forma de saber cual de estas tres cosas paso:
+#
+#   a) el backfill no llego a correr todavia,
+#   b) corrio y fallo (el log.warning queda en Railway, que el panel no lee),
+#   c) corrio bien y no encontro ningun hueco que pedir.
+#
+# Las tres se ven exactamente igual desde afuera: la violacion sigue ahi. Una
+# reparacion que no se puede observar es una conjetura con formato de arreglo
+# — el mismo defecto que vengo persiguiendo, ahora en mi propio codigo. Esto
+# no arregla el hueco: hace que el proximo /diagnostico pueda DECIR cual de
+# las tres es, en vez de obligarme a adivinar otra vez.
+
+META_ULTIMO_INTENTO = "funding_backfill_last_run"
+META_ULTIMO_ERROR = "funding_backfill_last_error"
+
+
+def funding_repair_status() -> dict[str, Any]:
+    """Que hizo la reparacion de tramos mudos, y si de verdad llego a correr.
+
+    ``ultimo_intento`` en ``None`` significa NUNCA, y hay que leerlo distinto
+    de "corrio y no encontro nada": el segundo es una respuesta, el primero es
+    la ausencia de una. Confundirlos es lo que dejaria pasar un backfill que
+    nunca se engancho al scheduler como si fuera uno que ya no tiene trabajo.
+    """
+    con = _conn()
+    try:
+        f = con.execute(
+            "SELECT COUNT(*) n, "
+            "       SUM(CASE WHEN found=0 THEN 1 ELSE 0 END) vac, "
+            "       COALESCE(SUM(found),0) filas "
+            "FROM ledger_funding_probe").fetchone()
+        pruebas, vacias = int(f["n"] or 0), int(f["vac"] or 0)
+        filas = int(f["filas"] or 0)
+    finally:
+        con.close()
+    pend: dict[str, int] = {}
+    for w in ledger_wallets():
+        try:
+            pend[w[:10]] = len(funding_gaps(w))
+        except Exception:  # noqa: BLE001 - un diagnostico no puede tumbar nada
+            health_registry.swallowed("ledger", "funding_repair_status")
+            log.warning("LEDGER no se pudo contar huecos de %s", w[:6])
+    return {
+        "ultimo_intento": _meta_get(META_ULTIMO_INTENTO),
+        "horas_desde_intento": _horas_desde_iso(_meta_get(META_ULTIMO_INTENTO)),
+        "ultimo_error": _meta_get(META_ULTIMO_ERROR) or None,
+        "pruebas": pruebas,
+        "vacias": vacias,
+        "filas_traidas": filas,
+        "pendientes": pend,
+        "pendientes_total": sum(pend.values()),
+    }
+
+
+def _horas_desde_iso(iso: str | None) -> float | None:
+    if not iso:
+        return None
+    try:
+        t = datetime.fromisoformat(str(iso))
+    except (TypeError, ValueError):
+        return None
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - t).total_seconds() / 3600.0
+
+
 def _store_fills(wallet: str, fills: list[dict[str, Any]]) -> int:
     con = _conn()
     try:
@@ -1294,6 +1366,12 @@ async def sync_all(send: Callable | None = None) -> dict[str, Any]:
         # orden importa: al dia primero, arqueologia despues — si el sync
         # normal fallo, el hueco puede ser de esta corrida y todavia no hay
         # nada que reparar.
+        # R-FUNDING-LECTURA: la marca de que ESTO corrio se escribe aunque no
+        # haya un solo hueco que reparar. Es la unica forma de distinguir "no
+        # hay nada que hacer" de "nunca se ejecuto", que desde el panel se ven
+        # identicas y llevan a conclusiones opuestas.
+        _meta_set(META_ULTIMO_INTENTO, datetime.now(timezone.utc).isoformat())
+        fallas: list[str] = []
         for w in result["ok"]:
             try:
                 r = await backfill_funding_gaps(w)
@@ -1307,6 +1385,13 @@ async def sync_all(send: Callable | None = None) -> dict[str, Any]:
                 health_registry.swallowed("ledger", "sync_all")
                 log.warning("LEDGER funding-gap backfill fallo para %s: %s",
                             w[:6], exc)
+                fallas.append(f"{w[:6]}: {type(exc).__name__}: {exc}"[:180])
+        # El error se PERSISTE, no solo se loguea: el log vive en Railway y el
+        # panel no lo lee, asi que una reparacion que falla en cada corrida se
+        # veria exactamente igual que una que anda bien. Y se LIMPIA cuando
+        # deja de fallar, para que no quede una cruz vieja que nadie puede
+        # cerrar — la leccion de R-RAILWAY-VARS.
+        _meta_set(META_ULTIMO_ERROR, " | ".join(fallas)[:400] if fallas else "")
         try:
             ensure_report_cursor_seeded()
         except Exception:  # noqa: BLE001
