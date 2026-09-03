@@ -2,6 +2,114 @@
 
 Append-only log per Cowork constitución §6 paso 8.
 
+## 2026-09-03 — R-FUNDING-NOVEDAD: el "564" no era reparacion, era el eco del pedido
+
+**RETRACTACION de la entrada de las 02:08.** Ahi escribi, en negrita, "el dato
+existia del lado de HL todo el tiempo — 14 pedidos, cero vacios, 564 filas
+recuperadas". Eso no se deduce de esos numeros. Los lei mal, y el error es
+exactamente el que vengo persiguiendo hace cinco rondas: **un numero con
+formato de hallazgo**. Esta vez en un panel que yo mismo escribi una ronda
+antes, para dejar de tener numeros con formato de hallazgo.
+
+### Que dicen de verdad esos numeros
+
+`funding_gaps` le pide a HL la ventana `(prev, post)`, y `prev`/`post` son los
+timestamps de acreditaciones **que ya tenemos guardadas**. La ventana esta
+definida por sus propios bordes conocidos. Entonces HL devuelve siempre, como
+minimo, esos bordes:
+
+- `found > 0` es una propiedad de **como armamos el pedido**, no una noticia
+  sobre el hueco. `vacias 0` no significa "HL tenia el dato": significa "la
+  ventana contiene filas, y una de ellas la pusimos nosotros al definirla".
+- `filas traidas 564` contaba lo que HL devolvio, no lo que **entro**.
+  `_store_funding` ya devolvia las filas nuevas y ese numero se tiraba.
+
+Las dos consecuencias son opuestas y las dos son malas:
+
+1. el tramo **nunca** se excluia (el filtro de exclusion era `found=0`), asi
+   que se repedia en cada sync para recibir el mismo payload — el gasto de
+   rate limit que `_fusionar` existia para evitar, entrando por la puerta de
+   al lado;
+2. `_sacar_probados_vacios` **no podia bajar ni un ciclo a nota**, nunca. La
+   I5 quedaba en rojo permanente aunque el dato de verdad no exista del lado
+   de HL. La cruz que no se puede cerrar, otra vez, y esta vez fabricada por
+   el mecanismo que puse para evitarla.
+
+Y explica el sintoma que disparo la ronda: los tres numeros **identicos** a
+las 02:08 y a las 02:15. No era solo que el sync no habia vuelto a correr.
+
+### Que cambio
+
+- `ledger_funding_probe` guarda **dos** cantidades: `found` (el eco de HL) y
+  `nuevas` (lo que entro a la base). La diferencia entre ambas es la respuesta
+  a "¿esto sirvio de algo?".
+- El criterio de exclusion y el de "probado irreparable" pasan a ser
+  `nuevas=0`. Es exacto para este uso: como la ventana esta acotada por filas
+  conocidas, **toda fila nueva cae adentro del silencio**.
+- Migracion con default **-1 = NO MEDIDO**, que no es 0. Las 14 pruebas que ya
+  hay en produccion no fueron medidas; ponerlas en 0 habria bajado los 27
+  ciclos de violacion a nota **de golpe y sin que nadie mire nada** — el panel
+  poniendose verde por un default de columna. Se vuelven a probar.
+- El panel imprime `filas NUEVAS` primero y `eco HL` entre parentesis. El eco
+  se conserva porque un eco de 0 con la ventana acotada por bordes conocidos
+  significaria transporte roto, que es otra cosa y hay que poder verla.
+
+### El tope de la corrida estaba en la variable equivocada
+
+El tope era 3 huecos por wallet por corrida y el comentario que lo justificaba
+decia que lo que sobra "queda para la proxima". Lo escribi suponiendo syncs
+frecuentes. `_ledger_sync_job` corre **a los 2 minutos del arranque y despues
+cada `LEDGER_SYNC_HOURS` (6)**: "la proxima" son seis horas, y 33 huecos a 3
+por corrida son medio dia con un numero de plata mal en el reporte.
+
+Peor: el rate limit lo gasta la **pagina**, no el hueco. Un hueco de 24h entra
+en una pagina; un hueco de 6 meses toma doce. Contar huecos para proteger un
+presupuesto de paginas es contar la cosa que no se paga. Ahora el corte es por
+paginas consumidas (`LEDGER_GAP_PAGES=20` por wallet por corrida), dimensionado
+contra la cadencia real: 5 wallets × 20 paginas con `PAGE_PAUSE_SEC` entre
+pedidos son ~100 pedidos en ~110s, unos 11/min contra los 60/min del
+presupuesto. Menos de un quinto, y el reporte no se pisa.
+
+Y ahora se **pausa entre huecos**, no solo entre paginas de un mismo hueco.
+Cada ventana arrancaba en `i=0`, asi que N huecos de una pagina salian como N
+pedidos consecutivos sin ninguna espera. Con tope 3 era una rafaga chica; subir
+el tope sin esto convertia la reparacion en el 429 que vino a evitar.
+
+### Resolucion de minutos en el panel
+
+`hace 0h` no distingue "corrio recien" de "corrio hace 50 minutos". Con un sync
+que arranca a los 2 min del deploy y despues cada 6h, esa es justo la
+diferencia entre dos lecturas de la MISMA corrida y dos corridas distintas — o
+sea entre poder comparar sus numeros y no poder. Abajo de una hora ahora dice
+minutos. Es la misma ceguera de observacion de la ronda anterior, un grano mas
+fino.
+
+### Verificacion
+
+- **15/15 mutaciones** matan un test cada una (la M3 nacio vacua: la rama de
+  "tabla sin la columna" no la alcanzaba nadie porque `_conn()` migra en cada
+  conexion; se cubrio con un test unitario sobre una conexion cruda, igual que
+  se hizo con la rama de la tabla ausente).
+- suite **1528** verdes (1518 + 10), guarda de degradacion silenciosa **8/8**,
+  `bug_class_scan` **TOTAL 7** (C1 0 · C2 6 · C3 0 · C4 1), sin cambios.
+
+### La observacion que discrimina en el proximo /diagnostico
+
+Con el default en -1 el panel va a mostrar `sin medir 14` y las pendientes
+**arriba** de 33 al principio: correcto, porque esas pruebas vuelven a la cola.
+Lo que hay que mirar es la linea nueva:
+
+- `filas NUEVAS > 0` → el dato existia y la reparacion esta entrando. Los
+  ciclos tienen que bajar de 27.
+- `filas NUEVAS 0` con `eco HL` alto y `sin novedad` subiendo → HL no tiene
+  nada mas, y los ciclos bajan a **nota** en vez de violacion. La cruz se
+  cierra por la razon honesta.
+- `filas NUEVAS 0` con `eco HL 0` → transporte roto, no hueco. Otro bug.
+
+Las tres se veian identicas hasta esta ronda. Recien ahora el panel puede
+decir cual es.
+
+
 ## 2026-09-03 02:08 UTC — el readout contesto: la hipotesis estructural era CORRECTA
 
 - **deploy**: `f684c40` / `6f2d6758` — primer panel con el bloque nuevo.

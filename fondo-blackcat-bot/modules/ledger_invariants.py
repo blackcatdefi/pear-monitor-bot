@@ -344,10 +344,10 @@ def _check_i5(con, rows: list[dict[str, Any]]
     if probados:
         notas.append(
             f"funding: {probados} ciclo(s) largos caen en tramos que ya se le "
-            f"volvieron a pedir a HL y volvieron VACIOS. El dato no existe del "
-            f"lado de HL, asi que no hay resync que lo traiga — deja de "
-            f"contar como violacion para no dejar una cruz que nadie puede "
-            f"cerrar.")
+            f"volvieron a pedir a HL y NO trajeron ni una fila nueva. El dato "
+            f"no existe del lado de HL, asi que no hay resync que lo traiga — "
+            f"deja de contar como violacion para no dejar una cruz que nadie "
+            f"puede cerrar.")
 
     if silencio:
         peor, hueco_h = max(silencio, key=lambda t: t[1])
@@ -440,11 +440,21 @@ def _partir_por_forma(con, dentro: list[dict[str, Any]]) -> tuple[
 
 def _sacar_probados_vacios(con, silencio: list[tuple[dict[str, Any], float]]
                            ) -> tuple[list[tuple[dict[str, Any], float]], int]:
-    """Separa los ciclos cuyo tramo mudo ya se reintento y volvio vacio.
+    """Separa los ciclos cuyo tramo mudo ya se reintento y no trajo nada nuevo.
 
     Ante la falta de evidencia se reporta la falla, no se la excusa: un tramo
-    baja a nota SOLO si hay una prueba registrada que volvio vacia. Sin
-    pruebas, todos los ciclos siguen siendo violacion.
+    baja a nota SOLO si hay una prueba registrada que no aporto ni una fila.
+    Sin pruebas, todos los ciclos siguen siendo violacion.
+
+    R-FUNDING-NOVEDAD: el criterio era ``found=0`` y no servia. La ventana que
+    se le pide a HL esta acotada por acreditaciones que ya tenemos, asi que HL
+    siempre devuelve al menos esos bordes y ``found`` nunca da cero. Con ese
+    filtro esta funcion no podia bajar NINGUN ciclo a nota: la I5 quedaba en
+    rojo permanente incluso cuando el dato de verdad no existe. El criterio
+    correcto es ``nuevas=0`` — se volvio a pedir y no entro nada.
+
+    ``nuevas<0`` es NO MEDIDO (pruebas anteriores al cambio) y no alcanza para
+    excusar nada: se vuelven a probar y recien ahi hay respuesta.
 
     La guarda de la tabla ausente NO se alcanza desde el llamador actual:
     ``trade_ledger._conn()`` hace ``CREATE TABLE IF NOT EXISTS`` de todo el
@@ -456,9 +466,16 @@ def _sacar_probados_vacios(con, silencio: list[tuple[dict[str, Any], float]]
     """
     if "ledger_funding_probe" not in _tables(con):
         return silencio, 0
+    cols = {r["name"] for r in con.execute(
+        "PRAGMA table_info(ledger_funding_probe)")}
+    if "nuevas" not in cols:
+        # DB sin la columna = ninguna prueba fue medida. No se excusa nada,
+        # que es lo que corresponde cuando la medicion no existe.
+        return silencio, 0
     vacios = [(str(r["wallet"]), int(r["a"]), int(r["b"]))
               for r in con.execute(
-                  "SELECT wallet, a, b FROM ledger_funding_probe WHERE found=0")]
+                  "SELECT wallet, a, b FROM ledger_funding_probe "
+                  "WHERE nuevas=0 OR found=0")]
     if not vacios:
         return silencio, 0
     quedan: list[tuple[dict[str, Any], float]] = []

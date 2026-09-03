@@ -220,7 +220,48 @@ def test_el_panel_distingue_pendientes_de_pruebas_hechas():
     reparacion avanza o gira en el lugar."""
     txt = _render({"ultimo_intento": "2026-09-03T02:00:00+00:00",
                    "horas_desde_intento": 0.2, "pendientes_total": 3,
-                   "pruebas": 5, "vacias": 2, "filas_traidas": 41})
+                   "pruebas": 5, "sin_novedad": 2, "sin_medir": 1,
+                   "filas_nuevas": 41, "filas_eco": 564})
     assert "3 hueco(s) pendiente(s)" in txt, txt
-    assert "pruebas 5" in txt and "vacias 2" in txt, txt
-    assert "filas traidas 41" in txt, txt
+    assert "pruebas 5" in txt and "sin novedad 2" in txt, txt
+    assert "sin medir 1" in txt, txt
+    assert "filas NUEVAS 41" in txt, txt
+
+
+def test_el_panel_no_confunde_el_ECO_de_HL_con_reparacion():
+    """R-FUNDING-NOVEDAD — el defecto que este bloque tuvo una ronda entera.
+
+    El panel imprimia ``filas traidas 564`` y ese 564 era lo que HL devolvio,
+    casi todo filas que ya teniamos: la ventana se pide acotada por
+    acreditaciones conocidas, asi que el pedido se devuelve a si mismo. Leido
+    de corrido decia "la reparacion esta trayendo datos" cuando no habia
+    entrado ni una fila. Un numero con formato de hallazgo, en el panel que
+    escribi para no tener numeros con formato de hallazgo.
+
+    El numero grande no puede quedar solo ni quedar primero.
+    """
+    txt = _render({"ultimo_intento": "2026-09-03T02:00:00+00:00",
+                   "horas_desde_intento": 0.2, "pendientes_total": 33,
+                   "pruebas": 14, "sin_novedad": 0, "sin_medir": 0,
+                   "filas_nuevas": 0, "filas_eco": 564})
+    assert "filas NUEVAS 0" in txt, txt
+    assert "eco HL 564" in txt, txt
+    # El eco no puede aparecer sin la novedad al lado: solo, vuelve a leerse
+    # como reparacion.
+    assert txt.index("filas NUEVAS 0") < txt.index("eco HL 564"), txt
+
+
+def test_abajo_de_una_hora_el_panel_dice_minutos():
+    """``hace 0h`` no distingue "corrio recien" de "corrio hace 50 minutos".
+
+    Con un sync que arranca a los 2 minutos del deploy y despues cada 6 horas,
+    esa es justo la diferencia entre dos lecturas de la MISMA corrida y dos
+    corridas distintas — o sea entre comparar sus numeros y no poder.
+    """
+    base = {"ultimo_intento": "2026-09-03T02:00:00+00:00", "pendientes_total": 0,
+            "pruebas": 0, "sin_novedad": 0, "filas_nuevas": 0, "filas_eco": 0}
+    assert "hace 2min" in _render({**base, "horas_desde_intento": 0.033}), "2min"
+    assert "hace 50min" in _render({**base, "horas_desde_intento": 0.833}), "50min"
+    assert "hace 6h" in _render({**base, "horas_desde_intento": 6.0}), "6h"
+    # Sin dato NO se inventa un cero, que se leeria como "recien corrio".
+    assert "hace" not in _render({**base, "horas_desde_intento": None})

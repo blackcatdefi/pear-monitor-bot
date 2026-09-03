@@ -124,6 +124,26 @@ PAGE_PAUSE_SEC = float(os.getenv("LEDGER_PAGE_PAUSE_SEC", "1.1") or 1.1)
 # fails after this raises LedgerSyncError — it is NEVER swallowed.
 PAGE_MAX_ATTEMPTS = int(os.getenv("LEDGER_PAGE_MAX_ATTEMPTS", "3") or 3)
 
+# R-FUNDING-NOVEDAD: cuanto puede gastar la reparacion de tramos mudos en UNA
+# corrida, POR WALLET. El numero sale de la cadencia real, no de la intuicion:
+#
+#   * el sync corre a los 2 min del arranque y despues cada LEDGER_SYNC_HOURS
+#     (6 por defecto), o sea que lo que no se repara ahora espera seis horas;
+#   * el presupuesto de HL es 1200/min por IP y cada pagina pesa 20, o sea 60
+#     pedidos pesados por minuto compartidos con TODO lo demas que hace el bot;
+#   * con 20 paginas por wallet y 5 wallets, con PAGE_PAUSE_SEC entre pedidos,
+#     la reparacion entera son ~100 pedidos repartidos en ~110 segundos: unos
+#     11 por minuto, menos de un quinto del presupuesto. Queda margen de sobra
+#     para el reporte, que es lo que no se puede pisar.
+#
+# Con esto los 33 huecos que reporto produccion drenan en UNA corrida en vez de
+# medio dia, sin acercarse al 429.
+GAP_PAGES_POR_CORRIDA = int(os.getenv("LEDGER_GAP_PAGES", "20") or 20)
+# Tope grueso de seguridad. El corte que manda es el de paginas; este solo
+# existe para que una lista de huecos absurdamente larga no arme un bucle
+# eterno de ventanas de cero paginas.
+GAP_MAX_POR_CORRIDA = int(os.getenv("LEDGER_GAP_MAX", "40") or 40)
+
 # Fund standard leverage assumed for BACKFILLED closes (fills carry neither
 # leverage nor posted margin). R-LEDGER-FIX D3: the fund's baskets run at
 # 3x — the old default of 5 overstated every backfilled ROE by ~67%.
@@ -301,6 +321,7 @@ def _conn() -> sqlite3.Connection:
             b INTEGER NOT NULL,
             probed_at TEXT NOT NULL,
             found INTEGER NOT NULL DEFAULT 0,
+            nuevas INTEGER NOT NULL DEFAULT -1,
             PRIMARY KEY (wallet, a, b)
         )
     """)
@@ -309,6 +330,14 @@ def _conn() -> sqlite3.Connection:
     cols = {r["name"] for r in con.execute("PRAGMA table_info(ledger_positions)")}
     if "margin_open" not in cols:
         con.execute("ALTER TABLE ledger_positions ADD COLUMN margin_open REAL")
+    # R-FUNDING-NOVEDAD: las pruebas viejas se quedan en -1 = NO MEDIDO, que no
+    # es 0 = "no trajo nada nuevo". Ponerlas en 0 seria dar por probado
+    # irreparable un tramo con una medicion que nunca se tomo — exactamente el
+    # error que este cambio existe para sacar del codigo.
+    pcols = {r["name"] for r in con.execute("PRAGMA table_info(ledger_funding_probe)")}
+    if "nuevas" not in pcols:
+        con.execute("ALTER TABLE ledger_funding_probe "
+                    "ADD COLUMN nuevas INTEGER NOT NULL DEFAULT -1")
     con.commit()
     return con
 
@@ -776,15 +805,22 @@ async def _fetch_funding_paged(wallet: str, start_ms: int) -> list[dict[str, Any
     return out
 
 
-async def _fetch_funding_window(wallet: str, a: int, b: int) -> list[dict[str, Any]]:
+async def _fetch_funding_window(wallet: str, a: int, b: int,
+                                ) -> tuple[list[dict[str, Any]], int]:
     """``userFunding`` acotado por los DOS extremos.
 
     El paginado normal manda solo ``startTime`` y avanza para adelante. Aca se
     manda tambien ``endTime`` porque no se esta poniendo al dia: se esta
     releyendo un tramo puntual que ya quedo atras del cursor.
+
+    Devuelve ``(filas, paginas)``. Las paginas se cuentan porque son la unidad
+    que gasta rate limit — un hueco no cuesta nada por si mismo, cuesta lo que
+    haya que paginar para leerlo. Acotar la corrida por huecos era acotar por
+    la variable equivocada.
     """
     from modules.portfolio import _info
     out: list[dict[str, Any]] = []
+    paginas = 0
     cursor = max(0, int(a))
     fin = int(b)
     for i in range(MAX_PAGES):
@@ -794,6 +830,7 @@ async def _fetch_funding_window(wallet: str, a: int, b: int) -> list[dict[str, A
             lambda c=cursor: _info({"type": "userFunding", "user": wallet,
                                     "startTime": int(c), "endTime": fin}),
             wallet, "funding_gap", cursor, i, out)
+        paginas += 1
         if not page:
             break
         out.extend(page)
@@ -805,7 +842,7 @@ async def _fetch_funding_window(wallet: str, a: int, b: int) -> list[dict[str, A
                         nuevo, wallet[:6])
             break
         cursor = nuevo
-    return out
+    return out, paginas
 
 
 def funding_gaps(wallet: str, limit: int = 200) -> list[tuple[int, int]]:
@@ -828,6 +865,37 @@ def funding_gaps(wallet: str, limit: int = 200) -> list[tuple[int, int]]:
     durante el silencio. Sin eso, "no hay funding" es lo correcto —  no habia
     posicion que lo devengara— y volver a pedirlo seria gastar rate limit en
     confirmar un cero legitimo.
+
+    R-FUNDING-NOVEDAD (2026-09-03) — EL CRITERIO DE EXCLUSION ESTABA ROTO
+    ====================================================================
+    Se excluia el tramo cuando la prueba habia vuelto con ``found=0``. Mirando
+    dos lineas mas arriba se ve por que eso no podia pasar casi nunca: la
+    ventana que se pide es ``(prev, post)``, y ``prev``/``post`` son
+    exactamente los timestamps de acreditaciones que YA TENEMOS. O sea que la
+    ventana esta definida por sus propios bordes conocidos, asi que HL siempre
+    devuelve al menos esos dos: ``found>0`` es una propiedad de como armamos
+    el pedido, no una noticia sobre el hueco.
+
+    Consecuencias, las dos malas y opuestas:
+
+      * el tramo NUNCA se excluye, asi que se vuelve a pedir en cada sync para
+        recibir el mismo payload — el gasto de rate limit que ``_fusionar``
+        existia para evitar, por la puerta de al lado;
+      * ``_sacar_probados_vacios`` nunca puede bajar un ciclo a nota, asi que
+        la violacion I5 queda en rojo permanente aunque el dato de verdad no
+        exista del lado de HL. La cruz que no se puede cerrar, otra vez.
+
+    Y sobre todo: produccion mostro ``pruebas 14 (vacias 0) · filas traidas
+    564`` y yo lei eso como "la reparacion esta trayendo datos". No dice eso.
+    ``found`` cuenta lo que HL devolvio, no lo que aprendimos; 564 filas que ya
+    teniamos se imprimen igual que 564 filas nuevas. Un numero con formato de
+    hallazgo, en mi propio panel, una ronda despues de escribir el panel.
+
+    La medicion honesta es cuantas filas ENTRARON (``_store_funding`` ya la
+    devuelve y la estabamos tirando). Y es exacta para este uso: como la
+    ventana esta acotada por filas conocidas, toda fila nueva cae adentro del
+    silencio. ``nuevas=0`` significa "se volvio a pedir y no hay nada mas", que
+    es justo lo que ``found=0`` pretendia significar.
     """
     con = _conn()
     try:
@@ -854,9 +922,18 @@ def funding_gaps(wallet: str, limit: int = 200) -> list[tuple[int, int]]:
             # ciclo: pedir de mas es barato, pedir de menos deja el hueco.
             crudos.append((int(prev) if prev is not None else a,
                            int(post) if post is not None else b))
+        # R-FUNDING-NOVEDAD: el criterio es "no trajo NADA NUEVO", no "HL no
+        # contesto". Ver el bloque del docstring: found=0 es casi inalcanzable
+        # por construccion de la ventana, asi que filtrar por found dejaba el
+        # conjunto de exclusion vacio para siempre.
+        #
+        # nuevas = -1 significa NO MEDIDO (prueba anterior a este cambio) y NO
+        # excluye: se vuelve a pedir una vez y recien ahi se sabe. La unica
+        # excepcion es found=0, que sin medir ya prueba que no vino nada.
         ya = {(int(r["a"]), int(r["b"]))
               for r in con.execute(
-                  "SELECT a, b FROM ledger_funding_probe WHERE wallet=? AND found=0",
+                  "SELECT a, b FROM ledger_funding_probe "
+                  "WHERE wallet=? AND (nuevas=0 OR found=0)",
                   (wallet,))}
     finally:
         con.close()
@@ -883,40 +960,78 @@ def _fusionar(vs: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return [(a, b) for a, b in out]
 
 
-def _anotar_probe(wallet: str, a: int, b: int, found: int) -> None:
+def _anotar_probe(wallet: str, a: int, b: int, found: int, nuevas: int) -> None:
+    """Registra la prueba con las DOS cantidades, que no son la misma.
+
+    ``found`` es lo que HL devolvio y ``nuevas`` lo que entro a la base. La
+    diferencia entre ambas es la respuesta a "¿esto sirvio de algo?", y
+    guardar solo la primera es lo que hacia que el panel informara el eco de
+    HL como si fuera reparacion.
+    """
     con = _conn()
     try:
         con.execute(
-            "INSERT INTO ledger_funding_probe (wallet, a, b, probed_at, found) "
-            "VALUES (?,?,?,?,?) ON CONFLICT(wallet, a, b) DO UPDATE SET "
-            "probed_at=excluded.probed_at, found=excluded.found",
+            "INSERT INTO ledger_funding_probe "
+            "(wallet, a, b, probed_at, found, nuevas) "
+            "VALUES (?,?,?,?,?,?) ON CONFLICT(wallet, a, b) DO UPDATE SET "
+            "probed_at=excluded.probed_at, found=excluded.found, "
+            "nuevas=excluded.nuevas",
             (wallet, int(a), int(b),
-             datetime.now(timezone.utc).isoformat(), int(found)))
+             datetime.now(timezone.utc).isoformat(), int(found), int(nuevas)))
         con.commit()
     finally:
         con.close()
 
 
-async def backfill_funding_gaps(wallet: str, max_gaps: int = 3) -> dict[str, Any]:
+async def backfill_funding_gaps(wallet: str, max_gaps: int = GAP_MAX_POR_CORRIDA,
+                                page_budget: int = GAP_PAGES_POR_CORRIDA,
+                                ) -> dict[str, Any]:
     """Vuelve a pedirle a HL los tramos mudos y reconstruye.
 
-    Acotado a ``max_gaps`` por corrida a proposito: cada pagina pesa 20 contra
-    el presupuesto de 1200/min por IP, el mismo que ya tropezo antes. Los
-    tramos que sobran quedan para la proxima — un hueco viejo no se vuelve mas
-    urgente por esperar un sync mas, y una reparacion que dispara 429s se
-    convierte en el problema que venia a resolver.
+    R-FUNDING-NOVEDAD (2026-09-03) — POR QUE EL TOPE ERA 3 Y AHORA NO
+    ================================================================
+    El comentario anterior decia que los tramos que sobran "quedan para la
+    proxima" y que un hueco viejo no se vuelve mas urgente por esperar un sync
+    mas. Eso lo escribi suponiendo que los syncs son frecuentes. No lo son:
+    ``_ledger_sync_job`` corre una vez a los 2 minutos del arranque y despues
+    cada ``LEDGER_SYNC_HOURS`` (6 por defecto). Con 3 huecos por wallet por
+    corrida, 33 pendientes tardan medio dia largo en drenar — y mientras tanto
+    un numero de plata que YA sabemos reparar sigue mal en el reporte. "Un
+    sync mas" no era un rato: era seis horas.
+
+    El tope tambien estaba puesto sobre la variable equivocada. Lo que gasta
+    rate limit no es el hueco, es la PAGINA (peso 20 sobre 1200/min por IP
+    compartida). Un hueco de 24h entra en una pagina; contar huecos para
+    proteger un presupuesto de paginas es contar la cosa que no se paga. Ahora
+    el corte es por paginas efectivamente consumidas, que es el recurso real, y
+    ``max_gaps`` queda solo como tope de seguridad grueso.
+
+    Y se PAUSA entre huecos, no solo entre paginas de un mismo hueco. Antes,
+    N huecos de una pagina cada uno salian como N pedidos consecutivos sin
+    ninguna espera: el pausado por pagina no los tocaba porque cada ventana
+    empezaba en ``i=0``. Con tope 3 eso era una rafaga chica; subir el tope sin
+    esto convertiria la reparacion en el 429 que vino a evitar.
 
     Una falla de red NO se traga: ``_page`` levanta ``LedgerSyncError`` y esto
     la deja propagar, igual que el sync normal.
     """
     huecos = await asyncio.to_thread(funding_gaps, wallet)
-    res: dict[str, Any] = {"gaps": len(huecos), "probed": 0, "rows": 0}
+    res: dict[str, Any] = {"gaps": len(huecos), "probed": 0, "rows": 0,
+                           "pages": 0}
     if not huecos:
         return res
     for a, b in huecos[:max_gaps]:
-        filas = await _fetch_funding_window(wallet, a, b)
+        if res["pages"] >= page_budget:
+            log.info("LEDGER funding-gap %s: presupuesto de %d pagina(s) "
+                     "agotado con %d/%d tramo(s) — el resto va al proximo sync",
+                     wallet[:6], page_budget, res["probed"], len(huecos))
+            break
+        if res["probed"]:
+            await asyncio.sleep(PAGE_PAUSE_SEC)
+        filas, pags = await _fetch_funding_window(wallet, a, b)
+        res["pages"] += pags
         n = await asyncio.to_thread(_store_funding, wallet, filas)
-        await asyncio.to_thread(_anotar_probe, wallet, a, b, len(filas))
+        await asyncio.to_thread(_anotar_probe, wallet, a, b, len(filas), n)
         res["probed"] += 1
         res["rows"] += n
         log.info("LEDGER funding-gap %s [%d..%d]: HL devolvio %d fila(s), "
@@ -960,11 +1075,16 @@ def funding_repair_status() -> dict[str, Any]:
     try:
         f = con.execute(
             "SELECT COUNT(*) n, "
-            "       SUM(CASE WHEN found=0 THEN 1 ELSE 0 END) vac, "
-            "       COALESCE(SUM(found),0) filas "
+            "       SUM(CASE WHEN nuevas=0 OR found=0 THEN 1 ELSE 0 END) sinnov, "
+            "       SUM(CASE WHEN nuevas<0 AND found>0 THEN 1 ELSE 0 END) sinmed, "
+            "       COALESCE(SUM(found),0) eco, "
+            "       COALESCE(SUM(CASE WHEN nuevas>0 THEN nuevas ELSE 0 END),0) nue "
             "FROM ledger_funding_probe").fetchone()
-        pruebas, vacias = int(f["n"] or 0), int(f["vac"] or 0)
-        filas = int(f["filas"] or 0)
+        pruebas = int(f["n"] or 0)
+        sin_novedad = int(f["sinnov"] or 0)
+        sin_medir = int(f["sinmed"] or 0)
+        eco = int(f["eco"] or 0)
+        nuevas = int(f["nue"] or 0)
     finally:
         con.close()
     pend: dict[str, int] = {}
@@ -979,8 +1099,17 @@ def funding_repair_status() -> dict[str, Any]:
         "horas_desde_intento": _horas_desde_iso(_meta_get(META_ULTIMO_INTENTO)),
         "ultimo_error": _meta_get(META_ULTIMO_ERROR) or None,
         "pruebas": pruebas,
-        "vacias": vacias,
-        "filas_traidas": filas,
+        # R-FUNDING-NOVEDAD: las tres son distintas y por eso se publican las
+        # tres. "sin_novedad" son tramos probados irreparables; "sin_medir" son
+        # pruebas viejas de antes de que se contaran las filas nuevas, que NO
+        # cuentan como probadas; "filas_nuevas" es lo unico que mide reparacion.
+        "sin_novedad": sin_novedad,
+        "sin_medir": sin_medir,
+        "filas_nuevas": nuevas,
+        # Lo que HL devolvio, incluida la mayoria que ya teniamos. Se deja
+        # porque un eco de 0 con la ventana acotada por bordes conocidos
+        # significaria un problema de transporte, no un hueco irreparable.
+        "filas_eco": eco,
         "pendientes": pend,
         "pendientes_total": sum(pend.values()),
     }

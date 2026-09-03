@@ -316,7 +316,7 @@ def test_un_tramo_repedido_que_vuelve_vacio_baja_a_nota(tl, db, monkeypatch):
     vs, notas = li.check_con_notas()
     assert not any("I5" in v.invariant for v in vs), (
         f"ya se probo que el dato no existe: {[v.invariant for v in vs]}")
-    assert any("volvieron VACIOS" in n for n in notas), notas
+    assert any("ni una fila nueva" in n for n in notas), notas
 
 
 def test_un_tramo_ya_probado_vacio_no_se_vuelve_a_pedir(tl, db, monkeypatch):
@@ -379,27 +379,116 @@ def test_sin_tabla_de_pruebas_no_se_excusa_nada(tmp_path):
     assert quedan == entrada, "se comio el ciclo en vez de dejarlo en rojo"
 
 
+def test_una_tabla_de_pruebas_SIN_la_columna_nuevas_no_excusa_nada(tmp_path):
+    """UNITARIO por el mismo motivo que el de arriba, y con el mismo riesgo.
+
+    ``_conn()`` migra la tabla en cada conexion, asi que desde el llamador
+    vivo esta rama no se alcanza y un test de integracion pasaria por el lado
+    equivocado sin medir nada. La conexion entra por parametro, o sea que la
+    rama existe y tiene que decir lo correcto.
+
+    Y lo correcto es no excusar. Sin la columna no hay una sola medicion de
+    filas nuevas: leer esa ausencia como "ninguna prueba trajo nada" bajaria
+    los ciclos a nota por no tener el dato, que es la version mas directa de
+    decir verde por no haber mirado.
+    """
+    con = sqlite3.connect(str(tmp_path / "sin_columna.db"))
+    con.row_factory = sqlite3.Row
+    con.execute("CREATE TABLE ledger_funding_probe (wallet TEXT NOT NULL, "
+                "a INTEGER NOT NULL, b INTEGER NOT NULL, probed_at TEXT NOT "
+                "NULL, found INTEGER NOT NULL DEFAULT 0, "
+                "PRIMARY KEY (wallet, a, b))")
+    # Una prueba que ABARCA el ciclo y que con el criterio viejo (found=0) lo
+    # excusaria. Sin la columna no se puede saber si trajo algo, asi que no.
+    con.execute("INSERT INTO ledger_funding_probe VALUES (?,?,?,?,?)",
+                (W, T0 - 5 * H, T0 + 30 * H, "2026-09-02T00:00:00+00:00", 0))
+    con.commit()
+    assert "ledger_funding_probe" in li._tables(con)
+
+    entrada = [({"wallet": W, "open_ts": T0, "close_ts": T0 + 20 * H,
+                 "coin": "BTC"}, 24.0)]
+    quedan, probados = li._sacar_probados_vacios(con, entrada)
+    con.close()
+
+    assert probados == 0, "excuso un ciclo con una prueba que nunca se midio"
+    assert quedan == entrada, "se comio el ciclo en vez de dejarlo en rojo"
+
+
 def test_una_prueba_de_OTRA_wallet_no_excusa_a_esta(tl, db):
     con = db()
     _pos(con, wallet=W)
     _fund(con, T0 - 2 * H, wallet=W)
     _fund(con, T0 + 22 * H, wallet=W)
     con.close()
-    tl._anotar_probe(W2, T0 - 5 * H, T0 + 30 * H, 0)
+    tl._anotar_probe(W2, T0 - 5 * H, T0 + 30 * H, 0, 0)
 
     vs = li.check_invariants()
     assert any("tramo mudo" in v.invariant for v in vs), [v.invariant for v in vs]
 
 
-def test_una_prueba_que_SI_trajo_filas_no_excusa_nada(tl, db):
-    """found>0 significa que la reparacion funciono. Si el ciclo igual quedo
-    mudo es un problema distinto, y taparlo con la prueba lo esconderia."""
+def test_una_prueba_que_trajo_filas_NUEVAS_no_excusa_nada(tl, db):
+    """Si entraron filas, la reparacion hizo algo. Que el ciclo siga mudo es
+    un problema distinto, y taparlo con la prueba lo esconderia."""
     con = db()
     _pos(con, wallet=W)
     _fund(con, T0 - 2 * H, wallet=W)
     _fund(con, T0 + 22 * H, wallet=W)
     con.close()
-    tl._anotar_probe(W, T0 - 5 * H, T0 + 30 * H, 7)
+    tl._anotar_probe(W, T0 - 5 * H, T0 + 30 * H, 7, 3)
+
+    vs = li.check_invariants()
+    assert any("tramo mudo" in v.invariant for v in vs), [v.invariant for v in vs]
+
+
+def test_una_prueba_con_ECO_pero_sin_NOVEDAD_si_excusa(tl, db):
+    """R-FUNDING-NOVEDAD — ESTE ES EL CASO QUE PRODUCCION TENIA ROTO.
+
+    El test anterior decia "found>0 no excusa nada" y con eso alcanzaba,
+    porque yo suponia que found=0 era alcanzable. No lo es: la ventana se le
+    pide a HL acotada por acreditaciones que YA tenemos, asi que HL siempre
+    devuelve al menos esos bordes. ``found`` mide el eco del pedido, no el
+    resultado.
+
+    Consecuencia real, medida en produccion: ``pruebas 14 (vacias 0) · filas
+    traidas 564`` con la violacion intacta. Ninguna prueba podia bajar a nota
+    nunca, asi que la I5 quedaba en rojo permanente aunque el dato no exista
+    del lado de HL. La cruz que no se puede cerrar.
+
+    Lo que decide es ``nuevas``: se volvio a pedir y no entro NADA.
+    """
+    con = db()
+    _pos(con, wallet=W)
+    _fund(con, T0 - 2 * H, wallet=W)
+    _fund(con, T0 + 22 * H, wallet=W)
+    con.close()
+    tl._anotar_probe(W, T0 - 5 * H, T0 + 30 * H, 7, 0)
+
+    vs, notas = li.check_con_notas()
+    assert not any("tramo mudo" in v.invariant for v in vs), (
+        f"HL contesto y no trajo nada nuevo: no hay resync que lo arregle, "
+        f"dejarlo en rojo es una cruz que nadie puede cerrar — "
+        f"{[v.invariant for v in vs]}")
+    assert any("ni una fila nueva" in n for n in notas), notas
+
+
+def test_una_prueba_vieja_SIN_MEDIR_no_excusa_nada(tl, db):
+    """La migracion deja ``nuevas=-1`` en las pruebas anteriores al cambio.
+
+    -1 es NO MEDIDO y no es 0. Leerlo como 0 daria por probado irreparable un
+    tramo con una medicion que nunca se tomo, y encima lo haria de golpe sobre
+    las 14 pruebas que ya hay en la base de produccion: 27 ciclos pasando de
+    violacion a nota sin que nadie haya mirado nada. Se vuelven a probar.
+    """
+    con = db()
+    _pos(con, wallet=W)
+    _fund(con, T0 - 2 * H, wallet=W)
+    _fund(con, T0 + 22 * H, wallet=W)
+    con.execute(
+        "INSERT INTO ledger_funding_probe (wallet, a, b, probed_at, found, "
+        "nuevas) VALUES (?,?,?,?,?,?)",
+        (W, T0 - 5 * H, T0 + 30 * H, "2026-09-03T00:00:00+00:00", 7, -1))
+    con.commit()
+    con.close()
 
     vs = li.check_invariants()
     assert any("tramo mudo" in v.invariant for v in vs), [v.invariant for v in vs]
@@ -465,3 +554,173 @@ def test_sin_huecos_no_se_le_pide_nada_a_HL(tl, db, monkeypatch):
 
     assert asyncio.run(tl.backfill_funding_gaps(W))["gaps"] == 0
     assert vistos == [], "se gasto una llamada sin nada que reparar"
+
+
+# ─── 5. el tope de la corrida ───────────────────────────────────────────────
+#
+# R-FUNDING-NOVEDAD: el tope era 3 huecos por wallet por corrida, y el
+# comentario que lo justificaba decia que lo que sobra "queda para la proxima".
+# Lo escribi suponiendo syncs frecuentes. _ledger_sync_job corre a los 2
+# minutos del arranque y despues cada LEDGER_SYNC_HOURS (6): "la proxima" son
+# seis horas, y 33 huecos a 3 por corrida son medio dia con un numero de plata
+# mal en el reporte. Ademas el tope contaba la variable que no se paga: el
+# rate limit lo gasta la PAGINA, no el hueco.
+
+def _n_huecos(con, n):
+    """``n`` silencios separados, de una pagina cada uno."""
+    for i in range(n):
+        _pos(con, coin=f"C{i}", open_ts=T0 + i * 100 * H,
+             close_ts=T0 + i * 100 * H + 20 * H)
+        _fund(con, T0 + i * 100 * H - 2 * H)
+        _fund(con, T0 + i * 100 * H + 22 * H)
+
+
+def test_el_corte_de_la_corrida_lo_manda_el_presupuesto_de_PAGINAS(tl, db,
+                                                                   monkeypatch):
+    """Lo que se paga es la pagina, no el hueco.
+
+    Con el tope puesto en huecos, un hueco de una pagina y uno de doce contaban
+    igual — o sea que el numero que protegia el presupuesto no tenia relacion
+    con el presupuesto. Aca se piden 10 huecos con un techo de 4 paginas: se
+    tienen que probar 4 y parar, no 10.
+    """
+    con = db()
+    _n_huecos(con, 10)
+    con.close()
+
+    vistos: list[dict] = []
+    import modules.portfolio as pf
+    monkeypatch.setattr(pf, "_info", _hl([[]] * 30, vistos))
+
+    r = asyncio.run(tl.backfill_funding_gaps(W, page_budget=4))
+    assert r["probed"] == 4, r
+    assert r["pages"] == 4, r
+    assert len(vistos) == 4, vistos
+
+
+def test_el_tope_por_defecto_ya_no_deja_33_huecos_para_medio_dia(tl, db,
+                                                                 monkeypatch):
+    """El caso de produccion: 33 pendientes tienen que drenar en UNA corrida.
+
+    Con el tope viejo de 3 por wallet y un sync cada 6h eran ~13 horas. El
+    default nuevo esta dimensionado contra esa cadencia, no contra la
+    frecuencia que yo suponia cuando escribi el 3.
+    """
+    con = db()
+    _n_huecos(con, 12)
+    con.close()
+
+    vistos: list[dict] = []
+    import modules.portfolio as pf
+    monkeypatch.setattr(pf, "_info", _hl([[]] * 40, vistos))
+
+    r = asyncio.run(tl.backfill_funding_gaps(W))
+    assert r["probed"] == 12, (
+        f"con el default nuevo los 12 tramos entran en una corrida: {r}")
+
+
+def test_entre_huecos_tambien_se_PAUSA(tl, db, monkeypatch):
+    """El pausado por pagina no alcanzaba y subir el tope lo volvia grave.
+
+    ``_fetch_funding_window`` duerme entre paginas de UNA ventana, pero cada
+    ventana arranca en ``i=0``, asi que N huecos de una pagina salian como N
+    pedidos consecutivos sin ninguna espera. Con tope 3 era una rafaga chica;
+    con el tope nuevo seria la reparacion disparando el 429 que vino a evitar.
+    """
+    con = db()
+    _n_huecos(con, 5)
+    con.close()
+
+    monkeypatch.setattr(tl, "PAGE_PAUSE_SEC", 0.01)
+    esperas: list[float] = []
+    real = asyncio.sleep
+
+    async def _spy(s, *a, **k):
+        esperas.append(s)
+        return await real(0)
+
+    monkeypatch.setattr(tl.asyncio, "sleep", _spy)
+    import modules.portfolio as pf
+    monkeypatch.setattr(pf, "_info", _hl([[]] * 20, [])) 
+
+    r = asyncio.run(tl.backfill_funding_gaps(W))
+    assert r["probed"] == 5, r
+    assert len(esperas) == 4, (
+        f"5 tramos de una pagina = 4 pausas entre medio; hubo {esperas}")
+    assert all(s > 0 for s in esperas), esperas
+
+
+# ─── 6. el eco no es novedad ────────────────────────────────────────────────
+
+def test_HL_que_devuelve_SOLO_lo_que_ya_teniamos_cuenta_como_sin_novedad(
+        tl, db, monkeypatch):
+    """EL CASO DE PRODUCCION, de punta a punta.
+
+    La ventana se pide acotada por los bordes, o sea por acreditaciones que ya
+    estan guardadas. HL las devuelve —tiene que devolverlas, estan adentro del
+    rango— y ``found`` sube. Pero no entro nada: el silencio del medio sigue
+    igual de mudo. Eso es "ya se pidio y no hay nada mas", no "la reparacion
+    esta trayendo datos".
+
+    Produccion lo mostro como ``pruebas 14 (vacias 0) · filas traidas 564`` y
+    yo lo lei como avance. Este test fija la lectura correcta en los dos
+    lugares donde importa: el tramo deja de repedirse y el ciclo baja a nota.
+    """
+    con = db()
+    _pos(con)
+    _fund(con, T0 - 2 * H)
+    _fund(con, T0 + 22 * H)
+    con.close()
+
+    eco = [_entrada(T0 - 2 * H, -1.5), _entrada(T0 + 22 * H, -1.5)]
+    import modules.portfolio as pf
+    monkeypatch.setattr(pf, "_info", _hl([eco], []))
+
+    r = asyncio.run(tl.backfill_funding_gaps(W))
+    assert r["probed"] == 1 and r["rows"] == 0, (
+        f"HL devolvio 2 filas y las 2 ya estaban: no entro ninguna — {r}")
+
+    con = db()
+    p = con.execute("SELECT found, nuevas FROM ledger_funding_probe").fetchone()
+    con.close()
+    assert (p["found"], p["nuevas"]) == (2, 0), (
+        f"found es el eco del pedido, nuevas es el resultado: {tuple(p)}")
+
+    assert tl.funding_gaps(W) == [], "se volveria a pedir lo mismo cada sync"
+    vs, notas = li.check_con_notas()
+    assert not any("tramo mudo" in v.invariant for v in vs), [v.invariant for v in vs]
+    assert any("ni una fila nueva" in n for n in notas), notas
+
+
+def test_la_migracion_deja_las_pruebas_viejas_en_NO_MEDIDO(tmp_path,
+                                                           monkeypatch):
+    """Una prueba de antes del cambio no puede nacer diciendo "sin novedad".
+
+    En la base de produccion hay 14 pruebas con found>0 y sin medicion de
+    filas nuevas. Si la migracion las pusiera en 0, los 27 ciclos pasarian de
+    violacion a nota de golpe, sin que nadie haya medido nada: el panel se
+    pondria verde por una columna con default mal elegido. -1 es NO MEDIDO y
+    se vuelve a probar.
+    """
+    ruta = tmp_path / "vieja.db"
+    con = sqlite3.connect(str(ruta))
+    con.execute("CREATE TABLE ledger_funding_probe (wallet TEXT NOT NULL, "
+                "a INTEGER NOT NULL, b INTEGER NOT NULL, probed_at TEXT NOT "
+                "NULL, found INTEGER NOT NULL DEFAULT 0, "
+                "PRIMARY KEY (wallet, a, b))")
+    con.execute("INSERT INTO ledger_funding_probe VALUES (?,?,?,?,?)",
+                (W, T0, T0 + H, "2026-09-02T00:00:00+00:00", 564))
+    con.commit()
+    con.close()
+
+    import modules.trade_ledger as _tl
+    monkeypatch.setattr(_tl, "DB_PATH", str(ruta))
+    c = _tl._conn()
+    try:
+        fila = c.execute("SELECT found, nuevas FROM ledger_funding_probe"
+                         ).fetchone()
+    finally:
+        c.close()
+    assert fila["found"] == 564, "la migracion no puede perder lo que ya habia"
+    assert fila["nuevas"] == -1, (
+        f"NO MEDIDO, no cero: {fila['nuevas']} excusaria 27 ciclos sin prueba")

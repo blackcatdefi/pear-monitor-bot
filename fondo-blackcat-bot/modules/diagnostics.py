@@ -623,6 +623,26 @@ def _tick(v: Any) -> str:
     return "\u2754"          # None = sin datos, que NO es lo mismo que sano
 
 
+def _hace(horas: Any) -> str:
+    """Cuanto paso, con grano fino abajo de la hora.
+
+    R-FUNDING-NOVEDAD: el panel decia "hace 0h" y eso tapaba la diferencia
+    entre "corrio recien" y "corrio hace 50 minutos y no volvio a correr". Con
+    un sync que arranca a los 2 minutos del deploy y despues cada 6 horas, esa
+    diferencia es justo la que decide si dos lecturas seguidas son la misma
+    corrida o dos distintas — o sea si comparar sus numeros significa algo.
+    Redondear a la unidad mas grande que existe es la misma ceguera de
+    observacion, un grano mas fino.
+    """
+    if not isinstance(horas, (int, float)):
+        return "?"
+    if horas < 0:
+        return "?"                      # reloj corrido: decir "?" no inventa
+    if horas < 1:
+        return f"hace {horas * 60:.0f}min"
+    return f"hace {horas:.0f}h"
+
+
 def _corte(texto: Any, limite: int = 260) -> str:
     """Recorta SIN partir una palabra, y avisa que recorto.
 
@@ -723,13 +743,20 @@ def format_diagnosis(d: dict[str, Any]) -> str:
             L.append("  \u274c NUNCA se ejecuto — la reparacion no esta "
                      "enganchada al sync")
         else:
-            hh = rep.get("horas_desde_intento")
-            cuando = f"hace {hh:.0f}h" if isinstance(hh, (int, float)) else "?"
-            L.append(f"  \u2705 ultimo intento {cuando} · "
-                     f"{rep.get('pendientes_total', 0)} hueco(s) pendiente(s)")
+            L.append(f"  \u2705 ultimo intento {_hace(rep.get('horas_desde_intento'))}"
+                     f" · {rep.get('pendientes_total', 0)} hueco(s) pendiente(s)")
+            # R-FUNDING-NOVEDAD: "filas traidas 564" era el ECO de HL —
+            # mayormente filas que YA teniamos, porque la ventana se pide
+            # acotada por acreditaciones conocidas. Leido como reparacion decia
+            # que algo estaba pasando cuando no pasaba nada. Lo que se imprime
+            # ahora es lo que ENTRO a la base; el eco queda aparte y solo para
+            # poder ver un cero, que ahi si seria transporte roto.
             L.append(f"  pruebas {rep.get('pruebas', 0)} "
-                     f"(vacias {rep.get('vacias', 0)}) · "
-                     f"filas traidas {rep.get('filas_traidas', 0)}")
+                     f"(sin novedad {rep.get('sin_novedad', 0)}"
+                     + (f" · sin medir {rep['sin_medir']}"
+                        if rep.get("sin_medir") else "")
+                     + f") · filas NUEVAS {rep.get('filas_nuevas', 0)} "
+                     f"(eco HL {rep.get('filas_eco', 0)})")
         if rep.get("ultimo_error"):
             L.append(f"  \u26a0\ufe0f ultimo error: {_corte(rep['ultimo_error'])}")
 
