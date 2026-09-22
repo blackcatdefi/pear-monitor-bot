@@ -112,6 +112,62 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 
+# ─── generic durable state (x_fetch_state kv) ───────────────────────────────
+# R-X-FLIP (2026-09-22): the backend selector needs a fact that OUTLIVES the
+# process — "the official Console answered 402" must still be true after a
+# Railway redeploy, otherwise every deploy resurrects the dead backend and the
+# feed goes blind again. x_fetch_state already lives on the Railway volume next
+# to since_id, so the latch rides the same durability guarantees.
+
+def get_state(key: str) -> str | None:
+    """Read a durable kv value (None when absent). NEVER raises."""
+    if not key:
+        return None
+    try:
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT value FROM x_fetch_state WHERE key=?", (str(key),),
+        ).fetchone()
+        conn.close()
+        return row["value"] if row and row["value"] else None
+    except Exception:
+        health_registry.swallowed("x_api", "get_state")
+        log.exception("x_store.get_state(%s) failed", key)
+        return None
+
+
+def set_state(key: str, value: str) -> None:
+    """Write a durable kv value. NEVER raises."""
+    if not key:
+        return
+    try:
+        conn = _get_conn()
+        conn.execute(
+            "INSERT OR REPLACE INTO x_fetch_state (key, value, updated_at) "
+            "VALUES (?, ?, ?)",
+            (str(key), str(value), datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        health_registry.swallowed("x_api", "set_state")
+        log.exception("x_store.set_state(%s) failed", key)
+
+
+def clear_state(key: str) -> None:
+    """Delete a durable kv value. NEVER raises."""
+    if not key:
+        return
+    try:
+        conn = _get_conn()
+        conn.execute("DELETE FROM x_fetch_state WHERE key=?", (str(key),))
+        conn.commit()
+        conn.close()
+    except Exception:
+        health_registry.swallowed("x_api", "clear_state")
+        log.exception("x_store.clear_state(%s) failed", key)
+
+
 # ─── since_id state ─────────────────────────────────────────────────────────
 
 def get_since_id() -> str | None:

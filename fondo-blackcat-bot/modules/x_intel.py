@@ -37,6 +37,19 @@ from typing import Any
 
 import httpx
 
+# R-X-FLIP (2026-09-22): `x_store` was only ever imported INSIDE a handful of
+# functions, yet eight more read it as if it were a module-level name. Every
+# one of those raised NameError. Three surfaced as a dead command
+# (/x_status, /costos_x, /intel_sources); the other two were swallowed by a
+# bare `except` and silently degraded:
+#   * get_cached_timeline()      → fell back to the legacy mirror, which is
+#                                  what served the 27-day-old tweets;
+#   * cache_banner_for_report()  → the /reporte banner lost the real cache age,
+#                                  so a stale corpse printed as if it were live.
+# One module-level import kills all eight. The local imports below are left in
+# place (harmless, and they keep each function readable on its own).
+from modules import x_store
+
 from modules.intel_memory import (
     count_x_calls_since,
     count_x_calls_today_calendar,
@@ -363,20 +376,23 @@ _DIAG_401 = (
     "HTTP 401 — Bearer token invalid or revoked. "
     "Regenerate at developer.x.com and update X_API_BEARER_TOKEN in Railway."
 )
+# R-X-FLIP (2026-09-22): the fund LEFT the official X API. Depletion is not a
+# problem to be solved with money any more — it is the signal to switch
+# transports. These diagnostics state the fact and the action taken; they must
+# NEVER advise recharging the official Console or raising the spend cap (pinned by
+# tests/test_x_flip.py::test_no_official_topup_advice_anywhere).
 _DIAG_402 = (
-    "HTTP 402 — X API credits depleted. "
-    "Top-up at console.x.com and set auto-recharge to VISA 4463."
+    "HTTP 402 — official X API credits depleted. The fund left the official "
+    "API: switching the timeline to twitterapi.io. Refunding it is not wanted."
 )
 _DIAG_403 = (
     "HTTP 403 — Bearer lacks permissions for the list. "
     "Verify that the app belongs to @BlackCatDeFi and that the list is accessible."
 )
 _DIAG_403_SPEND_CAP = (
-    "HTTP 403 SpendCapReached — your account has credits ($4.51 visible) "
-    "BUT hit the SPEND CAP for the billing cycle. "
-    "Fix: developer.x.com → Products → Usage → INCREASE Spend Cap "
-    "(NOT a top-up, NOT a payment method — it's a separate cap). "
-    "Auto-reset: check 'reset_date' in response."
+    "HTTP 403 SpendCapReached — the official account hit its billing-cycle "
+    "spend cap and will not serve posts. The fund left the official API: "
+    "switching the timeline to twitterapi.io. The cap is NOT to be raised."
 )
 _DIAG_404 = (
     "HTTP 404 — List ID not found. "
@@ -557,6 +573,23 @@ async def fetch_timeline_via_list(
                 title = (body_json.get("title") or "").lower()
                 err_type = (body_json.get("type") or "").lower()
                 reset_date = body_json.get("reset_date") or ""
+
+                # R-X-FLIP: the wire is the ground truth. A depletion response
+                # latches the official backend as dead BEFORE we return, so the
+                # very next selector read — including the retry inside this same
+                # /reporte — routes to twitterapi.io. Latching here (rather than
+                # in the caller) means EVERY caller of the official client is
+                # covered, present and future.
+                try:
+                    from modules import x_provider as _xp
+                    if _xp.is_depletion_response(resp.status_code, body_json):
+                        _xp.mark_official_depleted(
+                            resp.status_code,
+                            f"{title or err_type or 'credits depleted'} "
+                            f"{body_snip[:80]}".strip(),
+                        )
+                except Exception:  # noqa: BLE001
+                    log.exception("depletion latch failed (non-fatal)")
 
                 if resp.status_code == 403 and ("spendcap" in title or "credits" in err_type):
                     diag = _DIAG_403_SPEND_CAP
@@ -1060,18 +1093,37 @@ async def fetch_x_intel(
     # api.x.com calls happen while the provider is active (pinned by test).
     since_id = x_store.get_since_id()
     from modules import x_provider
-    if x_provider.provider_active():
-        tweets, diag = await x_provider.fetch_timeline(
+
+    async def _via_provider() -> tuple[list[dict] | None, str | None]:
+        tw, dg = await x_provider.fetch_timeline(
             hours=hours, caller=caller, since_id=since_id,
         )
         _last_fetch_meta.update(x_provider.last_fetch_meta())
         fb = x_provider.pop_fallback_event()
         if fb:
             await _notify_provider_fallback(app, fb)
+        return tw, dg
+
+    backend_switched = False
+    if x_provider.provider_active():
+        tweets, diag = await _via_provider()
     else:
         tweets, diag = await fetch_timeline_via_list(
             hours=hours, caller=caller, since_id=since_id,
         )
+        # R-X-FLIP: the official client latches depletion on the wire (402 /
+        # spend cap). Re-read the selector RIGHT HERE: if it just flipped, the
+        # provider serves inside THIS SAME run. Without this the flip would
+        # only take effect on the next /reporte, and the run that discovered
+        # the depletion would still hand BCD a stale cache — which is the
+        # 27-day blackout in miniature.
+        if tweets is None and x_provider.provider_active():
+            log.warning(
+                "[X_FLIP] official fetch failed (%s) and the backend flipped "
+                "to twitterapi.io — retrying live in the same run", diag,
+            )
+            tweets, diag = await _via_provider()
+            backend_switched = tweets is not None
 
     if tweets is None:
         # Live failed → degrade to store window when it has data.
@@ -1156,6 +1208,11 @@ async def fetch_x_intel(
     payload["posts_paid"] = _last_fetch_meta.get("returned", fetched_new)
     payload["from_store"] = True
     payload["usage"] = x_store.usage_state()
+    payload["backend"] = x_provider.backend_name()
+    if backend_switched:
+        # Surfaced by /xrefresh and /reporte so the switch is visible the run
+        # it happens, not archaeology in the Railway logs a month later.
+        payload["backend_switched"] = True
 
     if CANONICAL_HANDLES:
         log.info(
@@ -1209,8 +1266,16 @@ def render_xrefresh_result(payload: dict[str, Any] | None) -> str:
     fetched = int(payload.get("fetched_new") or 0)
     paid = int(payload.get("posts_paid") or fetched)
     total = payload.get("total", 0)
+    # R-X-FLIP: when the official API reported depletion and the provider took
+    # over inside this same run, say so on the first line.
+    switch_note = ""
+    if payload.get("backend_switched"):
+        switch_note = (
+            "🔀 Backend cambiado: la API oficial reporto creditos agotados; "
+            "el timeline pasa a twitterapi.io de forma permanente.\n"
+        )
     if fetched == 0:
-        return (
+        return switch_note + (
             f"\u2705 X fetch OK \u2014 0 posts nuevos desde el último fetch "
             f"(estado normal si el fetch anterior fue reciente). "
             f"{total} tweets en ventana 48h.\n"
@@ -1230,7 +1295,7 @@ def render_xrefresh_result(payload: dict[str, Any] | None) -> str:
     except Exception:  # noqa: BLE001
         log.warning("provider cost lookup failed; using official rate", exc_info=True)
     cost = paid * rate + call_cost
-    return (
+    return switch_note + (
         f"\u2705 X store refreshed: +{fetched} new posts fetched "
         f"({paid} posts pagados \u2248 ${cost:.3f} via {src}) \u2014 "
         f"{total} tweets in 48h window.\n"
@@ -1415,24 +1480,66 @@ def cache_age_text() -> str:
         return "—"
 
 
+def timeline_staleness(payload: dict[str, Any] | None = None,
+                       hours: int = 48) -> dict[str, Any]:
+    """Age verdict for the timeline BCD is about to read.
+
+    R-X-FLIP: ``last fetch`` was never the honest number — a fetch that
+    returns nothing still updates the fetch clock while the newest POST stays
+    27 days old. The age that matters is the age of the data, so this is
+    computed from the store window, not from the fetch timestamp.
+    """
+    from modules import x_staleness
+    if payload is None:
+        try:
+            payload = get_store_timeline_payload(hours)
+        except Exception:  # noqa: BLE001
+            log.exception("timeline_staleness: store read failed")
+            payload = {}
+    return x_staleness.staleness(payload, window_hours=hours)
+
+
 def cache_banner_for_report() -> str:
     """Return the one-liner banner shown at the top of /reporte's timeline
     section telling BCD whether the X timeline is live or cached.
+
+    R-X-FLIP: the banner ALWAYS carries the real age of the newest post and
+    the active backend. A stale feed announces itself in the first line the
+    reader sees — it cannot hide behind a recent "last fetch" timestamp.
     """
     try:
+        from modules import x_provider
+        backend = x_provider.backend_name()
+    except Exception:  # noqa: BLE001
+        backend = "n/d"
+    try:
+        st = timeline_staleness()
+    except Exception:  # noqa: BLE001
+        log.exception("cache_banner_for_report: staleness failed")
+        st = {"degraded": True, "age_text": "n/d", "empty": True}
+
+    try:
         last = x_store.last_fetch_ts()
-        if last:
-            return f"📡 X Timeline: local store — last fetch {last}"
+        last_txt = last.isoformat() if last else "—"
     except Exception:
         log.exception("cache_banner_for_report: store read failed")
-    cs = get_cache_state()
-    iso = cs.get("last_success_at")
-    age = cache_age_text()
-    if not iso:
-        return "📡 X Timeline: no cache yet — first fetch in this /reporte"
+        last_txt = "—"
+
+    if st.get("empty"):
+        return (
+            f"⚠️ X Timeline: SIN POSTS en la ventana — backend {backend} "
+            f"— last fetch {last_txt}"
+        )
+    if st.get("degraded"):
+        return (
+            f"⚠️ X Timeline DEGRADADO: el post mas nuevo tiene "
+            f"{st.get('age_text')} de antiguedad (ventana "
+            f"{st.get('window_hours', 48)}h) — backend {backend} "
+            f"— last fetch {last_txt}"
+        )
     return (
-        f"📡 X Timeline: cached {age} ago "
-        f"— last updated: {iso}"
+        f"📡 X Timeline: post mas nuevo hace {st.get('age_text')} "
+        f"— backend {backend} — last fetch {last_txt}"
     )
 
 

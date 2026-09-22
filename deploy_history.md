@@ -2,6 +2,51 @@
 
 Append-only log per Cowork constitución §6 paso 8.
 
+
+## 2026-09-22 — R-X-FLIP: el 402 ahora flipea el backend, y el render deja de mentir
+
+27 dias de feed ciego. El cache del 26-ago se renderizaba bajo "X Timeline
+(last 48h)" mientras la llamada viva devolvia HTTP 402. El modo burn
+(R-BURN-CREDITS) decidia el backend desde un saldo **modelado**; nadie leia
+nunca el 402 del cable.
+
+**Cuatro defectos:**
+
+1. La senal real de agotamiento no se leia — el 402 era solo un string de
+   diagnostico, jamas volvia al selector.
+2. **El estimador falla abierto, y ESTE es el que dejo el backend pegado en
+   `official`.** `official_x_cost_since()` devuelve 0.0 ante cualquier
+   excepcion, una llamada fallida registra `tweets_returned=0` (o sea: un 402
+   cuesta $0), y el gasto previo a `X_OFFICIAL_CREDITS_SINCE` es invisible por
+   diseno. Todo modo de error empuja el saldo **hacia arriba**; nunca toco el
+   piso de $0.50.
+3. El render **afirmaba** "last 48h" en vez de computarlo del post mas nuevo.
+4. **`x_store` sin bindear a nivel modulo en `modules/x_intel.py`.** Importado
+   solo adentro de 4 funciones, leido como global por 8. `/x_status`,
+   `/costos_x` e `/intel_sources` morian con `name 'x_store' is not defined`
+   —la unica superficie que habria mostrado el estado del subsistema X estaba
+   rota ella misma— y en `get_cached_timeline()` / `cache_banner_for_report()`
+   el NameError lo tragaba un `except` pelado: caida silenciosa al espejo
+   legacy. **Eso es lo que sirvio los tweets del 26-ago bajo un header de 48h.**
+
+**Correccion del registro:** la version anterior de esta entrada culpaba a un
+`X_FETCH_BACKEND=official` explicito. Railway confirma que **la variable no
+existia**. Era el defecto 2.
+
+Fix: latch durable de agotamiento en `x_fetch_state`, marcado desde adentro
+del cliente oficial, con precedencia por encima del env var y del estimado.
+El provider sirve en la MISMA corrida que descubre el agotamiento. El titulo
+de la seccion y el header de `/timeline` se computan de la edad real del post
+mas nuevo: fuera de ventana => DEGRADADO con la antiguedad exacta. Un unico
+`from modules import x_store` a nivel modulo mata los 8 call sites.
+
+Verificacion: `tests/test_x_flip.py` 31/31, `scripts/mutation_check_x_flip.py`
+11/11 mutaciones muertas, suite completa 1563/1563 verde.
+
+Produccion: `X_FETCH_BACKEND=twitterapi_io` creado en el servicio
+`pear-monitor-bot` (162→163 vars). `X_PROVIDER_API_KEY` y `X_LIST_ID` ya
+estaban cargados — nada inventado.
+
 ## 2026-09-03 03:06 UTC — CERRADO: el funding no existe del lado de HL
 
 El /diagnostico sobre `9d38bd7` cerro el caso que venia abierto seis rondas.
