@@ -87,6 +87,7 @@ from modules.x_intel import (
     get_cached_timeline,
     get_store_timeline_payload,
     render_xrefresh_result,
+    timeline_staleness,
 )
 from modules.cryexc_intel import (
     fetch_cryexc,
@@ -347,6 +348,24 @@ async def cmd_hf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(block, reply_markup=MAIN_KEYBOARD)
 
 
+def x_section_title(x_intel: dict | None, hours: int = 48) -> str:
+    """R-X-FLIP: the /reporte X section title is COMPUTED, never asserted.
+
+    The 27-day blackout was readable on screen the whole time — it just said
+    "48H" over posts from 26-aug. A window is a promise the data has to keep:
+    when the newest post falls outside it, the title says DEGRADADO and prints
+    the REAL age. Pinned by tests/test_x_flip.py.
+    """
+    st = timeline_staleness(x_intel, hours=hours)
+    if not st.get("degraded"):
+        return f"\U0001f4e1 X TIMELINE \u2014 {hours}H"
+    age = "sin posts" if st.get("empty") else st.get("age_text")
+    return (
+        f"\u26a0\ufe0f X TIMELINE \u2014 DEGRADADO "
+        f"(dato de hace {age}, NO son {hours}h)"
+    )
+
+
 @authorized
 @with_error_logging
 @throttle(min_interval_s=60, key_prefix="cmd_reporte")
@@ -445,14 +464,15 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         timeline_text = format_timeline(x_intel, top_n=40)
         # R-COST-V2-FIX: no budget banner — fetch is never gated by consumption.
         banner = cache_banner_for_report()
+        title = x_section_title(x_intel, hours=48)
         header = (
-            "\U0001f4e1 X TIMELINE \u2014 48H\n"
+            title + "\n"
             + ("\u2500" * 30) + "\n"
             + banner + "\n\n"
         )
         if x_intel_fallback_note:
             header = (
-                "\U0001f4e1 X TIMELINE \u2014 48H (cache fallback)\n"
+                title + " (cache fallback)\n"
                 + ("\u2500" * 30) + "\n"
                 + banner + "\n"
                 + x_intel_fallback_note + "\n"

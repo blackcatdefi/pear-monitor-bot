@@ -6,6 +6,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from modules import x_staleness
+
 
 def _short(txt: str, n: int = 220) -> str:
     t = (txt or "").replace("\n", " ").strip()
@@ -41,10 +43,12 @@ def format_timeline(x_intel: dict[str, Any] | None, top_n: int = 40) -> str:
             "",
             f"Diagnostic: {err}",
             "",
+            # R-X-FLIP: the fund left the official X API. Never advise a
+            # top-up or a spend-cap raise — the transport is twitterapi.io.
             "Quick checks:",
-            "  1. console.x.com → X API balance > $0 (auto-recharge VISA 4463)",
-            "  2. developer.x.com → valid Bearer token (X_API_BEARER_TOKEN)",
-            "  3. Railway vars → X_LIST_ID = 2046698139873378486",
+            "  1. Railway vars → X_PROVIDER_API_KEY loaded (twitterapi.io)",
+            "  2. Railway vars → X_LIST_ID = 2046698139873378486",
+            "  3. /diagnostico → backend must read twitterapi_io",
             "  4. /debug_x for live test",
         ]
         return "\n".join(lines_err)
@@ -60,8 +64,10 @@ def format_timeline(x_intel: dict[str, Any] | None, top_n: int = 40) -> str:
             flat.append((uname, t))
     flat.sort(key=lambda p: _engagement(p[1].get("metrics") or {}), reverse=True)
 
+    # R-X-FLIP: the header is COMPUTED from the newest post, never asserted.
+    # A 27-day-old corpse can no longer print "(last 48h)".
     header = (
-        f"🐦 X Timeline (last 48h) — {now}\n"
+        f"{x_staleness.header_line(x_intel, now)}\n"
         f"Active accounts: {scanned} | Tweets: {total} | "
         f"Showing top {min(top_n, len(flat))} by engagement\n"
         "─────────────────────────────"

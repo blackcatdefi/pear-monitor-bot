@@ -120,8 +120,13 @@ def _b_invariantes() -> dict[str, Any]:
 def _b_x() -> dict[str, Any]:
     out: dict[str, Any] = {}
     try:
-        from modules.x_provider import backend_name
-        out["backend"] = backend_name()
+        from modules.x_provider import backend_status
+        # R-X-FLIP: the panel publishes the FULL selector state — what it
+        # chose, what is actually serving, whether the official API is latched
+        # as depleted, and which service key is missing if any. "backend:
+        # official" on its own was true for 27 days while the feed was dead.
+        out.update(backend_status())
+        out["backend"] = out.get("effective")
     except Exception as exc:  # noqa: BLE001
         out["backend"] = f"(no disponible: {type(exc).__name__})"
     try:
@@ -134,6 +139,15 @@ def _b_x() -> dict[str, Any]:
         out["horas_desde_exito"] = _hours_since_iso(cs.get("last_success_at"))
     except Exception as exc:  # noqa: BLE001
         out["_error_stats"] = f"{type(exc).__name__}: {exc}"[:160]
+    # The age of the DATA, not of the last fetch attempt — the number that
+    # would have exposed the 27-day blackout on day one.
+    try:
+        from modules.x_intel import timeline_staleness
+        _st = timeline_staleness()
+        out["antiguedad_post_mas_nuevo"] = _st.get("age_text")
+        out["timeline_degradado"] = bool(_st.get("degraded"))
+    except Exception as exc:  # noqa: BLE001
+        out["_error_staleness"] = f"{type(exc).__name__}: {exc}"[:160]
     try:
         from modules.x_costs import credits_remaining
         out["creditos_restantes"] = credits_remaining()

@@ -99,11 +99,127 @@ def list_id() -> str:
 
 _CREDITS_FLOOR_USD = float(os.getenv("X_OFFICIAL_CREDITS_FLOOR", "0.50"))
 
+# ─── R-X-FLIP: observed depletion latch ──────────────────────────────────────
+# WHY (2026-09-22, after 27 days of a blind X feed):
+#   R-BURN-CREDITS decided "is the official Console out of money?" from a
+#   MODELLED balance (X_OFFICIAL_CREDITS_USD − recorded spend). That model can
+#   only ever be an estimate, and every one of its failure modes biases the
+#   answer toward "there is still money left":
+#     · official_x_cost_since() returns 0.0 on ANY exception,
+#     · failed calls record tweets_returned=0, so a 402 costs $0 in the model,
+#     · spend predating X_OFFICIAL_CREDITS_SINCE is invisible by design.
+#   Meanwhile the Console reports depletion EXACTLY, on the wire, as HTTP 402 —
+#   and nothing read it. The estimate said "$19 left" while the real balance
+#   was zero, so the selector kept choosing a backend that could not answer,
+#   and /reporte served a 27-day-old cache under a "last 48h" header.
+# THE RULE NOW: observed depletion beats every estimate AND every env var.
+#   One 402 latches the official backend as dead, durably, and the provider
+#   serves from that instant on. The latch is scoped to the funding epoch
+#   (X_OFFICIAL_CREDITS_SINCE): re-funding the Console = move the epoch
+#   forward, and the latch clears itself. It is never cleared by a redeploy.
+OFFICIAL_DEPLETED_KEY = "official_depleted"
+
+# HTTP statuses that mean "the official Console will not serve posts until
+# somebody pays". 402 is the canonical one; 403 only qualifies when the body
+# identifies a spend cap / credits problem (a plain 403 is a permissions bug,
+# a different failure with a different fix, and must NOT latch).
+DEPLETION_STATUSES = (402,)
+
+
+def is_depletion_response(status: int, body: Any = None) -> bool:
+    """True when this response means the official API is out of credit.
+
+    ``body`` is the parsed JSON dict when available; a 403 latches only if it
+    carries SpendCapReached / credits semantics.
+    """
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return False
+    if code in DEPLETION_STATUSES:
+        return True
+    if code == 403 and isinstance(body, dict):
+        blob = " ".join(
+            str(body.get(k) or "") for k in ("title", "type", "detail", "reason")
+        ).lower()
+        return "spendcap" in blob.replace(" ", "") or "credit" in blob
+    return False
+
+
+def _credits_epoch() -> str:
+    """Funding epoch of the official Console (owner-controlled marker)."""
+    return os.getenv("X_OFFICIAL_CREDITS_SINCE", "").strip()
+
+
+def mark_official_depleted(status: int, reason: str = "") -> None:
+    """Latch "official is out of credit" durably. NEVER raises.
+
+    Idempotent: re-latching within the same funding epoch keeps the ORIGINAL
+    timestamp, so /diagnostico can show how long the official API has been
+    dead rather than resetting the clock on every call.
+    """
+    try:
+        from modules import x_store
+        prior = official_depleted_state()
+        if prior:
+            return
+        x_store.set_state(OFFICIAL_DEPLETED_KEY, json.dumps({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "status": int(status),
+            "reason": str(reason or "")[:200],
+            "epoch": _credits_epoch(),
+        }))
+        log.error(
+            "[X_FLIP] official X API reported depletion (HTTP %s) — latched; "
+            "twitterapi.io serves from now on. reason=%s",
+            status, str(reason or "")[:200],
+        )
+    except Exception:  # noqa: BLE001
+        log.exception("mark_official_depleted failed (non-fatal)")
+
+
+def official_depleted_state() -> dict[str, Any] | None:
+    """The live latch, or None. Self-clears when the funding epoch moves.
+
+    Owner re-funds the Console → set a NEW X_OFFICIAL_CREDITS_SINCE → the
+    latch recorded against the old epoch is stale and drops. That is the only
+    escape hatch, and it is an explicit owner action, never an accident.
+    """
+    try:
+        from modules import x_store
+        raw = x_store.get_state(OFFICIAL_DEPLETED_KEY)
+        if not raw:
+            return None
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return None
+        if str(data.get("epoch") or "") != _credits_epoch():
+            x_store.clear_state(OFFICIAL_DEPLETED_KEY)
+            log.info("[X_FLIP] credits epoch moved — depletion latch cleared")
+            return None
+        return data
+    except Exception:  # noqa: BLE001
+        log.exception("official_depleted_state read failed (non-fatal)")
+        return None
+
+
+def official_depleted() -> bool:
+    return official_depleted_state() is not None
+
+
+def clear_official_depleted() -> None:
+    """Drop the latch (owner re-funded the Console). NEVER raises."""
+    try:
+        from modules import x_store
+        x_store.clear_state(OFFICIAL_DEPLETED_KEY)
+    except Exception:  # noqa: BLE001
+        log.exception("clear_official_depleted failed (non-fatal)")
+
 
 def official_credits_remaining() -> float:
     """Prepaid official-API balance still unburned (0.0 = mode disabled).
 
-    R-BURN-CREDITS (2026-08-12): owner disabled auto-recharge with ~$19
+    R-BURN-CREDITS (2026-08-12): owner turned the Console card off with ~$19
     prepaid left on the official Console; we burn those first, then flip to
     the provider automatically. Balance = X_OFFICIAL_CREDITS_USD − official
     spend recorded in intel_memory.x_api_calls since X_OFFICIAL_CREDITS_SINCE
@@ -125,12 +241,22 @@ def official_credits_remaining() -> float:
 
 
 def backend_selected() -> str:
-    """The configured backend selector (default twitterapi_io).
+    """The effective backend selector (default twitterapi_io).
 
-    Explicit X_FETCH_BACKEND ALWAYS wins. Without it, burn-credits auto mode:
-    official while prepaid balance > floor ($0.50 safety buffer so a fetch
-    never dies mid-flight on an empty Console), then twitterapi_io forever.
+    Precedence, strongest first — R-X-FLIP reordered this:
+      1. OBSERVED DEPLETION. A latched 402 from the Console outranks
+         everything, INCLUDING an explicit X_FETCH_BACKEND=official. A stale
+         env var pinning the bot to a backend that answers "Payment Required"
+         is exactly how the feed went blind for 27 days; the wire beats the
+         config, always.
+      2. Explicit X_FETCH_BACKEND.
+      3. Burn-credits auto mode: official while the MODELLED prepaid balance
+         is above the floor ($0.50 buffer so a fetch never dies mid-flight),
+         then twitterapi_io. This is a best-effort estimate and is now only
+         ever the tie-breaker — rule 1 is the ground truth.
     """
+    if official_depleted():
+        return "twitterapi_io"
     v = os.getenv("X_FETCH_BACKEND", "").strip().lower()
     if v == "official":
         return "official"
@@ -153,6 +279,47 @@ def provider_active() -> bool:
 def backend_name() -> str:
     """Effective source for /health ``x_source``."""
     return "twitterapi_io" if provider_active() else "official"
+
+
+def backend_status() -> dict[str, Any]:
+    """Full selector state for /diagnostico — including the blocking reason.
+
+    R-X-FLIP: when the selector wants the provider but cannot use it, the
+    panel must NAME the missing piece instead of quietly printing "official"
+    and letting a dead backend look healthy. Values are never invented: a
+    missing key reads as missing.
+    """
+    sel = backend_selected()
+    key_ok, lid = bool(api_key()), list_id()
+    missing = [
+        name for name, ok in (
+            ("X_PROVIDER_API_KEY", key_ok), ("X_LIST_ID", bool(lid)),
+        ) if not ok
+    ]
+    latch = official_depleted_state()
+    out: dict[str, Any] = {
+        "selected": sel,
+        "effective": backend_name(),
+        "provider_key_set": key_ok,
+        "list_id_set": bool(lid),
+        "official_depleted": bool(latch),
+        "faltantes": missing,
+    }
+    if latch:
+        out["depleted_since"] = latch.get("ts")
+        out["depleted_status"] = latch.get("status")
+        out["depleted_reason"] = latch.get("reason")
+    if sel == "twitterapi_io" and not key_ok:
+        out["bloqueo"] = (
+            "el selector eligio twitterapi_io pero X_PROVIDER_API_KEY no esta "
+            "cargada en el servicio: sin esa clave no hay fetch vivo posible"
+        )
+    elif sel == "twitterapi_io" and not lid:
+        out["bloqueo"] = (
+            "el selector eligio twitterapi_io pero X_LIST_ID no esta cargada "
+            "en el servicio"
+        )
+    return out
 
 
 def last_fetch_meta() -> dict[str, int]:

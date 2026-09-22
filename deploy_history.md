@@ -2,6 +2,26 @@
 
 Append-only log per Cowork constitución §6 paso 8.
 
+
+## 2026-09-22 — R-X-FLIP: el 402 ahora flipea el backend, y el render deja de mentir
+
+27 dias de feed ciego. El cache del 26-ago se renderizaba bajo "X Timeline
+(last 48h)" mientras la llamada viva devolvia HTTP 402. El modo burn
+(R-BURN-CREDITS) decidia el backend desde un saldo **modelado**; nadie leia
+nunca el 402 del cable. Tres defectos, los tres sesgados hacia "todavia hay
+plata": la senal real no se leia, el estimador falla abierto (0.0 ante
+cualquier error, $0 por llamada fallida), y `X_FETCH_BACKEND=official`
+explicito salteaba el modo burn entero.
+
+Fix: latch durable de agotamiento en `x_fetch_state`, marcado desde adentro
+del cliente oficial, con precedencia por encima del env var y del estimado.
+El provider sirve en la MISMA corrida que descubre el agotamiento. El titulo
+de la seccion y el header de `/timeline` se computan de la edad real del post
+mas nuevo: fuera de ventana => DEGRADADO con la antiguedad exacta.
+
+Verificacion: `tests/test_x_flip.py` 22/22, `scripts/mutation_check_x_flip.py`
+10/10 mutaciones muertas, suite completa 1554/1554 verde.
+
 ## 2026-09-03 03:06 UTC — CERRADO: el funding no existe del lado de HL
 
 El /diagnostico sobre `9d38bd7` cerro el caso que venia abierto seis rondas.
