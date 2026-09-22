@@ -505,3 +505,90 @@ def test_reporte_uses_the_computed_title_for_both_headers():
     assert '"\\U0001f4e1 X TIMELINE' not in block, (
         "no hardcoded fresh title may survive in the render path"
     )
+
+
+# ─── Contract 5: no formatter may die on an unbound module name ─────────────
+#
+# This is the defect that KEPT the blackout invisible for 27 days. `x_store`
+# was imported inside four functions of modules/x_intel.py and then read by
+# eight more as if it were a module-level name. Every one of those raised
+# NameError:
+#   * /x_status, /costos_x, /intel_sources → dead commands (BCD saw the error
+#     text, the X subsystem state was never readable);
+#   * get_cached_timeline() and cache_banner_for_report() → the NameError was
+#     caught by a bare `except`, so /reporte silently fell back to the legacy
+#     mirror and lost the cache age. That fallback is literally what served
+#     the 26-aug tweets under a "48h" header.
+#
+# A green suite never caught it because no test ever CALLED the formatters.
+# These do.
+
+def test_x_intel_binds_x_store_at_module_level():
+    """The import must be module-level, not per-function.
+
+    Pinning the import itself (and not only the behaviour below) is what stops
+    the regression from coming back the next time someone adds a function that
+    reads `x_store`.
+    """
+    import ast
+
+    src = open(os.path.join(_REPO, "modules", "x_intel.py"), "r",
+               encoding="utf-8").read()
+    tree = ast.parse(src)
+    top_level = set()
+    for node in tree.body:  # module body ONLY — nested imports do not count
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                top_level.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                top_level.add((alias.asname or alias.name).split(".")[0])
+    assert "x_store" in top_level, (
+        "modules/x_intel.py reads x_store from eight functions that do not "
+        "import it; without a module-level binding they all raise NameError"
+    )
+
+
+@pytest.mark.parametrize("fname", [
+    "format_x_status",        # /x_status
+    "format_x_costos",        # /costos_x
+    "format_x_costs",
+    "format_intel_sources",   # /intel_sources
+    "debug_x_status",         # /debug_x
+    "get_cached_timeline",
+    "cache_banner_for_report",
+])
+def test_x_formatters_do_not_raise_nameerror(fname):
+    """Every X formatter must actually RUN.
+
+    NameError is asserted separately from the generic failure because the two
+    have different meanings: a NameError is a missing import (this bug), while
+    an OSError would just be a sandbox without the sqlite volume.
+    """
+    import asyncio
+
+    from modules import x_intel as xi
+
+    fn = getattr(xi, fname)
+    try:
+        if asyncio.iscoroutinefunction(fn):
+            asyncio.get_event_loop_policy().new_event_loop().run_until_complete(fn())
+        else:
+            fn()
+    except NameError as exc:  # the bug
+        pytest.fail(f"{fname}() raised NameError: {exc}")
+    except Exception:  # noqa: BLE001 — environment, not the contract
+        pass
+
+
+def test_cache_banner_survives_a_store_read_and_reports_age():
+    """cache_banner_for_report() swallowed its own NameError and returned a
+    banner with no age. A silent banner is how a 27-day corpse passed for live.
+    """
+    from modules import x_intel as xi
+
+    banner = xi.cache_banner_for_report()
+    assert isinstance(banner, str)
+    assert "store read failed" not in banner.lower(), (
+        "the banner is reporting its own crash instead of the cache age"
+    )

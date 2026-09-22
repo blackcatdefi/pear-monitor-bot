@@ -87,6 +87,13 @@ MUTATIONS: list[tuple[str, str, str, str]] = [
         "        title = x_section_title(x_intel, hours=48)",
         "        title = \"\\U0001f4e1 X TIMELINE \\u2014 48H\"",
     ),
+    (
+        "the module-level x_store import is removed again "
+        "(the NameError that silently demoted /reporte to the legacy mirror)",
+        "modules/x_intel.py",
+        "from modules import x_store\n\nfrom modules.intel_memory import (",
+        "from modules.intel_memory import (",
+    ),
 ]
 
 

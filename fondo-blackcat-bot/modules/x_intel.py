@@ -37,6 +37,19 @@ from typing import Any
 
 import httpx
 
+# R-X-FLIP (2026-09-22): `x_store` was only ever imported INSIDE a handful of
+# functions, yet eight more read it as if it were a module-level name. Every
+# one of those raised NameError. Three surfaced as a dead command
+# (/x_status, /costos_x, /intel_sources); the other two were swallowed by a
+# bare `except` and silently degraded:
+#   * get_cached_timeline()      → fell back to the legacy mirror, which is
+#                                  what served the 27-day-old tweets;
+#   * cache_banner_for_report()  → the /reporte banner lost the real cache age,
+#                                  so a stale corpse printed as if it were live.
+# One module-level import kills all eight. The local imports below are left in
+# place (harmless, and they keep each function readable on its own).
+from modules import x_store
+
 from modules.intel_memory import (
     count_x_calls_since,
     count_x_calls_today_calendar,
