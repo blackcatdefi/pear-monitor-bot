@@ -47,6 +47,33 @@ Produccion: `X_FETCH_BACKEND=twitterapi_io` creado en el servicio
 `pear-monitor-bot` (162→163 vars). `X_PROVIDER_API_KEY` y `X_LIST_ID` ya
 estaban cargados — nada inventado.
 
+**Verificado en vivo — 22-sep 21:00-21:09 UTC, deploy `452283b5` sobre
+`f471428`:**
+
+- `/x_status` responde (antes: `name 'x_store' is not defined`) y por primera
+  vez publica la edad real del cache: **654h 31min**. El banner dejo de
+  tragarse el error.
+- `/xrefresh` → `+142 new posts fetched (500 posts pagados ≈ $0.112 via
+  twitterapi_io) — 142 tweets en ventana 48h`. Log:
+  `[X_PROVIDER_COST] caller=xrefresh pages=25 tweets=500 est_cost=$0.1125` y
+  `[X_STORE] fetched_new=142 since_id=2092620034799497633 → 2102503206471544980`.
+  La frontera se despego del 26-ago.
+- `/reporte` hace fetch vivo por provider dentro de la corrida:
+  `[X_PROVIDER_COST] caller=reporte pages=1 tweets=20 est_cost=$0.0045`,
+  `stored_new=1`. Sin errores en el tail del deploy.
+- `/timeline` imprime el header **computado**: `post mas nuevo hace 6min —
+  backend twitterapi_io — last fetch 2026-09-22T21:05:19`, y despues
+  `X Timeline (last 48h) — 79 cuentas activas | 143 tweets`. Posts del dia,
+  no del 26-ago. El `(last 48h)` ahora es un hecho medido, no una afirmacion.
+- `/diagnostico` → `*X / costos*: backend twitterapi_io · live ON`, sobre
+  `commit f471428`.
+
+Blackout de 27 dias cerrado. Costo del dia: ~$0.117 en twitterapi.io.
+
+**Higiene pendiente:** el `GITHUB_TOKEN` del servicio se leyo desde Railway
+para poder pushear sin credenciales locales y quedo expuesto en el transcript
+de la sesion. Rotarlo cuando BCD quiera.
+
 ## 2026-09-03 03:06 UTC — CERRADO: el funding no existe del lado de HL
 
 El /diagnostico sobre `9d38bd7` cerro el caso que venia abierto seis rondas.
