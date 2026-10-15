@@ -1025,16 +1025,15 @@ async def fetch_funding_map() -> dict[str, float]:
 
 
 async def fetch_btc_dominance() -> Optional[float]:
-    """BTC.D % from CoinGecko /global (keyless). None on miss."""
-    if not _HTTPX_OK:
-        return None
+    """BTC.D % from CoinGecko /global. None on miss.
+
+    R-LIVE-FIX: routed through ``modules.market.coingecko_global`` (15 min
+    cache + negative cache + per-host 429 cooldown) instead of a raw httpx GET
+    that bypassed every limiter and added to the 429 storm every unlock run."""
     try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_S, follow_redirects=True) as client:
-            resp = await client.get(COINGECKO_GLOBAL_URL, headers={"User-Agent": _UA, "Accept": "application/json"})
-        if resp.status_code != 200:
-            return None
-        data = resp.json().get("data") or {}
-        return _f((data.get("market_cap_percentage") or {}).get("btc"))
+        from modules.market import coingecko_global
+        g = await coingecko_global()
+        return _f(g.get("btc_dominance")) if isinstance(g, dict) else None
     except Exception as exc:  # noqa: BLE001
         log.warning("unlock: BTC.D n/d (%s)", exc)
         return None

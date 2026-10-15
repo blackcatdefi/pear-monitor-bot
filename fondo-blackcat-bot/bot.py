@@ -3355,6 +3355,12 @@ async def _lmec_counter_refresh_job() -> None:
         log.exception("LMEC counter refresh job failed")
 
 
+# R-LIVE-FIX: cadencia del refresco proactivo del dashboard. Piso de 120s
+# para que un env mal puesto no reviva la tormenta de 429.
+DASHBOARD_PROACTIVE_REFRESH_DEFAULT_SEC = 300
+DASHBOARD_PROACTIVE_REFRESH_MIN_SEC = 120
+
+
 async def _portfolio_snapshot_refresh_job() -> None:
     """HOTFIX 2 (2026-04-27): proactive cache warmer.
 
@@ -3839,9 +3845,17 @@ async def post_init(application: Application) -> None:
         # DASHBOARD_PROACTIVE_REFRESH_ENABLED=false.
         if os.getenv("DASHBOARD_PROACTIVE_REFRESH_ENABLED", "true").strip().lower() != "false":
             try:
-                _refresh_interval = int(os.getenv("DASHBOARD_PROACTIVE_REFRESH_INTERVAL", "30"))
+                # R-LIVE-FIX (2026-10-15): 30s → 300s. Cada vuelta arrastraba
+                # fetch_market_data() → CoinGecko; a 30s con el fallo sin
+                # cachear era la tormenta de 429 de los logs. Un reporte
+                # on-demand no distingue un precio de hace 4 minutos, y los
+                # precios core salen del oraculo HL (45s de cache propio).
+                _refresh_interval = int(os.getenv(
+                    "DASHBOARD_PROACTIVE_REFRESH_INTERVAL",
+                    str(DASHBOARD_PROACTIVE_REFRESH_DEFAULT_SEC)))
             except ValueError:
-                _refresh_interval = 30
+                _refresh_interval = DASHBOARD_PROACTIVE_REFRESH_DEFAULT_SEC
+            _refresh_interval = max(_refresh_interval, DASHBOARD_PROACTIVE_REFRESH_MIN_SEC)
             scheduler.add_job(
                 _portfolio_snapshot_refresh_job,
                 "interval",

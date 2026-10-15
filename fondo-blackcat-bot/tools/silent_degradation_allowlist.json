@@ -114,6 +114,12 @@
       "Guarda de coercion de un punto de la serie historica de vault. Los fallos de lectura de la serie completa estan instrumentados aparte.",
 
     "modules/x_store.py::set_since_id::(TypeError, ValueError)::pass":
-      "El since_id de X viene como string; si no es un entero se ignora y el cursor queda donde estaba. Eso produce refetch (costo), nunca perdida de tweets. El fallo de ESCRITURA del cursor, que si tiene consecuencias, esta instrumentado en el handler ancho de la misma funcion."
+      "El since_id de X viene como string; si no es un entero se ignora y el cursor queda donde estaba. Eso produce refetch (costo), nunca perdida de tweets. El fallo de ESCRITURA del cursor, que si tiene consecuencias, esta instrumentado en el handler ancho de la misma funcion.",
+
+    "modules/market.py::_hl_prev_day_map::Exception::return {}":
+      "R-LIVE-FIX (2026-10-15): prevDayPx solo alimenta el 24h change (contexto del reporte), nunca el precio ni la valuacion. Si falta, change_24h queda None (n/d) y el precio core sigue saliendo del oraculo HL, o su ausencia se declara en coingecko_prices (core_missing -> swallowed).",
+
+    "modules/market.py::_gecko_cooldown_note::Exception::return None":
+      "R-LIVE-FIX (2026-10-15): solo arma el texto 'coingecko en cooldown Ns' para el log y la nota de diagnostico; no produce ningun numero del fondo. Un None aqui deja la nota sin el detalle del cooldown, nada mas."
   }
 }
