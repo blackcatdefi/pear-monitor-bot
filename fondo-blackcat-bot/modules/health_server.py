@@ -29,7 +29,14 @@ _runner: Optional["web.AppRunner"] = None
 
 async def health_handler(request) -> "web.Response":  # type: ignore[name-defined]
     from commands_registry import COMMANDS  # local import → up-to-date count
-    return web.json_response(health_payload(commands_count=len(COMMANDS)))
+    # R-RONDA-OCT follow-up: health_payload() runs full_diagnosis() — sqlite
+    # reads, invariants, ledger checks: 3-6s of sync work. Inline it stalls
+    # the event loop and every scheduler job due in that window misfires.
+    # Run it in the default executor so a curl never costs a ledger sync.
+    import asyncio
+    loop = asyncio.get_event_loop()
+    payload = await loop.run_in_executor(None, health_payload, len(COMMANDS))
+    return web.json_response(payload)
 
 
 async def start_health_server(port: Optional[int] = None) -> None:
