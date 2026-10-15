@@ -2593,11 +2593,15 @@ async def _pm_monitor_job(application: Application) -> None:
         # R-RONDA-OCT #1a: every PM observation feeds the interest accrual
         # (debt × live APR × Δt) so the carry line never depends on someone
         # typing /reporte.
+        # Production d66340a showed `debt_carry` as "sin datos" between
+        # /reporte runs: observe() accrues but only snapshot() is the tracked
+        # entry. The job uses snapshot() (observe + APR read) so a healthy
+        # tick marks the subsystem ok and an unreadable APR degrades it.
         try:
-            from modules.debt_carry import observe as _carry_observe
-            _carry_observe(getattr(pm, "debt_usd", None))
+            from modules.debt_carry import snapshot as _carry_snapshot
+            _carry_snapshot(getattr(pm, "debt_usd", None))
         except Exception:  # noqa: BLE001
-            log.exception("debt_carry observe failed (non-fatal)")
+            log.exception("debt_carry snapshot failed (non-fatal)")
         # R-PMALERT: edge-trigger via SQLite. evaluate() persists the new state
         # (so a retreat resets silently) and returns the rendered alert.
         decision = _pma.evaluate(pm)

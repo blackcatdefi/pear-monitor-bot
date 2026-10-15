@@ -439,7 +439,7 @@ def test_reporte_wiring_present():
     assert "carry=_carry_rep, retiros=_ret_rep" in src
     # periodic scan rides ledger_sync; PM alert job ticks the accrual
     assert "RETIROS periodic scan" in src
-    assert "_carry_observe(getattr(pm, \"debt_usd\", None))" in src
+    assert "_carry_snapshot(getattr(pm, \"debt_usd\", None))" in src   # tracked entry, marks ok
     from commands_registry import COMMANDS
     names = {c.command for c in COMMANDS}
     assert {"retiros", "carrycursor", "atribucion"} <= names
