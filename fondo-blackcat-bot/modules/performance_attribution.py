@@ -186,3 +186,136 @@ def recent_attributions(limit: int = 5) -> list[dict[str, Any]]:
         health_registry.swallowed("attribution", "recent_attributions")
         log.exception("perf_attribution: recent fetch failed")
         return []
+
+
+# ─── R-RONDA-OCT #3: the subsystem had NO caller ────────────────────────────
+# ``attribute_basket_close`` was imported by bot.py (as ``r18_perf_attribute``)
+# and never invoked anywhere: no command, no job, no basket-close path. So
+# ``compute_attribution`` never ran and /diagnostico showed "Atribucion de
+# performance — ultimo ok nunca" forever, as a MONEY subsystem. Two fixes:
+#   1. a real trigger: every fully-closed ledger cycle is attributed from the
+#      ledger itself (entry = margin deployed, exit = entry + NET, BTC at
+#      open/close from HL candles), pushed right after the cycle subtotal;
+#   2. an on-demand entry (/atribucion [tag]) for the last closed cycle.
+# The registry labels it as an EVENT subsystem so the panel says "corre al
+# cerrar un ciclo" instead of printing a frightening "nunca".
+
+async def _btc_px_at(ts_ms: int) -> float | None:
+    """BTC perp close of the 1h candle containing ``ts_ms`` (HL). None on miss."""
+    try:
+        from modules.hl_client import post_info
+        hour = 3_600_000
+        start = (int(ts_ms) // hour) * hour
+        candles = await post_info({
+            "type": "candleSnapshot",
+            "req": {"coin": "BTC", "interval": "1h",
+                    "startTime": start, "endTime": start + hour - 1},
+        }, ttl=6 * 3600)
+        for c in candles or []:
+            if isinstance(c, dict) and c.get("c") is not None:
+                return float(c["c"])
+        return None
+    except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("attribution", f"_btc_px_at: {type(exc).__name__}")
+        log.warning("perf_attribution: BTC px at %s n/d (%s)", ts_ms, exc)
+        return None
+
+
+def _cycle_rows(wallet: str, tag: str) -> list[dict[str, Any]]:
+    from modules import trade_ledger as _tl
+    con = _tl._conn()
+    try:
+        return [dict(r) for r in con.execute(
+            "SELECT * FROM ledger_positions WHERE wallet=? AND cycle_tag=? "
+            "ORDER BY open_ts", (wallet, tag)).fetchall()]
+    finally:
+        con.close()
+
+
+def cycle_entry_exit(rows: list[dict[str, Any]]) -> tuple[float, float, int, int] | None:
+    """(entry_value, exit_value, open_ts, close_ts) for a cycle's ledger rows.
+
+    entry = Σ margin deployed per leg (``margin_open``; fallback
+    notional_open / leverage when the margin was not captured) — the capital
+    at risk, which is what a return % must be measured against. exit = entry
+    + Σ NET (gross − fees + funding). None when nothing usable.
+    """
+    entry = 0.0
+    net = 0.0
+    t_open: int | None = None
+    t_close: int | None = None
+    for r in rows:
+        m = r.get("margin_open")
+        try:
+            m = float(m) if m is not None else None
+        except (TypeError, ValueError):
+            m = None
+        if m is None or m <= 0:
+            try:
+                lev = float(r.get("leverage") or 0.0)
+                notional = float(r.get("notional_open") or 0.0)
+                m = notional / lev if lev > 0 else 0.0
+            except (TypeError, ValueError):
+                m = 0.0
+        entry += m
+        try:
+            net += float(r.get("net_pnl") or 0.0)
+        except (TypeError, ValueError):
+            # A leg whose NET cannot be read makes the whole cycle
+            # unattributable: a partial exit value is a wrong return %.
+            health_registry.swallowed("attribution", "cycle_entry_exit: net_pnl ilegible")
+            return None
+        try:
+            o, c = int(r.get("open_ts") or 0), int(r.get("close_ts") or 0)
+        except (TypeError, ValueError):
+            o, c = 0, 0
+        if o > 0:
+            t_open = o if t_open is None else min(t_open, o)
+        if c > 0:
+            t_close = c if t_close is None else max(t_close, c)
+    if entry <= 0 or t_open is None or t_close is None:
+        return None
+    return entry, entry + net, t_open, t_close
+
+
+async def attribute_ledger_cycle(wallet: str, tag: str) -> str | None:
+    """Attribute ONE fully-closed ledger cycle. Returns the formatted block,
+    or None when disabled / nothing to attribute. NEVER raises."""
+    if not _is_enabled():
+        return None
+    try:
+        rows = _cycle_rows(wallet, tag)
+        ee = cycle_entry_exit(rows)
+        if ee is None:
+            return None
+        entry, exit_, t_open, t_close = ee
+        btc_entry = await _btc_px_at(t_open)
+        btc_exit = await _btc_px_at(t_close)
+        label = f"{tag} [{wallet[:6]}] {len(rows)} patas"
+        return await attribute_basket_close(
+            label=label, entry_value=entry, exit_value=exit_,
+            btc_entry=btc_entry, btc_exit=btc_exit,
+        )
+    except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("attribution", f"attribute_ledger_cycle: {type(exc).__name__}")
+        log.exception("perf_attribution: cycle %s/%s failed", wallet[:6], tag)
+        return None
+
+
+async def attribute_last_cycle(wallet: str | None = None, tag: str | None = None) -> str:
+    """On-demand (/atribucion): attribute the last fully-closed cycle of the
+    primary wallet, or ``tag`` when given. Always returns text."""
+    from config import PM_PRIMARY_WALLET
+    from modules import trade_ledger as _tl
+    w = (wallet or PM_PRIMARY_WALLET or "").lower()
+    if not tag:
+        last = _tl.last_closed_for_wallet(w)
+        if not last or last.get("tag") in (None, "cierre suelto"):
+            return ("📊 ATRIBUCION — sin ciclo cerrado en el ledger para la wallet "
+                    f"{w[:6]} (un cierre suelto no es un ciclo).")
+        tag = str(last["tag"])
+    text = await attribute_ledger_cycle(w, tag)
+    if text is None:
+        return (f"📊 ATRIBUCION — ciclo {tag} sin datos atribuibles "
+                "(sin margen capturado o atribucion deshabilitada).")
+    return text

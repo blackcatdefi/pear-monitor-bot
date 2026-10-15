@@ -158,6 +158,15 @@ def cost_month_to_date() -> float:
     return _aggregate(int(month_start.timestamp()))["total_usd"]
 
 
+# R-RONDA-OCT #3: the subsystem's ONLY tracked entry was ``log_llm_call``,
+# which runs after a successful LLM call. /reporte is deterministic (0 LLM
+# calls) and the remaining LLM paths run rarely, so the registry row never got
+# a ``mark_ok`` and /diagnostico printed "ultimo ok nunca" for a money
+# subsystem that was in fact being read every hour. The hourly threshold check
+# is the tracker doing its job: reading cost.db and judging it. A clean read
+# is a success of the TRACKER (not of any LLM); a sqlite failure inside
+# ``_aggregate`` is a ``swallowed`` and keeps the row degraded.
+@health_registry.tracked("cost_tracker", "check_alert_thresholds")
 def check_alert_thresholds() -> str | None:
     """Return Telegram alert text if a threshold is breached, else None."""
     day_cost = cost_last_24h()

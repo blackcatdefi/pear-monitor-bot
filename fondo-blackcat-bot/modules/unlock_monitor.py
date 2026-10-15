@@ -971,14 +971,21 @@ async def fetch_4h_closes(coin: str, bars: int) -> Optional[list[float]]:
     miss. Never raises."""
     bars = max(4, int(bars))
     coin = (coin or "").strip().upper()
-    now_ms = int(time.time() * 1000)
-    interval_ms = 4 * 3600 * 1000
-    start_ms = now_ms - (bars + 4) * interval_ms
     try:
-        candles = await _hl_post({
-            "type": "candleSnapshot",
-            "req": {"coin": coin, "interval": "4h", "startTime": start_ms, "endTime": now_ms},
-        })
+        # R-RONDA-OCT #2: shared candle cache (one fetch per coin/interval per
+        # TTL across the unlock monitor, the screener and /reporte). The raw
+        # payload path stays only for a non-canonical HL_INFO_URL (tests).
+        if HL_INFO_URL.rstrip("/").endswith("hyperliquid.xyz/info"):
+            from modules.hl_client import get_candles
+            candles = await get_candles(coin, "4h", bars + 4)
+        else:
+            now_ms = int(time.time() * 1000)
+            interval_ms = 4 * 3600 * 1000
+            start_ms = now_ms - (bars + 4) * interval_ms
+            candles = await _hl_post({
+                "type": "candleSnapshot",
+                "req": {"coin": coin, "interval": "4h", "startTime": start_ms, "endTime": now_ms},
+            })
         closes = [_f(c.get("c")) for c in candles if isinstance(c, dict)]
         closes = [c for c in closes if c is not None]
         if len(closes) < 3:

@@ -79,15 +79,28 @@ def test_different_payloads_not_shared(hc, monkeypatch):
     assert calls["n"] == 2
 
 
-def test_429_retried_with_backoff_then_success(hc, monkeypatch):
+def test_429_is_never_retried_inside_the_call(hc, monkeypatch):
+    """R-RONDA-OCT #2 — doctrine INVERTED (was: 429 retried 3x in-call).
+
+    Evidence: Railway deploy logs 2026-10-15 13:50-13:51 UTC show
+    ``hl_client candleSnapshot -> 429 (attempt 2/4 ... 4/4)`` for dozens of
+    names within one second, then ``-> 500 (attempt 1/4 ...)`` for the next
+    minute: every in-call retry landed inside the same 60s weight window and
+    only fed the storm. A 429 now means stop: the host enters a cooldown and
+    the call returns stale data or raises ``HostCoolingDown``.
+    """
     monkeypatch.setattr(hc, "_backoff_delay", lambda attempt: 0.0)
+    hc.reset_cooldowns()
     calls = _patch_httpx(monkeypatch, hc, [(429, {}), (429, {}), (200, {"ok": 1})])
 
     async def go():
         return await hc.post_info({"type": "metaAndAssetCtxs"})
 
-    assert asyncio.run(go()) == {"ok": 1}
-    assert calls["n"] == 3
+    with pytest.raises(Exception):
+        asyncio.run(go())
+    assert calls["n"] == 1          # one request, zero in-call retries
+    assert hc.cooling_down()         # ... and the host is now cooling down
+    hc.reset_cooldowns()
 
 
 def test_stale_serve_and_note(hc, monkeypatch):

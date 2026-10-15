@@ -45,6 +45,9 @@ COMMANDS: List[BotCommand] = [
     BotCommand("cierres", "Ledger trades cerrados: NET/fees/funding + ciclos (R-TRADE-LEDGER)", "trading", "cmd_cierres"),
     # R-BOT-DEFINITIVE Fase 6 — serie publica por ciclo, lista para compartir.
     BotCommand("trackrecord", "Track record publico: un ciclo por linea + total all-time", "trading", "cmd_trackrecord"),
+    BotCommand("atribucion", "Atribucion alpha/beta del ultimo ciclo cerrado (o /atribucion <tag>)", "trading", "cmd_atribucion"),
+    BotCommand("retiros", "Ledger de retiros personales (borrow → HYPE spot → HyperEVM)", "trading", "cmd_retiros"),
+    BotCommand("carrycursor", "Reinicia el cursor del interes acumulado de la deuda PM", "trading", "cmd_carrycursor"),
     BotCommand("pnlx", "Extended PnL by period + best/worst (R18)", "trading", "cmd_pnlx"),
     BotCommand("pretrade", "5-point pre-trade checklist <SYMBOL>", "trading", "cmd_pretrade"),
     BotCommand("compounding_history", "Compounding events last 30d (R18)", "trading", "cmd_compounding_history"),

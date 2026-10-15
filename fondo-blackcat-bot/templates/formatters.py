@@ -1175,7 +1175,9 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                            hyperlend: list[dict[str, Any]] | dict[str, Any],
                            bounce_tech: list[dict[str, Any]] | None = None,
                            recent_fills: list[dict[str, Any]] | None = None,
-                           market: dict[str, Any] | None = None) -> str:
+                           market: dict[str, Any] | None = None,
+                           carry: dict[str, Any] | None = None,
+                           retiros: dict[str, Any] | None = None) -> str:
     lines: list[str] = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines.append(f"📊 Snapshot Fondo Black Cat — {now}")
@@ -1364,7 +1366,10 @@ def format_quick_positions(wallets: list[dict[str, Any]],
                 except Exception:  # noqa: BLE001
                     _putil_qp, _pn_qp = None, 0
                 _pm_block = format_pm_state_telegram(
-                    _pm, perp_cross_util_pct=_putil_qp, perp_cross_count=_pn_qp
+                    _pm, perp_cross_util_pct=_putil_qp, perp_cross_count=_pn_qp,
+                    carry=carry,
+                    retiros_hype=(retiros or {}).get("hype_withdrawn"),
+                    retiros_n=int((retiros or {}).get("n") or 0),
                 )
                 if _pm_block:
                     lines.append("")
@@ -1528,14 +1533,17 @@ def format_quick_positions(wallets: list[dict[str, Any]],
             else:
                 pos_summary = ", ".join(f"{p['side']} {p['coin']}" for p in positions[:5])
         elif _is_alt_short_wallet(d.get("wallet", "")) and not BASKET_STATUS.get("active"):
-            # Wallet historically from Super Basket Stage 6 basket, now IDLE.
-            last = BASKET_STATUS.get("last_basket", "?")
-            net = BASKET_STATUS.get("last_basket_result_net_usd", 0.0)
-            nxt = BASKET_STATUS.get("next_basket", "pending")
-            pos_summary = (
-                f"IDLE (basket {last} closed NET {_fmt_usd(net)}, {nxt}). "
-                "Residual dust — no active position."
-            )
+            # R-RONDA-OCT #5: the IDLE text is DERIVED from the closes ledger
+            # (last closed cycle of THIS wallet: tag, date, NET, legs). The
+            # old line printed BASKET_STATUS — a hand-edited constant frozen
+            # at "v4 closed NET $290.20, v5 pending capital" (2026-04-20) —
+            # under every empty wallet for six months while the ledger held
+            # no v4 at all. A constant is not a measurement.
+            try:
+                from modules.trade_ledger import idle_label_for_wallet
+                pos_summary = idle_label_for_wallet(d.get("wallet", ""))
+            except Exception as exc:  # noqa: BLE001
+                pos_summary = f"IDLE — ledger no legible ({type(exc).__name__}). Sin posicion activa."
         else:
             pos_summary = "sin posiciones perp"
 

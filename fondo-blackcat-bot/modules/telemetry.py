@@ -407,14 +407,11 @@ async def fetch_low_7d(coin: str) -> Optional[float]:
     """Minimum 4h candle low over the trailing 7 days from ``candleSnapshot``.
     None on miss. 7d of 4h candles = 42 bars."""
     coin = _norm_coin(coin)
-    now_ms = int(time.time() * 1000)
-    start_ms = now_ms - _SEVEN_DAYS_MS
     try:
-        candles = await _hl_post({
-            "type": "candleSnapshot",
-            "req": {"coin": coin, "interval": "4h",
-                    "startTime": start_ms, "endTime": now_ms},
-        })
+        # R-RONDA-OCT #2: shared candle cache (same 4h series the screener and
+        # the unlock monitor already fetched for this coin).
+        from modules.hl_client import get_candles
+        candles = await get_candles(coin, "4h", 42)
         lows = [_f(c.get("l")) for c in (candles or []) if isinstance(c, dict)]
         lows = [x for x in lows if x is not None and x > 0]
         return min(lows) if lows else None
