@@ -59,7 +59,15 @@ produccion el **2026-09-03**:
 * `GITHUB_TOKEN` — ✅ la usa el auto-update del bot para pushear. **La unica
   imprescindible. CARGADA el 2026-09-03 por BCD a mano en el panel**; desde
   entonces la autoactualizacion esta en verde.
-* `GITHUB_REPO` — ❌ ausente, y no se requiere (ver abajo). Si se carga, gana.
+  **ROTADA el 2026-10-15 (R-RONDA-OCT):** el token classic `cowork-deploy`
+  (repo+workflow, sin expiracion) quedo expuesto en un transcript el 22-sep y
+  fue **borrado**. Lo reemplaza el PAT fine-grained
+  `railway-pear-monitor-bot-2026-10` (solo `blackcatdefi/pear-monitor-bot`,
+  Contents read/write + Metadata read, vence 2027-10-14; `GITHUB_PAT_NAME`
+  actualizado). El valor vive en Railway y en `~/gh_token.txt` del notebook
+  (modo 600); nunca en el repo ni en un chat. Proxima rotacion: antes del
+  2027-10-14 (`/pat_status` avisa).
+* `GITHUB_REPO` — ✅ cargada el 2026-10-15 (R-LIVE-FIX) via MCP.
 * `FRED_API_KEY` — ✅ presente. Serie macro.
 * `ARKHAM_API_KEY` — ❌ ausente. Intel on-chain, degradacion conocida.
 
