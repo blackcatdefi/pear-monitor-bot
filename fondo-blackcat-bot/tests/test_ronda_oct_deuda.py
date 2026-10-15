@@ -443,3 +443,46 @@ def test_reporte_wiring_present():
     from commands_registry import COMMANDS
     names = {c.command for c in COMMANDS}
     assert {"retiros", "carrycursor", "atribucion"} <= names
+
+
+# ─── follow-up: the deploy of a685842 missed its boot jobs ─────────────────
+
+def test_scheduler_has_a_misfire_grace_so_a_stall_never_drops_a_job():
+    """Deploy a685842, 14:27:57 UTC: a 3s event-loop stall (a /health call
+    running full_diagnosis inline) made APScheduler skip ledger_sync,
+    lmec_counter_refresh, cryexc_monitor, risk_validator and macro_calendar
+    with its default 1-second misfire grace."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "bot.py").read_text(encoding="utf-8")
+    assert 'AsyncIOScheduler(job_defaults={"misfire_grace_time": 120})' in src
+    assert "AsyncIOScheduler()" not in src
+
+
+def test_health_handler_runs_the_diagnosis_off_the_event_loop(monkeypatch):
+    import asyncio
+    import modules.health_server as hs
+    seen = {}
+
+    def fake_payload(n):
+        seen["n"] = n
+        seen["thread_is_main"] = __import__("threading").current_thread().name == "MainThread"
+        return {"ok": True}
+
+    class _Resp:
+        def __init__(self, data):
+            self.data = data
+
+    monkeypatch.setattr(hs, "health_payload", fake_payload)
+    monkeypatch.setattr(hs.web, "json_response", lambda d: _Resp(d))
+    out = asyncio.run(hs.health_handler(None))
+    assert out.data == {"ok": True}
+    assert seen["n"] > 0
+    assert seen["thread_is_main"] is False      # ran in the executor, not inline
+
+
+def test_health_exposes_deuda_and_x_blocks(monkeypatch):
+    from modules import version_info as vi
+    monkeypatch.setattr("modules.diagnostics.full_diagnosis",
+                        lambda: {"ok": True, "deuda": {"carry": {"ok": True}}, "x": {"llamadas_hoy": 3}})
+    d = vi._autodiagnostico_safe()
+    assert d["deuda"] == {"carry": {"ok": True}} and d["x"]["llamadas_hoy"] == 3

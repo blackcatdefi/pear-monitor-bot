@@ -3767,7 +3767,13 @@ async def post_init(application: Application) -> None:
         _telethon_ok = False
 
     if ENABLE_ALERTS:
-        scheduler = AsyncIOScheduler()
+        # R-RONDA-OCT follow-up (2026-10-15, deploy a685842): a 3s event-loop
+        # stall (a /health request running full_diagnosis() inline) made
+        # APScheduler drop FIVE jobs at once (ledger_sync +2min, lmec_counter,
+        # cryexc, risk_validator, macro_calendar) with its default 1-second
+        # misfire grace — a 6h job silently skipped to the next 6h. A job that
+        # is late by seconds must run, not vanish.
+        scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 120})
         scheduler.add_job(
             _alert_job,
             "interval",

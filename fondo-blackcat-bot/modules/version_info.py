@@ -289,6 +289,10 @@ def _autodiagnostico_safe() -> dict:
             "ppc": d.get("ppc"),
             "dedup_alertas": d.get("dedup_alertas"),
             "autoactualizacion": d.get("autoactualizacion"),
+            # R-RONDA-OCT follow-up: the two blocks the round added, so
+            # production can be verified from /health without Telegram.
+            "deuda": d.get("deuda"),
+            "x": d.get("x"),
             "generado_utc": d.get("generado_utc"),
         }
     except Exception as exc:  # noqa: BLE001
