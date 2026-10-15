@@ -462,14 +462,20 @@ async def fetch_hl_daily_closes(ticker: str, n_days: int) -> Optional[list[float
             break
     if coin is None:
         return None
-    now_ms = int(time.time() * 1000)
-    # Pad the window so we always cover ≥ n_days full candles.
-    start_ms = now_ms - (n_days + 3) * 24 * 3600 * 1000
     try:
-        candles = await _hl_post({
-            "type": "candleSnapshot",
-            "req": {"coin": coin, "interval": "1d", "startTime": start_ms, "endTime": now_ms},
-        })
+        # R-RONDA-OCT #2: through the shared, cooled-down, weight-metered HL
+        # client and its candle cache (this used to be a raw httpx POST with
+        # no limiter, no cache and no cooldown).
+        if HL_INFO_URL.rstrip("/").endswith("hyperliquid.xyz/info"):
+            from modules.hl_client import get_candles
+            candles = await get_candles(coin, "1d", n_days + 3)
+        else:
+            now_ms = int(time.time() * 1000)
+            start_ms = now_ms - (n_days + 3) * 24 * 3600 * 1000
+            candles = await _hl_post({
+                "type": "candleSnapshot",
+                "req": {"coin": coin, "interval": "1d", "startTime": start_ms, "endTime": now_ms},
+            })
         closes = [_f(c.get("c")) for c in candles if isinstance(c, dict)]
         closes = [c for c in closes if c is not None]
         if len(closes) < 2:

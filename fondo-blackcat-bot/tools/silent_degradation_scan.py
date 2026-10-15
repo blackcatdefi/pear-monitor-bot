@@ -79,6 +79,8 @@ MONEY_PATH = {
     "modules/pm_context.py",
     "modules/spot_index.py",
     "modules/hype_acquisition.py",
+    "modules/debt_carry.py",
+    "modules/retiros_personales.py",
     "modules/vault_deposits.py",
     "modules/vault_history.py",
     "modules/performance_attribution.py",

@@ -114,7 +114,15 @@ async def _fetch_fund_snapshot() -> dict[str, Any]:
     try:
         import fund_state as fs
         out["basket_active"] = bool(getattr(fs, "BASKET_STATUS", {}).get("active"))
-        out["basket_status"] = (getattr(fs, "BASKET_STATUS", {}) or {}).get("last_basket")
+    except Exception:
+        pass
+    # R-RONDA-OCT #5: the label of the last cycle comes from the closes
+    # ledger, never from fund_state (whose "last_basket" was a frozen "v4").
+    try:
+        from config import PM_PRIMARY_WALLET
+        from modules.trade_ledger import last_closed_for_wallet
+        _last = last_closed_for_wallet(PM_PRIMARY_WALLET)
+        out["basket_status"] = _last["tag"] if _last else None
     except Exception:
         pass
 

@@ -92,6 +92,13 @@ class HypeAcquisition:
     # "desde X" mientras el PPC incluye plata de antes de X, y la linea que
     # EXPLICA el numero queda mintiendo aunque el numero este bien.
     fills_sin_fecha: int = 0
+    # R-RONDA-OCT #1b — buy fills that belong to a RETIRO PERSONAL (borrow →
+    # HYPE spot → HyperEVM) are NOT acquisitions of the stack: they left
+    # the wallet. They are excluded from PPC / net acquisition and counted
+    # here so the line can say so. The live balance already lacks the
+    # withdrawn HYPE, so skipping the buy keeps fills and balance consistent.
+    retiros_fills_excluidos: int = 0
+    retiros_hype_excluido: float = 0.0
 
     @property
     def coverage_pct(self) -> float | None:
@@ -276,8 +283,24 @@ def compute_hype_acquisition(
     sin_fecha = 0
     t_min: int | None = None
     t_max: int | None = None
+    # R-RONDA-OCT #1b: fills consumed by RETIRO PERSONAL events are skipped.
+    try:
+        from modules.retiros_personales import excluded_fill_keys, fill_key as _rp_key
+        _excluded = excluded_fill_keys(w)
+    except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("ppc", f"retiros exclusion: {type(exc).__name__}")
+        _excluded, _rp_key = set(), None
+    retiros_excl_n = 0
+    retiros_excl_qty = 0.0
     for f in fills:
         if not _is_hype_spot(f.get("coin"), spot_map):
+            continue
+        if _excluded and _rp_key is not None and _rp_key(f) in _excluded:
+            retiros_excl_n += 1
+            try:
+                retiros_excl_qty += abs(float(f.get("sz") or 0.0))
+            except (TypeError, ValueError):
+                health_registry.swallowed("ppc", "retiros exclusion: sz ilegible")
             continue
         try:
             sz = abs(float(f.get("sz") or 0.0))
@@ -315,7 +338,9 @@ def compute_hype_acquisition(
                "fills_to_utc": _ms_to_date(t_max),
                "hype_fills": hype_fills,
                "fills_sin_fecha": sin_fecha,
-               "truncated": bool(_LAST_FETCH_TRUNCATED)}
+               "truncated": bool(_LAST_FETCH_TRUNCATED),
+               "retiros_fills_excluidos": retiros_excl_n,
+               "retiros_hype_excluido": retiros_excl_qty}
 
     if hype_fills == 0:
         return HypeAcquisition(

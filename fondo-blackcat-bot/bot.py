@@ -318,6 +318,8 @@ async def cmd_posiciones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             wallet_label="Bounce Tech",
         )
 
+    from modules.pm_context import select_primary_pm_state as _sps_qp
+    _carry_qp, _ret_qp = _carry_and_retiros(_sps_qp(wallets, market))
     await send_long_message(
         update,
         format_quick_positions(
@@ -325,9 +327,51 @@ async def cmd_posiciones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             bounce_tech=bt,
             recent_fills=recent_fills,
             market=market,
+            carry=_carry_qp, retiros=_ret_qp,
         ),
         reply_markup=MAIN_KEYBOARD,
     )
+
+
+def _debt_delta_attribution(prev_kpis: dict | None, carry: dict | None) -> dict | None:
+    """R-RONDA-OCT #1: split the PM-debt delta vs the previous /reporte into
+    retiro (USDC borrowed for RETIRO PERSONAL events in the window) and
+    interes (carry accrued since the last report). None when there is no
+    previous report to measure against."""
+    if not isinstance(prev_kpis, dict) or not prev_kpis.get("ts"):
+        return None
+    out: dict = {"retiro": None, "interes": None}
+    try:
+        from datetime import datetime as _dt
+        prev_ms = int(_dt.fromisoformat(str(prev_kpis["ts"]).replace("Z", "+00:00")).timestamp() * 1000)
+        from modules import retiros_personales as _rp
+        out["retiro"] = _rp.usdc_borrowed_between(prev_ms, int(time.time() * 1000))
+    except Exception:  # noqa: BLE001
+        log.exception("retiro attribution failed (non-fatal)")
+    if carry and carry.get("since_report") is not None:
+        out["interes"] = float(carry["since_report"])
+    return out
+
+
+def _carry_and_retiros(pm) -> tuple[dict | None, dict | None]:
+    """R-RONDA-OCT #1: the carry snapshot (live APR + accrued interest, with
+    an accrual tick on the observed debt) and the RETIRO PERSONAL totals for
+    the PM panel. Best-effort: each half is None when its module fails (the
+    subsystem gets marked degraded there; the panel prints without the line
+    rather than with a guess)."""
+    carry = retiros = None
+    if pm is not None:
+        try:
+            from modules.debt_carry import snapshot as _carry_snapshot
+            carry = _carry_snapshot(getattr(pm, "debt_usd", None))
+        except Exception:  # noqa: BLE001
+            log.exception("debt_carry snapshot failed (non-fatal)")
+    try:
+        from modules import retiros_personales as _rp
+        retiros = _rp.totals(_rp.all_rows())
+    except Exception:  # noqa: BLE001
+        log.exception("retiros totals failed (non-fatal)")
+    return carry, retiros
 
 
 @authorized
@@ -339,7 +383,12 @@ async def cmd_hf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from modules.pm_context import select_primary_pm_state
     wallets, market = await asyncio.gather(fetch_all_wallets(), fetch_market_data())
     pm = select_primary_pm_state(wallets, market)
-    block = format_pm_state_telegram(pm) if pm is not None else ""
+    _carry, _ret = _carry_and_retiros(pm)
+    block = format_pm_state_telegram(
+        pm, carry=_carry,
+        retiros_hype=(_ret or {}).get("hype_withdrawn"),
+        retiros_n=int((_ret or {}).get("n") or 0),
+    ) if pm is not None else ""
     if not block:
         block = (
             "⚖️ PORTFOLIO MARGIN — sin datos\n"
@@ -420,6 +469,8 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Deterministic KPI diff (equity/aave-HF/HYPE/BTC/debt/UPnL) vs the last
     # persisted /reporte snapshot. No previous snapshot → omitted silently.
     _delta_kpis = None
+    _carry_rep = _ret_rep = None
+    _prev_kpis = None
     try:
         from modules.report_delta import (
             collect_report_kpis,
@@ -427,7 +478,25 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             load_last_kpis,
         )
         _delta_kpis = collect_report_kpis(portfolio, market, header_text)
-        _delta_block = format_report_delta_block(_delta_kpis, load_last_kpis())
+        _prev_kpis = load_last_kpis()
+        # R-RONDA-OCT #1: carry snapshot (accrual tick on the observed debt)
+        # + RETIRO PERSONAL scan BEFORE the delta so the debt delta can be
+        # split into "+X por retiro, +Y por interes".
+        try:
+            from modules.pm_context import select_primary_pm_state as _sps_rep
+            _pm_rep = _sps_rep(portfolio, market)
+        except Exception:  # noqa: BLE001
+            _pm_rep = None
+        try:
+            from modules import retiros_personales as _rp
+            _scan = await asyncio.get_event_loop().run_in_executor(None, _rp.scan)
+            if _scan.get("new"):
+                log.info("RETIROS: %d evento(s) nuevo(s) detectados en /reporte", _scan["new"])
+        except Exception:  # noqa: BLE001
+            log.exception("retiros scan failed (non-fatal — ledger stale)")
+        _carry_rep, _ret_rep = _carry_and_retiros(_pm_rep)
+        _attrib = _debt_delta_attribution(_prev_kpis, _carry_rep)
+        _delta_block = format_report_delta_block(_delta_kpis, _prev_kpis, attribution=_attrib)
         if _delta_block:
             await update.message.reply_text(_delta_block, reply_markup=MAIN_KEYBOARD)
     except Exception:  # noqa: BLE001
@@ -529,6 +598,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         bounce_tech=bt,
         recent_fills=None,  # R-TRADE-LEDGER: 24h window replaced by ledger section
         market=market,
+        carry=_carry_rep, retiros=_ret_rep,
     )
     await send_long_message(
         update,
@@ -558,6 +628,19 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         _tl.set_report_cursor(_now_ms)
     except Exception:  # noqa: BLE001
         log.exception("trade ledger CIERRES section failed (non-fatal)")
+
+    # ─── Section 2-quater: RETIROS PERSONALES (R-RONDA-OCT #1b) ───────────────
+    # Same send-then-advance-cursor pattern as CIERRES. The scan already ran
+    # before the delta block; this only renders.
+    try:
+        from modules import retiros_personales as _rp
+        _rp_prev = _rp.get_report_cursor()
+        _rp_now = int(time.time() * 1000)
+        await send_long_message(update, _rp.render_section(_rp_prev, _rp_now),
+                                reply_markup=MAIN_KEYBOARD)
+        _rp.set_report_cursor(_rp_now)
+    except Exception:  # noqa: BLE001
+        log.exception("retiros section failed (non-fatal)")
 
     # ─── Section 2a: Position classification (R-REPORTE-LIVE FIX 2) ───────────
     # Deterministic per-run tagging of each open position by its REAL on-chain
@@ -709,7 +792,7 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     log.info(
         "[COST_AUDIT] /reporte deterministic assembly — LLM calls=0; "
         "sections=header,delta,x_timeline,telegram_intel,gmail_intel,positions,"
-        "classification,funding,integrity_halt,"
+        "cierres,retiros,classification,funding,integrity_halt,"
         "screener,tradermap,lmec(%s),intel30(%d blocks)",
         lmec_ok, len(intel30_blocks),
     )
@@ -747,6 +830,13 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             save_report_kpis(_delta_kpis)
     except Exception:  # noqa: BLE001
         log.exception("save_report_kpis failed (non-fatal)")
+    # R-RONDA-OCT #1a: the "desde el ultimo reporte" accumulator restarts here.
+    try:
+        from modules.debt_carry import MARK_LAST_REPORT, set_mark as _carry_mark
+        _carry_mark(MARK_LAST_REPORT,
+                    debt_usd=(_delta_kpis or {}).get("pm_debt") if _delta_kpis else None)
+    except Exception:  # noqa: BLE001
+        log.exception("debt_carry last_report mark failed (non-fatal)")
 
 
 @authorized
@@ -1125,6 +1215,56 @@ async def cmd_trackrecord(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     tr = await loop.run_in_executor(None, build_track_record)
     await send_long_message(update, format_track_record(tr),
                             reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_retiros(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-RONDA-OCT #1b — ledger completo de RETIROS PERSONALES (rescan + lista)."""
+    from modules import retiros_personales as _rp
+    loop = asyncio.get_event_loop()
+    try:
+        res = await loop.run_in_executor(None, _rp.scan)
+        head = f"(scan: {res.get('new', 0)} nuevo(s), {res.get('seen', 0)} send(s) vistos)\n"
+    except Exception as exc:  # noqa: BLE001
+        log.exception("/retiros scan failed")
+        head = f"(scan fallido: {type(exc).__name__} — lista desde el ledger persistido)\n"
+    await send_long_message(update, head + _rp.render_command(), reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_carrycursor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-RONDA-OCT #1a — reinicia el cursor del interes acumulado ('desde cursor')."""
+    from modules.debt_carry import reset_cursor, snapshot
+    from modules.pm_context import select_primary_pm_state
+    wallets, market = await asyncio.gather(fetch_all_wallets(), fetch_market_data())
+    pm = select_primary_pm_state(wallets, market)
+    debt = getattr(pm, "debt_usd", None) if pm is not None else None
+    snap = snapshot(debt)
+    ok = reset_cursor(debt)
+    msg = ("✅ Cursor de carry reiniciado ahora." if ok
+           else "❌ No se pudo reiniciar el cursor (ver /diagnostico).")
+    if snap.get("per_day") is not None:
+        msg += (f"\nAPR {snap['apr'] * 100:.2f}% ({snap['apr_label']}) · "
+                f"≈ ${snap['per_day']:,.2f}/dia sobre deuda ${float(debt or 0):,.0f}")
+    await update.message.reply_text(msg, reply_markup=MAIN_KEYBOARD)
+
+
+@authorized
+@with_error_logging
+async def cmd_atribucion(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """R-RONDA-OCT #3 — atribucion alpha/beta on-demand del ultimo ciclo
+    cerrado del ledger (o de un tag: ``/atribucion ciclo 2026-08-13``).
+
+    Antes el subsistema no tenia ningun caller: /diagnostico lo mostraba
+    como "ultimo ok nunca" siendo money path. Ahora corre solo al cerrar un
+    ciclo (run_close_alerts) y a pedido desde aca.
+    """
+    from modules.performance_attribution import attribute_last_cycle
+    arg = " ".join(context.args).strip() if context.args else None
+    text = await attribute_last_cycle(tag=arg or None)
+    await send_long_message(update, text, reply_markup=MAIN_KEYBOARD)
 
 
 @authorized
@@ -2450,6 +2590,14 @@ async def _pm_monitor_job(application: Application) -> None:
             ltv_map=_ltv,
             perp_cross_mm=_cmm,
         )
+        # R-RONDA-OCT #1a: every PM observation feeds the interest accrual
+        # (debt × live APR × Δt) so the carry line never depends on someone
+        # typing /reporte.
+        try:
+            from modules.debt_carry import observe as _carry_observe
+            _carry_observe(getattr(pm, "debt_usd", None))
+        except Exception:  # noqa: BLE001
+            log.exception("debt_carry observe failed (non-fatal)")
         # R-PMALERT: edge-trigger via SQLite. evaluate() persists the new state
         # (so a retreat resets silently) and returns the rendered alert.
         decision = _pma.evaluate(pm)
@@ -2632,8 +2780,12 @@ async def cmd_pm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             _putil, _pn = perp_cross_utilization(primary)
         except Exception:  # noqa: BLE001
             _putil, _pn = None, 0
+        _carry_pm, _ret_pm = _carry_and_retiros(pm)
         block = format_pm_state_telegram(
-            pm, perp_cross_util_pct=_putil, perp_cross_count=_pn
+            pm, perp_cross_util_pct=_putil, perp_cross_count=_pn,
+            carry=_carry_pm,
+            retiros_hype=(_ret_pm or {}).get("hype_withdrawn"),
+            retiros_n=int((_ret_pm or {}).get("n") or 0),
         ) or "⚠️ Sin datos de Portfolio Margin."
         await send_long_message(update, block, reply_markup=MAIN_KEYBOARD)
     except Exception as exc:  # noqa: BLE001
@@ -3237,6 +3389,15 @@ async def _ledger_sync_job(application: Application) -> None:
         log.info("LEDGER periodic sync: ok=%d failed=%d alerts=%d",
                  len(res.get("ok") or []), len(res.get("failed") or {}),
                  res.get("alerts") or 0)
+        # R-RONDA-OCT #1b: the RETIRO PERSONAL ledger rides the same cadence
+        # (boot +2min, then every LEDGER_SYNC_HOURS) so it is complete before
+        # anyone reads /reporte.
+        try:
+            from modules import retiros_personales as _rp
+            rres = await asyncio.get_event_loop().run_in_executor(None, _rp.scan)
+            log.info("RETIROS periodic scan: new=%s seen=%s", rres.get("new"), rres.get("seen"))
+        except Exception:  # noqa: BLE001
+            log.exception("retiros periodic scan failed (non-fatal)")
     except Exception:  # noqa: BLE001
         log.exception("ledger sync cron job failed")
 
@@ -4199,6 +4360,9 @@ HANDLER_MAP = {
     "cierres": cmd_cierres,
     # R-BOT-DEFINITIVE Fase 6
     "trackrecord": cmd_trackrecord,
+    "atribucion": cmd_atribucion,
+    "retiros": cmd_retiros,
+    "carrycursor": cmd_carrycursor,
     "log": cmd_log,
     # Round 16
     "version": cmd_version,

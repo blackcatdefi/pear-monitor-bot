@@ -134,11 +134,27 @@ def _b_x() -> dict[str, Any]:
         st = get_api_stats() or {}
         cs = get_cache_state() or {}
         out["live"] = bool(X_LIVE_ENABLED)
-        out["llamadas_hoy"] = st.get("count", 0)
+        out["calls_24h"] = st.get("calls_24h")
         out["ultimo_exito"] = cs.get("last_success_at")
         out["horas_desde_exito"] = _hours_since_iso(cs.get("last_success_at"))
     except Exception as exc:  # noqa: BLE001
         out["_error_stats"] = f"{type(exc).__name__}: {exc}"[:160]
+    # R-RONDA-OCT #4: "llamadas hoy" comes from the SAME table every paid
+    # provider call writes to (x_api_calls), counted by UTC calendar day and
+    # with NO caller filter. The old line read ``get_api_stats()["count"]`` —
+    # a key that function never returned — so it printed 0 forever, including
+    # one second after a paid /xrefresh.
+    try:
+        from modules.intel_memory import x_calls_today_summary
+        hoy = x_calls_today_summary() or {}
+        out["llamadas_hoy"] = int(hoy.get("total") or 0)
+        out["llamadas_hoy_pagas"] = int(hoy.get("pagas") or 0)
+        out["costo_hoy_usd"] = float(hoy.get("cost_usd") or 0.0)
+        out["llamadas_hoy_por_caller"] = hoy.get("por_caller") or []
+        if hoy.get("error"):
+            out["_error_llamadas_hoy"] = hoy["error"]
+    except Exception as exc:  # noqa: BLE001
+        out["_error_llamadas_hoy"] = f"{type(exc).__name__}: {exc}"[:160]
     # The age of the DATA, not of the last fetch attempt — the number that
     # would have exposed the 27-day blackout on day one.
     try:
@@ -148,13 +164,18 @@ def _b_x() -> dict[str, Any]:
         out["timeline_degradado"] = bool(_st.get("degraded"))
     except Exception as exc:  # noqa: BLE001
         out["_error_staleness"] = f"{type(exc).__name__}: {exc}"[:160]
+    # R-RONDA-OCT #4: the old block imported ``modules.x_costs`` — a module
+    # that does not exist in this repo — and swallowed the ImportError, so
+    # ``creditos_restantes`` was always None. twitterapi.io is pay-per-call
+    # (no credit balance to read); what the panel can honestly show is the
+    # month-to-date spend and projection from x_store.
     try:
-        from modules.x_costs import credits_remaining
-        out["creditos_restantes"] = credits_remaining()
-    except Exception:  # noqa: BLE001
-        # No existe el modulo de creditos en todos los backends: no es un
-        # fallo, es que ese backend no cobra por credito.
-        out["creditos_restantes"] = None
+        from modules.x_store import usage_state
+        us = usage_state() or {}
+        out["gasto_mtd_usd"] = float(us.get("mtd_cost_usd") or 0.0)
+        out["proyeccion_mes_usd"] = float(us.get("projected_month_cost_usd") or 0.0)
+    except Exception as exc:  # noqa: BLE001
+        out["_error_usage"] = f"{type(exc).__name__}: {exc}"[:160]
     return out
 
 
@@ -489,8 +510,31 @@ def _b_claves() -> dict[str, Any]:
     }
 
 
+def _b_deuda() -> dict[str, Any]:
+    """R-RONDA-OCT #1: carry (APR provenance + accrual) and RETIRO ledger,
+    read from cache/DB only — no network from /diagnostico."""
+    out: dict[str, Any] = {}
+    try:
+        from modules.debt_carry import diagnostics as _dc
+        out["carry"] = _dc()
+    except Exception as exc:  # noqa: BLE001
+        out["carry"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:160]}
+    try:
+        from modules.retiros_personales import diagnostics as _rd
+        out["retiros"] = _rd()
+    except Exception as exc:  # noqa: BLE001
+        out["retiros"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:160]}
+    try:
+        from modules.hl_client import candle_cache_stats
+        out["hl_candles"] = candle_cache_stats()
+    except Exception as exc:  # noqa: BLE001
+        out["hl_candles"] = {"error": f"{type(exc).__name__}: {exc}"[:160]}
+    return out
+
+
 BLOQUES: dict[str, Callable[[], Any]] = {
     "subsistemas": _b_subsistemas,
+    "deuda": _b_deuda,
     "ledger": _b_ledger,
     "invariantes": _b_invariantes,
     "x": _b_x,
@@ -692,8 +736,12 @@ def format_diagnosis(d: dict[str, Any]) -> str:
     # problemas accionables. Los subsistemas que nunca reportaron un exito se
     # cuentan aparte, porque "nadie lo probo nunca" no es "anda bien".
     sub = d.get("subsistemas") or {}
+    # R-RONDA-OCT #3: an EVENT subsystem (kind="event") that has not had its
+    # event yet is not "sin exito": it has not had a chance. Only continuous
+    # subsystems with no success ever count here.
     nunca = sum(1 for e in (sub.get("subsystems") or {}).values()
-                if e.get("stale_hours") is None)
+                if e.get("stale_hours") is None
+                and e.get("kind", "continuous") != "event")
     if d.get("ok"):
         cab = "\u2705 SIN PROBLEMAS ACCIONABLES"
         if nunca:
@@ -713,10 +761,15 @@ def format_diagnosis(d: dict[str, Any]) -> str:
     L.append("\n*Subsistemas*")
     for nombre, e in sorted((sub.get("subsystems") or {}).items()):
         h = e.get("stale_hours")
-        cuando = f"hace {h:.0f}h" if isinstance(h, (int, float)) else "nunca"
+        if isinstance(h, (int, float)):
+            cuando = f"ultimo ok hace {h:.0f}h"
+        elif e.get("kind", "continuous") == "event":
+            cuando = (f"sin corridas aun — corre al {e.get('trigger') or 'evento'}")
+        else:
+            cuando = "ultimo ok nunca"
         money = "\U0001f4b0" if e.get("money") else "  "
         L.append(f"  {_tick(e.get('ok'))}{money} {e.get('label', nombre)} "
-                 f"— ultimo ok {cuando}")
+                 f"— {cuando}")
 
     inv = d.get("invariantes") or {}
     L.append("\n*Invariantes del money path*")
@@ -887,14 +940,55 @@ def format_diagnosis(d: dict[str, Any]) -> str:
             L.append(f"  {_tick(k.get('presente'))} {k.get('nombre')}"
                      f" — {k.get('para')}")
 
+    de = d.get("deuda") or {}
+    if de and not de.get("_error"):
+        L.append("\n*Deuda PM: carry y retiros*")
+        c = de.get("carry") or {}
+        if c.get("ok"):
+            apr = c.get("apr")
+            src = c.get("apr_source")
+            if apr is None:
+                apr_txt = "APR: sin lectura aun" + (f" ({c.get('apr_error')})" if c.get("apr_error") else "")
+            elif src == "config":
+                apr_txt = f"APR {apr * 100:.2f}% CONFIG — HL no leido ({c.get('apr_error')})"
+            else:
+                apr_txt = f"APR {apr * 100:.2f}% ({'HL live' if src == 'hl_live' else 'HL cache'} {c.get('apr_age_min', 0):.0f}min)"
+            L.append(f"  {_tick(src != 'config' and apr is not None)} {apr_txt} · "
+                     f"interes acumulado ≈ ${float(c.get('accrued_total') or 0):,.2f} "
+                     f"en {c.get('ticks', 0)} ticks")
+        else:
+            L.append(f"  ❌ carry: {c.get('error')}")
+        r = de.get("retiros") or {}
+        if r.get("ok"):
+            L.append(f"  {_tick(True)} retiros personales: {r.get('n', 0)} · "
+                     f"USDC prestado ≈ ${float(r.get('usdc_borrowed') or 0):,.2f} · "
+                     f"HYPE retirado {float(r.get('hype_withdrawn') or 0):.4g}"
+                     + (" · scan nunca corrido" if not r.get("scan_cursor_ms") else ""))
+        else:
+            L.append(f"  ❌ retiros: {r.get('error')}")
+        hc = de.get("hl_candles") or {}
+        if "series" in hc:
+            L.append(f"  velas HL en cache: {hc.get('series')} series · "
+                     f"cooldown host {hc.get('host_cooldown_sec', 0)}s · "
+                     f"cooldown candles {hc.get('type_cooldown_sec', 0)}s")
+
     x = d.get("x") or {}
     if not x.get("_error"):
         L.append("\n*X / costos*")
+        if x.get("_error_llamadas_hoy"):
+            hoy_txt = f"llamadas hoy: NO LEIDO ({x['_error_llamadas_hoy']})"
+        else:
+            hoy_txt = (f"{x.get('llamadas_hoy', 0)} llamadas hoy "
+                       f"({x.get('llamadas_hoy_pagas', 0)} pagas · "
+                       f"${float(x.get('costo_hoy_usd') or 0.0):.3f})")
         L.append(f"  backend {x.get('backend')} · live "
-                 f"{'ON' if x.get('live') else 'OFF'} · "
-                 f"{x.get('llamadas_hoy', 0)} llamadas hoy"
-                 + (f" · creditos {x['creditos_restantes']}"
-                    if x.get("creditos_restantes") is not None else ""))
+                 f"{'ON' if x.get('live') else 'OFF'} · {hoy_txt}"
+                 + (f" · MTD ${float(x.get('gasto_mtd_usd') or 0.0):.2f}"
+                    if x.get("gasto_mtd_usd") is not None else ""))
+        callers = x.get("llamadas_hoy_por_caller") or []
+        if callers:
+            L.append("  por caller: " + " · ".join(
+                f"{c.get('caller')} {c.get('calls')}" for c in callers[:6]))
 
     return "\n".join(L)
 

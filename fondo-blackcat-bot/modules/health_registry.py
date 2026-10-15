@@ -86,8 +86,15 @@ SUBSYSTEMS: dict[str, dict[str, Any]] = {
     "gmail":        {"label": "Gmail intel",           "section": "intel",     "money": False},
     "intel_feeds":  {"label": "Feeds de intel",        "section": "intel",     "money": False},
     "backup":       {"label": "Backup sqlite",         "section": "ops",       "money": False},
-    "attribution":  {"label": "Atribucion de performance", "section": "pnl",   "money": True},
+    # R-RONDA-OCT #3: ``kind: "event"`` = the subsystem only runs when its
+    # event happens (``trigger`` says which), so "no ok yet" is NOT a failure
+    # and /diagnostico must say "corre al <evento>" instead of "nunca".
+    "attribution":  {"label": "Atribucion de performance", "section": "pnl",   "money": True,
+                     "kind": "event", "trigger": "cierre de ciclo (y /atribucion)"},
     "integrity":    {"label": "Reconciliacion de integridad", "section": "intel", "money": False},
+    # R-RONDA-OCT #1: the two halves of "why did the debt move".
+    "debt_carry":   {"label": "Carry deuda USDC (APR/interes)", "section": "pm", "money": True},
+    "retiros":      {"label": "Retiros personales (borrow→HYPE→EVM)", "section": "pm", "money": True},
 }
 
 # Secciones -> subsistemas que las alimentan (para el banner).
@@ -386,6 +393,9 @@ def all_status() -> dict[str, Any]:
         entry["label"] = spec["label"]
         entry["money"] = spec["money"]
         entry["section"] = spec["section"]
+        entry["kind"] = spec.get("kind", "continuous")
+        if spec.get("trigger"):
+            entry["trigger"] = spec["trigger"]
         entry["stale_hours"] = _hours_since(entry.get("last_ok_utc"))
         out["subsystems"][name] = entry
     # Filas de subsistemas que no estan en el catalogo (alguien llamo

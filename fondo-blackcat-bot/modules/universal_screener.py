@@ -481,6 +481,13 @@ async def _evaluate_one(
     if vi.on_hl:
         retries = fetch_retries()
         for attempt in range(retries + 1):
+            # R-RONDA-OCT #2: a cooling-down host is not a transient miss;
+            # retrying 180 names against it is the storm. Skip the fetch, the
+            # name is excluded for this sweep (never fabricated) and the sweep
+            # reports how many were skipped.
+            if _hl_cooling_down():
+                _COOLDOWN_SKIPS["n"] += 1
+                break
             async with sem:
                 closes = await fetch_4h_closes(ticker, int(k["z_lookback_bars"]) + 6)
             if closes:
@@ -557,6 +564,17 @@ class ScreenResult:
     constants: dict[str, float] = field(default_factory=dict)
 
 
+_COOLDOWN_SKIPS: dict[str, int] = {"n": 0}
+
+
+def _hl_cooling_down() -> bool:
+    try:
+        from modules.hl_client import cooling_down
+        return cooling_down("candleSnapshot")
+    except Exception:  # noqa: BLE001 — an unavailable client is not a cooldown
+        return False
+
+
 async def compute_screen(advance_state: bool = False) -> ScreenResult:
     """Assemble the universe, run the five-gate engine over EVERY asset, rank by
     shortability, and collect the long-context + data-insufficient buckets.
@@ -587,10 +605,17 @@ async def compute_screen(advance_state: bool = False) -> ScreenResult:
         notes.append(f"Universo limitado a {cap} por SCREENER_MAX_ASSETS (más líquidos primero).")
 
     sem = asyncio.Semaphore(fetch_concurrency())
+    _COOLDOWN_SKIPS["n"] = 0
     rows = await asyncio.gather(*[
         _evaluate_one(vi, k, prev_state, btc_closes, advance_state=advance_state, sem=sem)
         for vi in items
     ])
+    if _COOLDOWN_SKIPS["n"]:
+        notes.append(
+            f"HL en cooldown (429/5xx): {_COOLDOWN_SKIPS['n']} nombres sin velas "
+            "en este barrido — excluidos, no fabricados.")
+        log.warning("screener: HL cooldown — %d names skipped this sweep",
+                    _COOLDOWN_SKIPS["n"])
 
     ranked = [r for r in rows if r.data_ok]
     ranked.sort(key=lambda r: r.score, reverse=True)

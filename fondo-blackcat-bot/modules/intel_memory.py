@@ -319,6 +319,54 @@ def count_x_calls_today_live_only() -> int:
         return 0
 
 
+def x_calls_today_summary() -> dict[str, Any]:
+    """R-RONDA-OCT #4: EVERY paid provider call of the UTC day, whatever the
+    caller (reporte, xrefresh, extras, fetch_x_intel, ...).
+
+    /diagnostico printed "0 llamadas hoy" one second after a paid /xrefresh
+    because it read a key (``count``) that ``get_api_stats`` never produced.
+    This is the single counter the panel now reads: rows of ``x_api_calls``
+    since UTC midnight, with the paid subset (est_cost_usd > 0), the summed
+    cost and the per-caller split so the number can be audited against
+    /costos_x. NEVER raises; on failure the dict carries ``error`` so the
+    panel can say so instead of printing a reassuring zero.
+    """
+    try:
+        conn = _get_conn()
+        now = datetime.now(timezone.utc)
+        day_start = ts_bound(now.replace(hour=0, minute=0, second=0, microsecond=0))
+        row = conn.execute(
+            "SELECT COUNT(*) AS c, "
+            "       SUM(CASE WHEN COALESCE(est_cost_usd,0) > 0 THEN 1 ELSE 0 END) AS pagas, "
+            "       COALESCE(SUM(est_cost_usd),0) AS cost "
+            "FROM x_api_calls WHERE " + TS_NORM + " >= ?",
+            (day_start,),
+        ).fetchone()
+        por_caller = conn.execute(
+            "SELECT COALESCE(caller,'?') AS caller, COUNT(*) AS c, "
+            "       COALESCE(SUM(est_cost_usd),0) AS cost "
+            "FROM x_api_calls WHERE " + TS_NORM + " >= ? "
+            "GROUP BY caller ORDER BY c DESC",
+            (day_start,),
+        ).fetchall()
+        conn.close()
+        return {
+            "total": int(row["c"] or 0),
+            "pagas": int(row["pagas"] or 0),
+            "cost_usd": float(row["cost"] or 0.0),
+            "por_caller": [
+                {"caller": r["caller"], "calls": int(r["c"] or 0),
+                 "cost_usd": float(r["cost"] or 0.0)}
+                for r in por_caller
+            ],
+        }
+    except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("x_api", "x_calls_today_summary")
+        log.exception("x_calls_today_summary failed")
+        return {"total": 0, "pagas": 0, "cost_usd": 0.0, "por_caller": [],
+                "error": f"{type(exc).__name__}: {exc}"[:120]}
+
+
 def should_send_75pct_alert(used: int, cap: int) -> bool:
     """Round 15: return True if we just crossed 75% of the daily cap and
     haven't already alerted today. Throttled via x_api_alerts table.

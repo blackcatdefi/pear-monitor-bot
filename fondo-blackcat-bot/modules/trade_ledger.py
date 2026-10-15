@@ -1810,6 +1810,18 @@ async def run_close_alerts(bot, wallets_payload: list[dict[str, Any]],
                                cooldown_hours=24 * 365):
                     await _send(bot, chat_id, render_cycle_subtotal(wallet, tag), send)
                     sent += 1
+                    # R-RONDA-OCT #3: performance attribution had no caller;
+                    # a fully-closed cycle IS the event it was written for.
+                    try:
+                        from modules.performance_attribution import attribute_ledger_cycle
+                        attr_text = await attribute_ledger_cycle(wallet, tag)
+                        if attr_text:
+                            await _send(bot, chat_id, attr_text, send)
+                            sent += 1
+                    except Exception:  # noqa: BLE001
+                        health_registry.swallowed("attribution", "run_close_alerts")
+                        log.exception("LEDGER attribution for %s/%s failed (non-fatal)",
+                                      wallet[:6], tag)
         except Exception:  # noqa: BLE001
             health_registry.swallowed("ledger", "run_close_alerts")
             log.exception("LEDGER close alert failed for %s %s (non-fatal)",
@@ -1993,6 +2005,73 @@ def render_cierres_section(prev_ms: int, now_ms: int) -> str:
                      "(backfill completo) esta disponible via /cierres")
     lines.append(_formula_footer())
     return "\n".join(lines)
+
+
+def last_closed_for_wallet(wallet: str) -> dict[str, Any] | None:
+    """R-RONDA-OCT #5: the most recent CLOSED cycle (or single closed leg) of
+    *wallet* as the ledger knows it — ``{tag, close_ts, net_pnl, legs,
+    wallets}`` — or None when the ledger holds nothing for that wallet.
+
+    This is the ONLY legitimate source for an "IDLE (last basket closed
+    NET ...)" label. ``fund_state.BASKET_STATUS`` was a hand-edited constant
+    ("v4 closed NET $290.20, v5 pending capital", 2026-04-20) that nobody
+    updated after the v1/v2/v3 public baskets of Jul-Aug 2026, so the
+    positions panel printed a six-month-old figure under every empty wallet.
+    NEVER raises (returns None on any failure and marks the ledger degraded).
+    """
+    w = (wallet or "").lower()
+    if not w:
+        return None
+    try:
+        con = _conn()
+        try:
+            last = con.execute(
+                "SELECT cycle_tag, MAX(close_ts) AS close_ts FROM ledger_positions "
+                "WHERE LOWER(wallet)=? ORDER BY close_ts DESC LIMIT 1", (w,)
+            ).fetchone()
+            if last is None or not last["close_ts"]:
+                return None
+            tag = last["cycle_tag"]
+            if tag:
+                rows = con.execute(
+                    "SELECT wallet, net_pnl FROM ledger_positions "
+                    "WHERE cycle_tag=? AND LOWER(wallet)=?", (tag, w)).fetchall()
+            else:
+                rows = con.execute(
+                    "SELECT wallet, net_pnl FROM ledger_positions "
+                    "WHERE LOWER(wallet)=? AND close_ts=?",
+                    (w, int(last["close_ts"]))).fetchall()
+        finally:
+            con.close()
+        return {
+            "tag": tag or "cierre suelto",
+            "close_ts": int(last["close_ts"]),
+            "net_pnl": float(sum(float(r["net_pnl"] or 0.0) for r in rows)),
+            "legs": len(rows),
+        }
+    except Exception as exc:  # noqa: BLE001
+        health_registry.swallowed("ledger", f"last_closed_for_wallet: {exc}")
+        log.warning("LEDGER last_closed_for_wallet(%s) failed: %s", w[:6], exc)
+        return None
+
+
+def idle_label_for_wallet(wallet: str) -> str:
+    """Positions-panel text for a wallet with no live perp positions, derived
+    from the ledger (never from a constant). Says "sin cierres en el ledger"
+    when there is nothing to derive from instead of inventing a basket."""
+    last = last_closed_for_wallet(wallet)
+    if not last:
+        return "IDLE — sin cierres en el ledger para esta wallet. Sin posicion activa."
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        day = _dt.fromtimestamp(last["close_ts"] / 1000, tz=_tz.utc).strftime("%Y-%m-%d")
+    except (TypeError, ValueError, OSError, OverflowError):
+        day = "?"
+    return (
+        f"IDLE (ultimo cierre {last['tag']} el {day}: NET {_fmt_usd(last['net_pnl'])}, "
+        f"{last['legs']} pata{'s' if last['legs'] != 1 else ''}). "
+        "Sin posicion activa."
+    )
 
 
 def render_cycle_subtotal(wallet: str, tag: str) -> str:

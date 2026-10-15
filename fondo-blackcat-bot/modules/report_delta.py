@@ -239,8 +239,34 @@ def _delta_line(label: str, prev: Any, curr: Any, *, kind: str) -> str | None:
     return f"{label}: {_fmt_usd(p)} → {_fmt_usd(c)}  {arrow} {d:+,.0f}{pct}"
 
 
+def debt_attribution_line(prev_debt: Any, curr_debt: Any,
+                          attribution: dict[str, Any] | None) -> str | None:
+    """R-RONDA-OCT #1: 'deuda: +X por retiro, +Y por interes, ±Z sin atribuir'.
+
+    The residual is printed, never hidden: a debt move the two causes do not
+    explain (repayment, a borrow for a trade, fees) must stay visible.
+    """
+    p, c = _f(prev_debt), _f(curr_debt)
+    if p is None or c is None or not isinstance(attribution, dict):
+        return None
+    retiro = _f(attribution.get("retiro"))
+    interes = _f(attribution.get("interes"))
+    if retiro is None and interes is None:
+        return None
+    parts = []
+    if retiro is not None:
+        parts.append(f"{retiro:+,.0f} por retiro")
+    if interes is not None:
+        parts.append(f"{interes:+,.0f} por interes")
+    resto = (c - p) - (retiro or 0.0) - (interes or 0.0)
+    if abs(resto) >= 1.0:
+        parts.append(f"{resto:+,.0f} sin atribuir")
+    return "   └ deuda: " + ", ".join(parts)
+
+
 def format_report_delta_block(
     current: dict[str, Any], previous: dict[str, Any] | None,
+    *, attribution: dict[str, Any] | None = None,
 ) -> str:
     """The DELTA block. '' when there is no previous snapshot. NEVER raises."""
     try:
@@ -257,6 +283,8 @@ def format_report_delta_block(
                         current.get("btc_mark"), kind="px"),
             _delta_line("🏦 PM deuda", previous.get("pm_debt"),
                         current.get("pm_debt"), kind="usd"),
+            debt_attribution_line(previous.get("pm_debt"), current.get("pm_debt"),
+                                  attribution),
             _delta_line("📈 Σ PERP UPnL", previous.get("perp_upnl"),
                         current.get("perp_upnl"), kind="usd"),
         ]

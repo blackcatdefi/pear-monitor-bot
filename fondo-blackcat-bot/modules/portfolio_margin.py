@@ -736,6 +736,9 @@ def format_pm_state_telegram(
     *,
     perp_cross_util_pct: float | None = None,
     perp_cross_count: int = 0,
+    carry: dict[str, Any] | None = None,
+    retiros_hype: float | None = None,
+    retiros_n: int = 0,
 ) -> str:
     """Telegram block for the Portfolio Margin state. NEVER raises.
 
@@ -762,8 +765,25 @@ def format_pm_state_telegram(
     hype_line = f"├─ Colateral: {_fmt_usd(pm.collateral_usd)}"
     if pm.hype_qty > 0 and pm.hype_px > 0:
         hype_line += f"  ({pm.hype_qty:,.1f} HYPE × ${pm.hype_px:,.2f})"
+    # R-RONDA-OCT #1b: the stack count is the LIVE balance; what left the
+    # stack as personal withdrawals is printed next to it so the collateral
+    # line never reads as "intact" after a retiro.
+    if retiros_hype is not None and retiros_hype > 0:
+        hype_line += (f"  · retiros personales acumulados −{retiros_hype:.4g} HYPE"
+                      f" ({retiros_n} retiro{'s' if retiros_n != 1 else ''})")
     lines.append(hype_line)
     lines.append(f"├─ Deuda (USDC/USDH borrowed): {_fmt_usd(pm.debt_usd)}")
+    # R-RONDA-OCT #1a: live APR + accrued interest (per day / since last
+    # report / since cursor), with provenance. Opt-in: callers that have the
+    # carry snapshot pass it; renderers without it print the panel unchanged.
+    if carry:
+        try:
+            from modules.debt_carry import panel_line as _carry_line
+            _cl = _carry_line(carry)
+            if _cl:
+                lines.append(_cl)
+        except Exception:  # noqa: BLE001
+            health_registry.swallowed("debt_carry", "format_pm_state_telegram: carry line")
     lines.append(
         f"├─ Capacidad borrow (LTV {(pm.max_ltv or PM_HYPE_LTV):.2f}"
         + (f" · {pm.ltv_source}" if pm.ltv_source else "")

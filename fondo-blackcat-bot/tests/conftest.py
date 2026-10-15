@@ -26,6 +26,16 @@ def _reset_http_host_cooldowns():
         _uh.reset_cooldowns()
     except Exception:  # noqa: BLE001
         pass
+    # R-RONDA-OCT #2: hl_client keeps a per-type 5xx cooldown and a candle
+    # cache of its own — same reasoning, same reset.
+    try:
+        import sys as _sys
+        _hc = _sys.modules.get("modules.hl_client")
+        if _hc is not None:
+            _hc.reset_cooldowns()
+            _hc.clear_candle_cache()
+    except Exception:  # noqa: BLE001
+        pass
     yield
     try:
         from utils import http as _uh

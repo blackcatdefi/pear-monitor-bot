@@ -255,13 +255,18 @@ async def _hl_post(payload: dict[str, Any]) -> Any:
 async def _fetch_hl_weekly(limit: int = FETCH_LIMIT) -> Optional[dict[str, Any]]:
     """Closed weekly closes from HyperLiquid candleSnapshot (1w BTC). None on miss."""
     now_ms = int(time.time() * 1000)
-    interval_ms = 7 * 24 * 3600 * 1000
-    start_ms = now_ms - (int(limit) + 4) * interval_ms
     try:
-        candles = await _hl_post({
-            "type": "candleSnapshot",
-            "req": {"coin": "BTC", "interval": "1w", "startTime": start_ms, "endTime": now_ms},
-        })
+        # R-RONDA-OCT #2: shared candle cache / cooldown / weight budget.
+        if HL_INFO_URL.rstrip("/").endswith("hyperliquid.xyz/info"):
+            from modules.hl_client import get_candles
+            candles = await get_candles("BTC", "1w", int(limit) + 4)
+        else:
+            interval_ms = 7 * 24 * 3600 * 1000
+            start_ms = now_ms - (int(limit) + 4) * interval_ms
+            candles = await _hl_post({
+                "type": "candleSnapshot",
+                "req": {"coin": "BTC", "interval": "1w", "startTime": start_ms, "endTime": now_ms},
+            })
         if not isinstance(candles, list):
             return None
         closed = [c for c in candles if isinstance(c, dict)
