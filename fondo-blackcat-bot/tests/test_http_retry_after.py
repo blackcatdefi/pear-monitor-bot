@@ -126,17 +126,35 @@ def test_retry_after_en_formato_fecha_tambien_se_respeta(monkeypatch, dormidas):
 
 
 @pytest.mark.parametrize("valor", ["", "ya-mismo", "-3", None])
-def test_un_retry_after_ilegible_cae_al_exponencial_y_no_rompe(
+def test_un_429_sin_retry_after_legible_no_se_reintenta_en_la_llamada(
         monkeypatch, dormidas, valor):
+    """R-LIVE-FIX (2026-10-15) — doctrina invertida respecto de la ronda
+    R-429-RETRY-AFTER, con evidencia de produccion.
+
+    Antes: con la cabecera rota o ausente, el 429 caia al exponencial (2s) y
+    se reintentaba adentro de la misma llamada. Los logs del 15-oct muestran
+    el resultado: simple/price y /global cada ~60s, 3 intentos cada una, 429
+    en TODOS los intentos durante horas. Un 429 sin Retry-After NO dice
+    "proba en 2s": dice "no ahora". Reintentar adivinando es trafico durante
+    la penalizacion, y es lo que la alarga.
+
+    Ahora: el 429 sin cabecera legible se corta en el acto (sin dormir), el
+    host entra en cooldown (60s, exponencial por 429 consecutivo) y la
+    proxima llamada al host no toca la red hasta que venza. El exponencial
+    sigue vivo para errores que NO son 429 (ver
+    ``test_sin_cabecera_el_backoff_sigue_siendo_exponencial``)."""
     heads = {} if valor is None else {"Retry-After": valor}
     monkeypatch.setattr(uh.httpx, "AsyncClient", _cliente([
         _err(429, heads),
         _resp(200),
     ]))
-    asyncio.run(uh.get_json("https://x.test"))
-    assert dormidas == [2.0], (
-        f"con la cabecera rota hay que volver al exponencial, no quedarse "
-        f"sin esperar ni explotar: {dormidas}")
+    with pytest.raises(httpx.HTTPStatusError) as ei:
+        asyncio.run(uh.get_json("https://x.test"))
+    assert ei.value.response.status_code == 429
+    assert dormidas == [], (
+        f"un 429 sin Retry-After legible no se reintenta adivinando: {dormidas}")
+    assert uh.cooldown_remaining("https://x.test/otra") >= uh.COOLDOWN_BASE_SEC - 1
+    assert uh.cooldown_strikes("https://x.test") == 1
 
 
 def test_si_el_servidor_pide_MAS_que_el_techo_no_se_reintenta(

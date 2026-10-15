@@ -132,7 +132,10 @@ def test_capacity_line_renders_065():
         {"coin": "USDC", "total": -1.0, "borrowed": 91_600.0},
     ]
     block = format_pm_state_telegram(compute_pm_state(spot, [], {"HYPE": 54.96}))
-    assert "Capacidad borrow (LTV 0.65)" in block
+    # R-LIVE-FIX: la linea ahora lleva la procedencia del LTV al lado
+    # ("LTV 0.65 · HL live" / "LTV 0.65 · CONFIG — HL no leido (...)").
+    assert "Capacidad borrow (LTV 0.65" in block
+    assert "CONFIG — HL no leido" in block or "HL live" in block or "mapa provisto" in block
     assert "Borrow utilization (vs 65% max-borrow)" in block
     assert "LIQ PARCIAL (factor 0.8250 = LTV+(1−LTV)/2)" in block
     assert "LIQ TOTAL (factor 0.8833 = LTV+(1−LTV)×2/3)" in block

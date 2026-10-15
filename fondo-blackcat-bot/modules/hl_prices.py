@@ -126,6 +126,43 @@ def get_oracle_prices(force: bool = False) -> dict[str, float]:
         return dict(_cache["prices"])
 
 
+_prev_cache: dict[str, Any] = {"ts": 0.0, "prices": {}}
+
+
+def get_prev_day_prices(force: bool = False) -> dict[str, float]:
+    """R-LIVE-FIX: ``{COIN: prevDayPx}`` from the SAME metaAndAssetCtxs payload
+    (hl_client dedupes the request), so the report can derive 24h change from
+    HL instead of CoinGecko. Keyless, cached 45s, NEVER raises → ``{}``."""
+    now = time.time()
+    if (
+        not force
+        and _prev_cache["prices"]
+        and (now - _prev_cache["ts"]) < _CACHE_TTL_SEC
+    ):
+        return dict(_prev_cache["prices"])
+    try:
+        data = _post({"type": "metaAndAssetCtxs"})
+        if not isinstance(data, list) or len(data) < 2:
+            return dict(_prev_cache["prices"])
+        meta, ctxs = data[0], data[1]
+        universe = meta.get("universe", []) if isinstance(meta, dict) else []
+        out: dict[str, float] = {}
+        for idx, asset in enumerate(universe):
+            name = (asset.get("name") or "").upper()
+            if not name or idx >= len(ctxs):
+                continue
+            px = _safe_float((ctxs[idx] or {}).get("prevDayPx"))
+            if px and px > 0:
+                out[name] = px
+        if out:
+            _prev_cache.update(ts=now, prices=out)
+            return dict(out)
+        return dict(_prev_cache["prices"])
+    except Exception as e:  # noqa: BLE001 — robustness contract
+        log.warning("hl_prices.get_prev_day_prices failed: %s", e)
+        return dict(_prev_cache["prices"])
+
+
 def get_price(coin: str, force: bool = False) -> float | None:
     """Live oracle price for one coin (kHYPE→HYPE proxy). None if unknown."""
     if not coin:

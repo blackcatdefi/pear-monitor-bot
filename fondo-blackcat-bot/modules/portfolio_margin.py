@@ -99,6 +99,10 @@ class PMState:
     max_ltv: float = 0.0
     liq_threshold: float = 0.0
     aave_hf: float = 0.0
+    # R-LIVE-FIX (2026-10-15): de donde salio el LTV que alimenta la escalera.
+    # "HL live" / "HL cache Nmin" / "mapa provisto" / "CONFIG — HL no leido
+    # (<error>)". Un 0.65 de config NUNCA se imprime igual que un 0.65 medido.
+    ltv_source: str = ""
     current_ltv: float = 0.0
     price_buffer_pct: float = 0.0
     risk_emoji: str = "🟢"
@@ -471,6 +475,27 @@ def _committed_resting_notional(
     return total, count
 
 
+def _ltv_source_for(ltv_map: dict[str, float] | None) -> str:
+    """Label the provenance of the LTV used by the ladder. NEVER raises.
+
+    R-LIVE-FIX: ``get_collateral_ltv_map`` fallo con 422 durante semanas y la
+    escalera siguio imprimiendo el LTV de config como si fuera medido. Esta
+    etiqueta viaja con el PMState para que el panel lo diga.
+    """
+    has_hype = bool(ltv_map) and "HYPE" in {str(k).upper() for k in ltv_map}
+    try:
+        from modules.hl_borrow_lend import ltv_map_provenance, ltv_source_label
+        prov = ltv_map_provenance()
+    except Exception:  # noqa: BLE001 — isolated tests without the module
+        return "mapa provisto" if has_hype else "CONFIG — sin mapa LTV"
+    if has_hype:
+        if prov.get("source") in ("hl_live", "hl_cache"):
+            return ltv_source_label("HYPE")
+        return "mapa provisto"
+    err = str(prov.get("error") or "sin lectura")[:60]
+    return f"CONFIG — HL no leido ({err})"
+
+
 def compute_pm_state(
     spot_balances: list[dict[str, Any]] | None,
     positions: list[dict[str, Any]] | None,
@@ -627,6 +652,7 @@ def compute_pm_state(
     max_ltv = metrics["max_ltv"]
     liq_threshold = metrics["liq_threshold"]
     risk_emoji, risk_label = risk_tier(aave_hf, has_debt=(debt > 1.0))
+    ltv_source = _ltv_source_for(ltv_map)
 
     return PMState(
         collateral_usd=collateral,
@@ -648,6 +674,7 @@ def compute_pm_state(
         max_ltv=max_ltv,
         liq_threshold=liq_threshold,
         aave_hf=aave_hf,
+        ltv_source=ltv_source,
         current_ltv=current_ltv,
         price_buffer_pct=price_buffer_pct,
         risk_emoji=risk_emoji,
@@ -738,7 +765,9 @@ def format_pm_state_telegram(
     lines.append(hype_line)
     lines.append(f"├─ Deuda (USDC/USDH borrowed): {_fmt_usd(pm.debt_usd)}")
     lines.append(
-        f"├─ Capacidad borrow (LTV {(pm.max_ltv or PM_HYPE_LTV):.2f}): {_fmt_usd(pm.capacity_usd)}"
+        f"├─ Capacidad borrow (LTV {(pm.max_ltv or PM_HYPE_LTV):.2f}"
+        + (f" · {pm.ltv_source}" if pm.ltv_source else "")
+        + f"): {_fmt_usd(pm.capacity_usd)}"
         f"  | head-room borrow: {_fmt_usd(pm.available_usd)}"
     )
     # P1.5: resting limit orders reserve capital — never present head-room as

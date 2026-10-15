@@ -46,6 +46,31 @@ Y una nota sobre el metodo, que importa mas que el parche: la ronda anterior
 declaro el 429 "cerrado" con UN /diagnostico limpio. Un solo panel verde entre
 dos castigos no es evidencia de que algo se arreglo — es evidencia de que en
 ese momento no estaba fallando. No es lo mismo.
+
+R-LIVE-FIX (2026-10-15) — EL CUARTO DEFECTO: EL BACKOFF NO SOBREVIVIA A LA LLAMADA
+================================================================================
+Produccion mostro la tormenta completa: ``simple/price`` y ``/global`` cada
+~60s, 3 intentos cada una, 429 en TODAS, "market" degradado de forma continua
+durante horas. Las dos rondas anteriores arreglaron el backoff DENTRO de una
+llamada (Retry-After, techo, jitter) pero cada llamada nueva arrancaba de cero:
+el refresco proactivo del dashboard corria cada 30s y, como el fallo no se
+cacheaba, cada corrida volvia a pegarle a CoinGecko con tres intentos. Un
+backoff que se olvida al terminar la llamada no es backoff: es una pausa.
+
+Lo que agrega esta ronda es un **cooldown por host, compartido entre
+llamadores y persistente entre llamadas** (``_HOST_COOLDOWN``):
+
+* al recibir un 429 se anota ``cooldown_until[host]``: lo que pida
+  ``Retry-After`` o, si no viene (CoinGecko keyless no lo manda), un castigo
+  que ARRANCA en 60s y SE DUPLICA por cada 429 consecutivo hasta 15 min;
+* mientras el host esta en cooldown, ``request_json`` NO toca la red: levanta
+  ``HostCoolingDown`` al instante (el llamador lo trata como fallo y declara
+  su degradacion como siempre — nada se esconde, solo no se insiste);
+* un 2xx del host resetea el contador.
+
+Un 429 tragado y reintentado cada 30s era trafico durante la penalizacion:
+exactamente lo que la alarga. Ahora el primer 429 compra 60s de silencio, el
+segundo 120s, y asi.
 """
 from __future__ import annotations
 
@@ -61,6 +86,78 @@ import httpx
 log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
+
+# ─── R-LIVE-FIX: cooldown por host tras 429 ─────────────────────────────────
+# Castigo inicial cuando el servidor no manda Retry-After, y techo del castigo
+# exponencial. 60s es el minimo que CoinGecko keyless pide en la practica.
+COOLDOWN_BASE_SEC = 60.0
+COOLDOWN_MAX_SEC = 900.0
+# {host: {"until": epoch, "strikes": n}}
+_HOST_COOLDOWN: dict[str, dict[str, float]] = {}
+
+
+class HostCoolingDown(Exception):
+    """El host esta en castigo por 429 reciente: no se toca la red."""
+
+    def __init__(self, host: str, remaining: float, strikes: int) -> None:
+        self.host = host
+        self.remaining = remaining
+        self.strikes = strikes
+        super().__init__(
+            f"{host} en cooldown por 429 ({remaining:.0f}s restantes, "
+            f"{strikes} seguido{'s' if strikes != 1 else ''})")
+
+
+def _host_of(url: str) -> str:
+    try:
+        return httpx.URL(url).host or url
+    except Exception:  # noqa: BLE001
+        return url
+
+
+def cooldown_remaining(url: str) -> float:
+    """Segundos de castigo que le quedan al host de ``url`` (0 si ninguno)."""
+    st = _HOST_COOLDOWN.get(_host_of(url))
+    if not st:
+        return 0.0
+    return max(0.0, float(st.get("until", 0.0)) - time.time())
+
+
+def cooldown_strikes(url: str) -> int:
+    st = _HOST_COOLDOWN.get(_host_of(url))
+    return int(st.get("strikes", 0)) if st else 0
+
+
+def _is_429(exc: Exception) -> bool:
+    resp = getattr(exc, "response", None)
+    return resp is not None and getattr(resp, "status_code", None) == 429
+
+
+def _note_429(url: str, exc: Exception) -> float:
+    """Registra un 429 del host y devuelve el castigo aplicado (segundos).
+
+    Retry-After manda si viene; si no, exponencial 60·2^(strikes-1) con techo.
+    """
+    host = _host_of(url)
+    st = _HOST_COOLDOWN.setdefault(host, {"until": 0.0, "strikes": 0.0})
+    st["strikes"] = float(st.get("strikes", 0)) + 1
+    pedido = _retry_after_sec(exc)
+    if pedido is not None and pedido > 0:
+        castigo = pedido
+    else:
+        castigo = COOLDOWN_BASE_SEC * (2 ** (int(st["strikes"]) - 1))
+    castigo = min(castigo, COOLDOWN_MAX_SEC)
+    st["until"] = max(float(st.get("until", 0.0)), time.time() + castigo)
+    return castigo
+
+
+def _note_success(url: str) -> None:
+    _HOST_COOLDOWN.pop(_host_of(url), None)
+
+
+def reset_cooldowns() -> None:
+    """Solo para tests."""
+    _HOST_COOLDOWN.clear()
 
 # Techo del backoff. CoinGecko a veces manda Retry-After: 60. Un reporte no
 # puede quedarse 60 segundos colgado de una fuente de contexto, asi que se
@@ -138,16 +235,39 @@ async def request_json(
     Honours ``Retry-After`` on the responses that carry it, jitters the wait,
     and never sleeps after the final attempt.
     """
+    # R-LIVE-FIX: si el host esta en castigo, no se insiste. El llamador ve
+    # un fallo (y declara su degradacion); lo que no hay es trafico.
+    restante = cooldown_remaining(url)
+    if restante > 0:
+        raise HostCoolingDown(_host_of(url), restante, cooldown_strikes(url))
+
     last_exc: Exception | None = None
     for attempt in range(max_retries):
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.request(method, url, **kwargs)
                 resp.raise_for_status()
+                _note_success(url)
                 return resp.json()
         except (httpx.HTTPError, asyncio.TimeoutError) as exc:
             last_exc = exc
             ultimo = attempt == max_retries - 1
+            if _is_429(exc):
+                # R-LIVE-FIX: el 429 se anota a nivel host ANTES de decidir
+                # el reintento, asi el castigo sobrevive a esta llamada y lo
+                # ven todos los llamadores. Si el servidor dice cuanto
+                # esperar (Retry-After) el reintento en-llamada sigue abajo
+                # como siempre; si NO lo dice (CoinGecko keyless), adivinar
+                # 2s/4s es trafico durante la penalizacion: se corta aca y se
+                # vuelve recien cuando venza el cooldown.
+                castigo = _note_429(url, exc)
+                if _retry_after_sec(exc) is None:
+                    log.warning(
+                        "HTTP %s %s: 429 sin Retry-After — host en cooldown "
+                        "%.0fs (%d seguido%s); sin reintento en esta llamada",
+                        method, url, castigo, cooldown_strikes(url),
+                        "s" if cooldown_strikes(url) != 1 else "")
+                    break
             if ultimo:
                 # Dormir aca no compra nada: no queda ningun intento que
                 # aprovechar la espera. Solo agrega latencia al fallo.

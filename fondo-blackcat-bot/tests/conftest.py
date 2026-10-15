@@ -11,3 +11,24 @@ import sys
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _reset_http_host_cooldowns():
+    """R-LIVE-FIX: el cooldown por host de utils.http es estado de proceso.
+    Sin este reset, un 429 simulado en un test castigaria al host en el
+    siguiente (todos usan https://x.test) y la suite dependeria del orden."""
+    try:
+        from utils import http as _uh
+        _uh.reset_cooldowns()
+    except Exception:  # noqa: BLE001
+        pass
+    yield
+    try:
+        from utils import http as _uh
+        _uh.reset_cooldowns()
+    except Exception:  # noqa: BLE001
+        pass
